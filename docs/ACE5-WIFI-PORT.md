@@ -317,3 +317,16 @@ giulia、单 XNU CPU、bootcpu1、10..300 秒有限会话，以及其他实验�
 与 AOP ACK。另有测试提取实际 loader quiet 控制流，检查中断先于 ACK、请求取消、
 内核返回和 ACK 清除/中断恢复；CPU 间缓存、真实固件 ACK 仍需真机验证。
 使用 `phone.py run --aop-channel-test` 显式选择；普通启动流程默认关闭。
+
+此轮首次构建 `74ba6f7` 的 host tests 与 loader 通过，但完整 XNU 因共享头文件
+目录错误而失败；修正至 `bsd/sys` 后，提交
+`1b8545d8b152e88f19ac31eabf6cc27d0fdf2a78` 的
+[云端构建 43593228782](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43593228782)
+全部通过。七项构建产物均已核对长度和 SHA-256，ccache 命中 1056/1058（99.81%）。
+
+该版本随后实际加载到 Ace 5：内核自检成功，日志确认 channel open acknowledged，
+随后 channel handshake complete / inherited link preserved / firmware resumed；
+静态 init 35 项检查无失败，内核正常返回。测试只执行 QMP 主机通道的打开/关闭，
+没有发送 WLAN PDC/rail 消息、没有上电无线芯片，尚未扫描或联网。此结果为一次
+有限会话的通道验证，不代表持续电源管理或完整 Wi-Fi 功能通过。
+按用户要求，测试后设备转入原厂 Fastboot，供用户测试自行编译的 Recovery。
