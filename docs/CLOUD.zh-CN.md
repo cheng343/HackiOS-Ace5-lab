@@ -11,3 +11,5 @@ Actions 附件 `ace5-arm64-运行编号-尝试编号` 包含已成功生成的�
 `loader.efi` 是 UEFI 应用，`usb-payload.bin` 是 loader payload，均不是可刷写的 Android boot image。后续仍需按 [UEFI 教程](UEFI.zh-CN.md)使用本机 DTB 准备 UEFI 启动镜像，并准备系统和 GPU 固件。云编译成功不代表这台 ColorOS 17 已实机兼容，也不代表 Wi-Fi、SIM、相机完成适配。
 
 本机仅用于编辑/上传源码与下载云端产物；此流程不会连接手机或运行刷写命令。
+
+另一个 **Ace 5 UEFI components** 流程在云端编译固定 Mu UEFI、BootShim 与 loader，产物不含本机设备树。在电脑上运行 `tools/ace5/assemble-boot.py`，将这些已编译组件与只保存在本机的 giulia DTB 组装成临时启动镜像；组装过程只压缩/打包字节，不调用编译器、不连接设备。

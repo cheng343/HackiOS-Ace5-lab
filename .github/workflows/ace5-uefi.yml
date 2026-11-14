@@ -1,0 +1,51 @@
+name: Ace 5 UEFI components
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ace5-uefi.yml'
+      - 'tools/ace5/ci-uefi.sh'
+      - 'tools/ace5/assemble-boot.py'
+      - 'tools/ace5/prepare-uefi.py'
+      - 'tools/ace5/prepare-linux-arm64.py'
+      - 'uefi/**'
+permissions:
+  contents: read
+concurrency:
+  group: ace5-uefi-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  components:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build tools
+        run: |
+          mkdir -p out/uefi-ci
+          df -h .
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential git curl clang-18 \
+            lld-18 llvm-18 python3 python3-venv nasm uuid-dev gcc-aarch64-linux-gnu \
+            device-tree-compiler acpica-tools
+      - name: Build giulia UEFI, BootShim and loaders without a device DTB
+        run: bash tools/ace5/ci-uefi.sh 2>&1 | tee out/uefi-ci/build.log
+      - name: Capacity and diagnostics
+        if: always()
+        run: |
+          df -h .
+          find local/ci/Mu-Silicium/Build -maxdepth 2 -type f -name '*.txt' \
+            -exec cp '{}' out/uefi-ci/ ';' 2>/dev/null || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ace5-uefi-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/uefi-ci/
+          retention-days: 7
+          if-no-files-found: error
