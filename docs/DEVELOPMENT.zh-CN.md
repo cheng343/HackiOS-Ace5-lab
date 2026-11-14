@@ -59,6 +59,22 @@ python tools/ace5/test-platform-guards.py --cc "C:/path to/zig.exe" cc
 
 编译命令使用 `-UNDEBUG`，测试头会在断言被禁用时直接报错。测试不读取固件或连接手机，不代表完整 XNU 编译通过，也不验证硬件时序和运行稳定性。
 
+### GPU 生命周期与启动错误处理
+
+```sh
+python3 tools/ace5/test-phone.py
+python3 tools/ace5/test-inspect-adreno750-fw.py
+python3 tools/ace5/test-gpu-lifecycle.py --cc clang
+python3 tools/ace5/test-loader-state.py --cc clang
+cc -std=c11 -O1 -UNDEBUG -Wall -Wextra tools/ace5/test-loader-images.c \
+  -o local/tests/test-loader-images
+local/tests/test-loader-images
+```
+
+GPU 测试执行实际 owner 代码的受控停止交错，并将真实提交校验连接到 A750 后端，检查无效输入后仍能正常提交。loader 状态测试提取实际 USB 与运行参数处理分支；镜像测试直接包含生产解析器，用合成 XNUP/Mach-O 覆盖截断、溢出、段重叠、入口和不支持的段布局。Python 测试不启动 CLI 的手机操作。C runner 也支持在 `--cc` 末尾传入 Zig 路径及 `cc` 子命令。
+
+这组检查没有执行完整 XNU/UEFI 构建，未测试真实手机、固件兼容性、GPU 硬件恢复或安卓数据保留。
+
 ## 验证顺序
 
 1. 解析器/队列测试与源码编译。

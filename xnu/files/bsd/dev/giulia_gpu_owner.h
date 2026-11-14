@@ -4,7 +4,9 @@ static LCK_MTX_DECLARE(a750_live_lock,&a750_live_group);
 static void a750_live_stop(void)
 {
     lck_mtx_lock(&a750_live_lock);
-    if (a750_live_phase==1) { a750_live_phase=2;thread_wakeup((event_t)&a750_live_phase); }
+    /* Publication makes the backend stoppable before the owner sleeps. Latch
+     * an early stop while phase is still 0 instead of losing that request. */
+    if (a750_live_phase<2) { a750_live_phase=2;thread_wakeup((event_t)&a750_live_phase); }
     uint64_t deadline=0;clock_interval_to_deadline(10,NSEC_PER_SEC,&deadline);
     while (a750_live_phase!=3)
         if (lck_mtx_sleep_deadline(&a750_live_lock,LCK_SLEEP_DEFAULT,(event_t)&a750_live_phase,THREAD_UNINT,deadline)==THREAD_TIMED_OUT)
@@ -20,7 +22,8 @@ static bool a750_keep_wait(struct a750_hfi *s,vm_offset_t gx,unsigned wptr,uint3
     a750_runtime_active=true;
     redwood_gpu_use_backend(&a750_backend);
     a750_log("ace5-gpu: persistent A750 backend published; owner asleep, GPU at 231 MHz\n");
-    lck_mtx_lock(&a750_live_lock);a750_live_phase=1;
+    lck_mtx_lock(&a750_live_lock);
+    if (a750_live_phase==0) a750_live_phase=1;
     thread_wakeup((event_t)&a750_live_phase);
     while (a750_live_phase==1)
         lck_mtx_sleep(&a750_live_lock,LCK_SLEEP_DEFAULT,(event_t)&a750_live_phase,THREAD_UNINT);

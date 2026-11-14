@@ -11,6 +11,10 @@ from pathlib import Path
 import struct
 
 NAMES = ('gen70900_aqe.fw', 'gen70900_sqe.fw', 'gen70900_zap.mbn', 'gmu_gen70900.bin')
+# Keep the inspection acceptance limits in sync with giulia_gmu_fw.h: a host
+# report must not accept a layout the on-device parser will immediately reject.
+MAX_BLOCKS = 32
+MAX_RESERVATION_BYTES = 1024 * 1024
 REGIONS = ((0, 0x4000, 'ITCM'), (0x4000, 0x1000000, 'cache'),
            (0x10004000, 0x10008000, 'DTCM'),
            (0x60000000, 0x80000000, 'noncached'),
@@ -30,6 +34,8 @@ def parse_gmu(data):
     if not 16 <= len(data) <= 1024 * 1024:
         raise ValueError('GMU image size outside inspection limit')
     while offset < len(data):
+        if len(blocks) >= MAX_BLOCKS:
+            raise ValueError('GMU image exceeds 32-block parser limit')
         if len(data) - offset < 16:
             raise ValueError('truncated GMU header')
         address, size, kind, value = struct.unpack_from('<4I', data, offset)
@@ -47,11 +53,16 @@ def parse_gmu(data):
                 va = 0x10007fe0 + 4 * i
                 if address <= va and va + 4 <= address + size:
                     versions[name] = hex(struct.unpack_from('<I', data, payload + va - address)[0])
-        elif kind in (1, 7):
-            block['region'] = region(address, value)
-            block['reservation_bytes'] = value
-        elif kind not in (2, 3, 4, 5, 6):
-            raise ValueError(f'unknown GMU metadata type {kind:#x}')
+        else:
+            if ranges:
+                raise ValueError('GMU metadata follows data blocks')
+            if kind in (1, 7):
+                if value > MAX_RESERVATION_BYTES:
+                    raise ValueError('GMU reservation exceeds 1 MiB parser limit')
+                block['region'] = region(address, value)
+                block['reservation_bytes'] = value
+            elif kind not in (2, 3, 4, 5, 6):
+                raise ValueError(f'unknown GMU metadata type {kind:#x}')
         blocks.append(block)
         offset = payload + size
     if not ranges:

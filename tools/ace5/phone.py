@@ -15,6 +15,72 @@ import sys
 import time
 import zlib
 
+
+def loader_result(reply):
+    """Require one actual getvar result; missing output is not completion."""
+    matches = re.findall(r'^result:[ \t]*([a-z][a-z-]*)(?:[ \t].*)?\r?$', reply, re.M)
+    if len(matches) != 1:
+        raise RuntimeError('Missing or ambiguous loader result: ' + reply.strip())
+    return matches[0]
+
+
+def check_loader_result(reply, command, log):
+    expected = 'selftest-ok' if command == 'selftest' else 'returned'
+    actual = loader_result(reply)
+    if actual != expected:
+        raise RuntimeError(f'Loader {command} failed: {actual}; saved diagnostic log: {log}')
+
+
+def wait_for_result(command, seconds, bootcpu, live_log, live_interval, log_dir):
+    # The budget starts when launch has been accepted, including the wait while
+    # CPU 0 owns USB. Do not grant a second full run duration after that wait.
+    deadline = time.monotonic() + seconds + 60
+    if command == 'run' and bootcpu == 0:
+        print('XNU owns the boot core; waiting before asking USB for its result.', flush=True)
+        time.sleep(seconds + 5)
+    next_live = time.monotonic() + live_interval
+    live_prefix = time.strftime('%Y%m%d-%H%M%S')
+    live_count = 0
+    while True:
+        result = fb('getvar', 'result')
+        if loader_result(result) != 'running':
+            return result
+        if time.monotonic() >= deadline:
+            raise RuntimeError('Kernel did not return; preserve the screen and inspect the live log')
+        if live_log and time.monotonic() >= next_live:
+            response = call(['fastboot', '-s', 'xnuloader', 'oem', 'live-log'], check=False)
+            # Stock fastboot discards the optional OKAY payload for OEM commands.
+            if 'OKAY' in response and 'FAILED' not in response:
+                live_count += 1
+                path = log_dir / f'{live_prefix}-live-{live_count:03d}.log'
+                fb('get_staged', path)
+                print(f'Live log: {path.name} ({path.stat().st_size} bytes)', flush=True)
+            elif 'no live kernel' not in response:
+                raise RuntimeError('Live-log request failed: ' + response.strip())
+            next_live = time.monotonic() + live_interval
+        time.sleep(min(2, live_interval))
+
+
+def collect_run_diagnostics(command, seconds, bootcpu, live_log, live_interval, log_dir, log):
+    try:
+        result = wait_for_result(command, seconds, bootcpu, live_log, live_interval, log_dir)
+    except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+        # Preserve what is already staged without "oem log", which would discard
+        # a final kernel log. A failed poll cannot prove this is the final log.
+        partial = log.with_name(log.stem + '-poll-failure-staged.log')
+        try:
+            fb('get_staged', partial)
+            print(f'Saved staged diagnostics (final result unconfirmed): {partial}', file=sys.stderr)
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as fetch_error:
+            print(f'Could not fetch staged diagnostics after {error}: {fetch_error}', file=sys.stderr)
+        raise
+    # Fetch before checking the outcome: rejected/exceptional runs need their
+    # diagnostics too, and idle "oem log" would discard the staged kernel log.
+    fb('get_staged', log)
+    check_loader_result(result, command, log)
+    return result
+
+
 ROOT = Path(__file__).resolve().parents[2]
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
@@ -235,36 +301,12 @@ try:
                   'Use a physical power + volume-up restart to return to Android. '
                   'USB diagnostics are unavailable while XNU owns CPU 0.', flush=True)
             sys.exit(0)
-        if args.command == 'run' and args.bootcpu == 0:
-            print('XNU owns the boot core; waiting before asking USB for its result.', flush=True)
-            time.sleep(seconds + 5)
-        deadline = time.monotonic() + seconds + 60
-        next_live = time.monotonic() + live_interval
-        live_prefix = time.strftime('%Y%m%d-%H%M%S')
-        live_count = 0
-        while True:
-            result = fb('getvar', 'result')
-            if 'result: running' not in result:
-                break
-            if time.monotonic() >= deadline:
-                raise RuntimeError('Kernel did not return; preserve the screen and inspect the live log')
-            if args.command=='run' and args.live_log and time.monotonic()>=next_live:
-                response=call(['fastboot','-s','xnuloader','oem','live-log'],check=False)
-                # Stock fastboot discards the optional OKAY payload for OEM commands.
-                if 'OKAY' in response and 'FAILED' not in response:
-                    live_count+=1
-                    path=logs/f'{live_prefix}-live-{live_count:03d}.log'
-                    fb('get_staged',path)
-                    print(f'Live log: {path.name} ({path.stat().st_size} bytes)',flush=True)
-                elif 'no live kernel' not in response:
-                    raise RuntimeError('Live-log request failed: '+response.strip())
-                next_live=time.monotonic()+live_interval
-            time.sleep(min(2,live_interval))
         log = logs / (time.strftime('%Y%m%d-%H%M%S') + '-' + args.command + '.log')
-        # Fetch immediately: idle "oem log" would discard the staged kernel log.
-        fb('get_staged', log)
+        result = collect_run_diagnostics(args.command, seconds,
+                                         args.bootcpu if args.command == 'run' else 0,
+                                         args.live_log if args.command == 'run' else False,
+                                         live_interval, logs, log)
         print(result, log)
-        screenshot()
         saved_log = log.read_bytes().decode('utf-8', errors='replace')
         for line in saved_log.splitlines():
             if re.search(r'ace5-gpu: (stage [0-9]+|probe ended|.*cleanup FAILED)', line):
@@ -275,6 +317,7 @@ try:
             raise RuntimeError(f'GPU probe did not complete requested stage {args.gpu_probe}; see {log}')
         if args.command == 'run' and args.gpu_keep and 'ace5-gpu: persistent startup ready=1' not in saved_log:
             raise RuntimeError(f'A750 backend did not start; see {log}')
+        screenshot()
     elif args.command == 'screenshot':
         screenshot()
     else:

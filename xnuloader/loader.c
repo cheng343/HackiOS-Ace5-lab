@@ -11,6 +11,7 @@
  */
 #include "efi.h"
 #include "identity.h"         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
+#include "image.h"
 
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
@@ -21,10 +22,6 @@
 #ifndef HACKIOS_STORAGE_WRITES
 #define HACKIOS_STORAGE_WRITES 1
 #endif
-#define PAYLOAD_MAGIC       0x50554E58u /* "XNUP" */
-
-struct payload_header { uint32_t magic; uint32_t size; };
-struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
 
 #define KERNEL_VIRT_BASE    0xFFFFFFF004000000ULL /* boot_args.virtBase */
 #define KERNEL_LINK_OFFSET  0x03000000ULL         /* kernel text sits 48 MB above the base */
@@ -45,6 +42,8 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
 #define NVRAM_BANK_SIZE     0x2000u
 #define PANIC_LOG_BASE      (PAYLOAD_BASE + PAYLOAD_MAX_SIZE - 0x100000ULL)
 #define PAYLOAD_MAX_SIZE    0x04000000ULL         /* RAM reserved for the payload in the UEFI memory map */
+/* The embedded payload has no separately supplied length; a USB download does. */
+static uint64_t payload_available = PAYLOAD_MAX_SIZE - 0x100000ULL;
 
 /* ------------------------------------------------------------------------ */
 /* XNU structures (pexpert/pexpert/arm64/boot.h, mach-o/loader.h)           */
@@ -71,17 +70,6 @@ struct boot_args {
 	uint64_t memSizeActual;
 };
 
-#define MH_MAGIC_64      0xFEEDFACFu
-#define LC_SEGMENT_64    0x19
-#define LC_UNIXTHREAD    0x5
-
-struct mach_header_64 { uint32_t magic, cputype, cpusubtype, filetype, ncmds, sizeofcmds, flags, reserved; };
-struct load_command { uint32_t cmd, cmdsize; };
-struct segment_command_64 {
-	uint32_t cmd, cmdsize; char segname[16];
-	uint64_t vmaddr, vmsize, fileoff, filesize;
-	uint32_t maxprot, initprot, nsects, flags;
-};
 
 /* ------------------------------------------------------------------------ */
 /* Globals and small helpers                                                */
@@ -2515,17 +2503,6 @@ install_exception_hook(void)
 /* ------------------------------------------------------------------------ */
 /* Payload                                                                  */
 
-struct payload_info {
-	const uint8_t *kernel;
-	const uint8_t *ramdisk;
-	uint32_t ramdisk_size;
-	const char *cmdline;
-	uint64_t checkpoint;
-	uint64_t forced_base;
-	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
-	int usb_mode;
-};
-
 static uint64_t
 parse_number(const char *c, unsigned base)
 {
@@ -2543,43 +2520,11 @@ parse_number(const char *c, unsigned base)
 static int
 parse_payload(struct payload_info *pi, int verbose)
 {
-	struct payload_header *ph = (struct payload_header *)PAYLOAD_BASE;
-
-	memset(pi, 0, sizeof(*pi));
-	pi->cmdline = "";
-	if (ph->magic != PAYLOAD_MAGIC) {
-		print("no payload at %x (magic %x)\n", PAYLOAD_BASE, (uint64_t)ph->magic);
-		return 0;
-	}
-	const uint8_t *p = (const uint8_t *)(ph + 1), *pend = p + ph->size;
-	while (p + sizeof(struct payload_entry) <= pend) {
-		const struct payload_entry *e = (const struct payload_entry *)p;
-		const char *text = (const char *)(p + sizeof(*e));
-		if (e->name[0] == 0) {
-			break;
-		}
-		if (verbose) {
-			print("payload entry '%s' size %x\n", e->name, (uint64_t)e->size);
-		}
-		if (str_eq(e->name, "ramdisk")) {
-			pi->ramdisk = p + sizeof(*e);             /* becomes /dev/md0, the root device */
-			pi->ramdisk_size = e->size;
-		} else if (str_eq(e->name, "kernel")) {
-			pi->kernel = p + sizeof(*e);
-		} else if (str_eq(e->name, "cmdline")) {
-			pi->cmdline = text;
-		} else if (str_eq(e->name, "physbase")) {
-			pi->forced_base = parse_number(text, 16); /* testing aid; must be free RAM */
-		} else if (str_eq(e->name, "rdres")) {
-			pi->resident_rd = parse_number(text, 16); /* e.g. loaded there by QEMU; see RESIDENT_RD_OFFSET */
-		} else if (str_eq(e->name, "checkpoint")) {
-			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
-		} else if (str_eq(e->name, "usb")) {
-			pi->usb_mode = 1;                         /* stay in the loader and take commands over USB */
-		}
-		p += sizeof(*e) + ((e->size + 15) & ~15u);
-	}
-	return 1;
+	int valid = image_payload((const uint8_t *)PAYLOAD_BASE, payload_available, pi);
+	if (!valid) print("missing, truncated or invalid XNUP payload\n");
+	else if (verbose) print("payload validated: kernel %x bytes, ramdisk %x bytes\n",
+	    (uint64_t)pi->kernel_size, (uint64_t)pi->ramdisk_size);
+	return valid;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -2769,36 +2714,14 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 	const uint8_t *kernel = pi.kernel;
 	const struct mach_header_64 *mh = (const struct mach_header_64 *)kernel;
-	if (mh->magic != MH_MAGIC_64) {
-		print("kernel is not a 64-bit Mach-O\n");
+	struct kernel_layout layout;
+	if (!image_kernel(kernel, pi.kernel_size, KERNEL_VIRT_BASE + KERNEL_LINK_OFFSET,
+	    KERNEL_VIRT_BASE + MAX_MEM_SIZE, &layout)) {
+		print("invalid or truncated ARM64 Mach-O kernel\n");
 		return 0;
 	}
-
-	/* --- kernel extent -------------------------------------------------- */
-	uint64_t vm_lo = ~0ULL, vm_hi = 0, entry_va = 0;
-	const struct load_command *lc = (const struct load_command *)(mh + 1);
-	for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const void *)((const uint8_t *)lc + lc->cmdsize)) {
-		if (lc->cmd == LC_SEGMENT_64) {
-			const struct segment_command_64 *sg = (const void *)lc;
-			if (sg->vmsize == 0) {
-				continue;
-			}
-			if (sg->vmaddr < vm_lo) {
-				vm_lo = sg->vmaddr;
-			}
-			if (sg->vmaddr + sg->vmsize > vm_hi) {
-				vm_hi = sg->vmaddr + sg->vmsize;
-			}
-		} else if (lc->cmd == LC_UNIXTHREAD) {
-			/* cmd, cmdsize, flavor, count, x0..x28, fp, lr, sp, pc */
-			entry_va = ((const uint64_t *)((const uint8_t *)lc + 16))[32];
-		}
-	}
+	uint64_t vm_lo = layout.vm_lo, vm_hi = layout.vm_hi, entry_va = layout.entry_va;
 	print("kernel va %x..%x entry %x\n", vm_lo, vm_hi, entry_va);
-	if (vm_lo < KERNEL_VIRT_BASE + KERNEL_LINK_OFFSET || entry_va == 0) {
-		print("unexpected kernel layout\n");
-		return 0;
-	}
 	if (!choose_window(&pi)) {
 		return 0;
 	}
@@ -2814,6 +2737,11 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t rd1_pa = 0, rd1_size = 0;
 
 	if (pi.resident_rd != 0) {
+		if (win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE ||
+		    pi.resident_rd > win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE) {
+			print("resident image does not fit the memory window\n");
+			return 0;
+		}
 		resident_rd_size = pi.resident_rd;
 	}
 	if (resident_rd_size != 0) {
@@ -2845,7 +2773,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	}
 
 	/* --- load segments -------------------------------------------------- */
-	lc = (const struct load_command *)(mh + 1);
+	const struct load_command *lc = (const struct load_command *)(mh + 1);
 	for (uint32_t i = 0; i < mh->ncmds; i++, lc = (const void *)((const uint8_t *)lc + lc->cmdsize)) {
 		const struct segment_command_64 *sg = (const void *)lc;
 		if (lc->cmd != LC_SEGMENT_64 || sg->vmsize == 0) {
@@ -2876,6 +2804,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	int camera_requested = 0;
 	/* (the loader stays for run after run: what the last run's arguments said must not hold for this one) */
 	gamut_p3 = 0;
+	block_enabled = 0;
+	block_probe_requested = 0;
+	hc_requested = 0;
 	/* a run that does not ask for writes does not get them, whatever an earlier run of this
 	 * loader asked for (the loader stays resident across runs) */
 	block_write_requested = 0;
@@ -3733,6 +3664,7 @@ fb_command(char *cmd)
 
 			if (starts_with(cmd, "oem ramdisk none")) {
 				resident_rd_size = 0;
+				download_to_ramdisk = 0;
 				fb_reply("OKAY", "");
 				return;
 			}
@@ -3755,6 +3687,9 @@ fb_command(char *cmd)
 				limit = win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE;
 				dest = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
 				resident_rd_size = 0;
+			} else {
+				/* A partial new transfer must never leave the old payload executable. */
+				payload_available = 0;
 			}
 			if (total == 0 || total > limit) {
 				fb_reply("FAIL", "bad size");
@@ -3764,7 +3699,7 @@ fb_command(char *cmd)
 			while (got < total) {
 				uint64_t want = total - got > USB_CHUNK ? USB_CHUNK : total - got;
 				int64_t r = usb_rx(usb_rx_buf, want);
-				if (r <= 0) {
+				if (r <= 0 || (uint64_t)r > want) {
 					break;
 				}
 				memcpy(dest + got, usb_rx_buf, (size_t)r);
@@ -3773,6 +3708,8 @@ fb_command(char *cmd)
 			if (got == total) {
 				if (to_ramdisk) {
 					resident_rd_size = total;
+				} else {
+					payload_available = total;
 				}
 				fb_reply("OKAY", "");
 			} else {

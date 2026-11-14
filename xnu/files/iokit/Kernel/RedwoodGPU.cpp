@@ -1006,7 +1006,10 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
 		if (cmds[i].type != MSM_SUBMIT_CMD_BUF) {
 			continue;                               /* the other kinds are for a GPU shared between address spaces */
 		}
-		if (b == NULL || cmds[i].nr_relocs != 0 || (cmds[i].size & 3) || (cmds[i].submit_offset & 3) ||
+		/* CP_INDIRECT_BUFFER has a 20-bit DWORD count. Reject invalid commands
+		 * here so a backend's rejection is not mistaken for a stopped ring. */
+		if (b == NULL || cmds[i].nr_relocs != 0 || cmds[i].size == 0 || cmds[i].size >= (1u << 22) ||
+		    (cmds[i].size & 3) || (cmds[i].submit_offset & 3) ||
 		    (uint64_t) cmds[i].submit_offset + cmds[i].size > b->size) {
 			IOLog("RedwoodGPU: command buffer %u of a submission: buffer %u, offset %u, %u bytes, %u relocations: not taken\n",
 			    i, cmds[i].submit_idx, cmds[i].submit_offset, cmds[i].size, cmds[i].nr_relocs);
@@ -1015,6 +1018,10 @@ RedwoodGPUUserClient::submit(struct msm_gem_submit * request)
 		}
 		addresses[count] = b->address + cmds[i].submit_offset;
 		words[count++] = cmds[i].size / 4;
+	}
+	if (count == 0) {
+		IOLockUnlock(gGPULock);
+		goto out;
 	}
 	request->fence = redwood_gpu_submit(addresses, words, count);
 	/*
