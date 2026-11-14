@@ -431,3 +431,12 @@ vendor 分支使用 avg=500、peak=800 kB/s。只有 DT 指定按速率投票时
 另测辅助数据损坏、边界、两级除法、enable 编码、溢出与饱和。本机仍不编译 C。
 probe 4 还会只读解析 MC0/SH0/SH1/SN4/ACV/CN0 的地址与辅助参数，逐项记录查询
 结果，不因为某项缺失而伪造参数，也不在此诊断中发送 BCM 票。
+
+提交 `ccec71db8d66464ee6c92abc52c5edbe88a06c49` 已通过
+[云端构建 43597942720](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43597942720)：
+BCM→CRM 集成、CRM 时序／恢复、NoC 只读采集及既有回归全部通过，两类 loader
+和完整 XNU 构建成功。全部七项产物长度与 SHA-256 已下载核对，内核为
+`a112c9f37706f459bf226cc72c9f03588d047dc298d8da43cce2cceaf42d6801`。
+ccache 命中 1058/1061（99.72%），三次未命中。新版 90 秒小镜像诊断包已离线
+准备，未启动；用户选择稍后接手机，继续源码。BCM/CRM 写入仍未真机执行，
+这些结果不代表 Wi-Fi 已能扫描或联网。
