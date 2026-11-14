@@ -174,6 +174,22 @@ def stop_running_kernel(log_dir, log):
                            'volume-up to restart.') from error
 
 
+def ace5_driver_arguments(bootcpu, kernel, battery, cpu_khz):
+    """Explicit experimental hardware paths; the normal launcher leaves them off."""
+    if not battery and cpu_khz == 0:
+        return ''
+    if not kernel:
+        raise RuntimeError('--battery/--cpu-khz require an explicit --kernel built with these drivers')
+    if battery and bootcpu != 1:
+        raise RuntimeError('--battery requires --bootcpu 1 and the single-core run profile')
+    if cpu_khz != 0 and not 600000 <= cpu_khz <= 1804800:
+        raise RuntimeError('--cpu-khz must be 0 (off) or 600000..1804800 kHz; hardware selects a stock LUT entry')
+    result = ' ace5_battery=1' if battery else ''
+    if cpu_khz:
+        result += f' ace5_cpu_khz={cpu_khz}'
+    return result
+
+
 ROOT = Path(__file__).resolve().parents[2]
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
@@ -189,6 +205,10 @@ run.add_argument('--verbose', action='store_true')
 run.add_argument('--kernel', type=Path, help='Explicit locally built Mach-O kernel')
 run.add_argument('--root-image', type=Path, help='Local small APFS image, e.g. with device firmware')
 run.add_argument('--touch', action='store_true', help='Enable the giulia S3910 driver; requires --kernel')
+run.add_argument('--battery', action='store_true',
+                 help='Experimental Ace 5 NFG8011B sampling; requires --kernel and --bootcpu 1')
+run.add_argument('--cpu-khz', type=int, default=0,
+                 help='Experimental A520 EPSS frequency ceiling, 600000..1804800 kHz; 0 leaves stock boot state unchanged')
 run.add_argument('--gpu-probe', type=int, choices=range(1, 21),
                  help='Ace 5 GPU probe: 1 GCC, 2 GPUCC, 3 CX power, 4 XO clocks/GMU, 5 TCM, 6 streams, 7 firmware, 8 SMMU, 9 operating clocks, 10 GMU boot, 11 HFI query, 12 power tables, 13 core firmware, 14 scheduler memory, 15 GX power, 16 GPU SMMU and firmware, 17 CP initialization, 18 ZAP authentication, 19 nonsecure CP DMA, 20 BR/BV indirect buffer; requires --kernel')
 run.add_argument('--bootcpu', type=int, choices=[0, 1], default=0,
@@ -317,6 +337,8 @@ try:
             args.gpu_step_delay, args.live_log)
         commandline = (f'cpus=1 loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
                        'touchscreen=0 buttons=0 cpufreq=0 gpu=0 wifi=0 adsp=0')
+        if args.command == 'run':
+            commandline += ace5_driver_arguments(args.bootcpu, args.kernel, args.battery, args.cpu_khz)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')

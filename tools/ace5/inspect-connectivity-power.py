@@ -42,7 +42,7 @@ PATHS = {
 }
 NUMERIC = {"present", "online", "capacity", "voltage_now", "current_now",
            "temp", "charge_now", "charge_full", "charge_full_design", "cycle_count"}
-NODE_RE = re.compile(r"[A-Za-z0-9_.:+-]{1,200}\Z")
+NODE_RE = re.compile(r"[A-Za-z0-9_.,:+-]{1,200}\Z")
 
 
 def shell_script():
@@ -119,7 +119,7 @@ def decode_value(group, field, encoded):
         return parts, None
     if any(ord(char) < 32 or ord(char) == 127 for char in value):
         raise ValueError("Control characters in sysfs value (content withheld)")
-    if field == "driver" and not re.fullmatch(r"/sys/(?:bus|devices|class)/[A-Za-z0-9_/.:+-]+", value):
+    if field == "driver" and not re.fullmatch(r"/sys/(?:bus|devices|class)/[A-Za-z0-9_/.,:+-]+", value):
         raise ValueError("Unexpected driver link (content withheld)")
     if group == "pci" and field != "driver":
         if not re.fullmatch(r"0x[0-9a-fA-F]{1,8}", value):

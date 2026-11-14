@@ -61,6 +61,11 @@ int main(void)
     b.present = 1;
     b.external = 2;
     assert(!redwood_battery_state_valid(&b));
+    b.external = -2;
+    assert(!redwood_battery_state_valid(&b));
+    b.external = -1;
+    assert(redwood_battery_state_valid(&b));
+    assert(!redwood_battery_is_charging(&b));
     b.external = 1;
     assert(redwood_battery_is_charging(&b));
     b.external = 0;

@@ -16,7 +16,8 @@ from unittest.mock import Mock
 
 SOURCE = Path(__file__).with_name('phone.py')
 FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect_run_diagnostics',
-             'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel'}
+             'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel',
+             'ace5_driver_arguments'}
 
 
 class Clock:
@@ -89,6 +90,29 @@ class PhoneTests(unittest.TestCase):
         for reply in ('', 'OKAY', 'result:\nreturned', 'result: ', 'result: returned\nresult: running\n'):
             with self.subTest(reply=reply), self.assertRaises(RuntimeError):
                 parse(reply)
+
+    def test_experimental_drivers_are_off_by_default(self):
+        self.assertEqual(self.namespace['ace5_driver_arguments'](0, None, False, 0), '')
+        self.assertEqual(self.commands, [])
+
+    def test_experimental_drivers_require_supported_run_conditions(self):
+        arguments = self.namespace['ace5_driver_arguments']
+        for battery, khz in ((True, 0), (False, 1200000)):
+            with self.assertRaisesRegex(RuntimeError, 'explicit --kernel'):
+                arguments(1, None, battery, khz)
+        with self.assertRaisesRegex(RuntimeError, '--bootcpu 1'):
+            arguments(0, Path('kernel'), True, 0)
+        for khz in (-1, 599999, 1804801, 4000000):
+            with self.assertRaisesRegex(RuntimeError, '600000..1804800'):
+                arguments(1, Path('kernel'), False, khz)
+        self.assertEqual(self.commands, [])
+
+    def test_experimental_drivers_emit_only_requested_boot_arguments(self):
+        arguments = self.namespace['ace5_driver_arguments']
+        self.assertEqual(arguments(1, Path('kernel'), True, 0), ' ace5_battery=1')
+        self.assertEqual(arguments(0, Path('kernel'), False, 600000), ' ace5_cpu_khz=600000')
+        self.assertEqual(arguments(1, Path('kernel'), True, 1804800),
+                         ' ace5_battery=1 ace5_cpu_khz=1804800')
 
     def test_run_success_fetches_final_log(self):
         self.results = ['result: running 0 0\n', 'result: returned 100 0\n']

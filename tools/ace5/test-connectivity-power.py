@@ -39,6 +39,8 @@ class InventoryTests(unittest.TestCase):
             "temp": "287\n", "status": "Discharging\n", "model_name": "example-gauge\n"})
         records += node_records("i2c", "3-0055", {"name": "example_gauge\n",
             "of_compatible": b"vendor,example\x00vendor,fallback\x00"})
+        records += node_records("power_supply", "ucsi-source-psy-soc:qcom,pmic_glink:qcom,ucsi1",
+                                {"type": "USB\n"})
         parsed = inventory.parse_inventory(response(records))
         self.assertEqual(parsed["pci"][0]["values"]["vendor"], "0x17cb")
         self.assertEqual(parsed["power_supply"][0]["values"]["current_now"], -321000)
@@ -48,6 +50,8 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(parsed["pci"][0]["unavailable"]["revision"], "absent")
 
     def test_sysfs_failure_and_bounds(self):
+        self.assertEqual(inventory.decode_value("i2c", "driver", b"/sys/bus/i2c/drivers/qcom,sn-nci".hex()),
+                         ("/sys/bus/i2c/drivers/qcom,sn-nci", None))
         self.assertEqual(inventory.decode_value("power_supply", "capacity", b"\nREAD_STATUS:5".hex()),
                          (None, "read_failed"))
         self.assertEqual(inventory.decode_value("power_supply", "capacity", b"unknown\nREAD_STATUS:0".hex()),

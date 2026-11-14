@@ -11,7 +11,7 @@ struct redwood_battery_state {
 	int32_t current_ua;             /* positive while the battery takes charge */
 	int32_t temperature_hundredths; /* of a degree Celsius; may be negative */
 	int32_t present;                /* 1 if there is a battery */
-	int32_t external;               /* 1 if external power is connected */
+	int32_t external;               /* 0/1 disconnected/connected; -1 when the source cannot tell */
 	int32_t status;                 /* Linux POWER_SUPPLY_STATUS_*; 1 is charging */
 	int32_t charge_uah, full_uah, design_uah, cycles; /* 0 when not known */
 	int32_t usb_type;               /* Linux POWER_SUPPLY_USB_TYPE_* */
@@ -29,7 +29,7 @@ redwood_battery_state_valid(const struct redwood_battery_state *b)
 	return b != 0 && b->size == sizeof(*b) &&
 	    b->percent_hundredths >= 0 && b->percent_hundredths <= 10000 &&
 	    b->voltage_uv >= 0 && (b->present == 0 || b->present == 1) &&
-	    (b->external == 0 || b->external == 1) &&
+	    (b->external >= -1 && b->external <= 1) &&
 	    b->usb_voltage_uv >= 0 && b->usb_current_ua >= 0;
 }
 
@@ -46,7 +46,7 @@ redwood_battery_round_hundredths(int32_t value)
 static inline int
 redwood_battery_is_charging(const struct redwood_battery_state *b)
 {
-	return b->present && b->external && b->status == 1; /* POWER_SUPPLY_STATUS_CHARGING */
+	return b->present && b->external == 1 && b->status == 1; /* POWER_SUPPLY_STATUS_CHARGING */
 }
 
 #endif

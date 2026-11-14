@@ -19,6 +19,8 @@
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
+#include <sys/hackios_platform.h>
+#include "../sys/giulia_cpufreq.h"
 #include <sys/systm.h>
 #include <vm/vm_kern.h>
 
@@ -561,6 +563,15 @@ redwood_cpufreq_init(void)
 	uint32_t enabled = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
 
 	load_start();
+	/* CPU-load diagnostics do not touch board registers. Keep them available
+	 * on every platform, before dispatching to a board-specific clock driver. */
+	if (hackios_platform() == HACKIOS_PLATFORM_GIULIA) {
+		giulia_cpufreq_init();
+		return;
+	}
+	if (hackios_platform() != HACKIOS_PLATFORM_REDWOOD) {
+		return;
+	}
 	enabled = 2;
 	PE_parse_boot_argn("ddr", &enabled, sizeof(enabled));
 	if (enabled == 1) {

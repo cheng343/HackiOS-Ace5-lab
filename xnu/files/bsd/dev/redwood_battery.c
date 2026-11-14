@@ -128,8 +128,8 @@ SYSCTL_INT(_kern_redwood, OID_AUTO, battery_from_dsp, CTLFLAG_RD | CTLFLAG_LOCKE
 
 extern void RedwoodBatteryReport(const void *state, unsigned size);     /* iokit/Kernel/RedwoodBattery.cpp */
 
-void
-redwood_battery_report(const struct redwood_battery_state *b)
+static void
+battery_report(const struct redwood_battery_state *b, int from_dsp)
 {
 	if (!redwood_battery_state_valid(b)) {
 		battery_failures++;
@@ -141,8 +141,8 @@ redwood_battery_report(const struct redwood_battery_state *b)
 	battery_current_ma = b->current_ua / 1000;
 	battery_temperature_c = redwood_battery_round_hundredths(b->temperature_hundredths);
 	battery_present = b->present != 0;
-	battery_charger_present = b->external != 0;
-	battery_charging = redwood_battery_is_charging(b);
+	battery_charger_present = b->external;
+	battery_charging = b->external < 0 ? -1 : redwood_battery_is_charging(b);
 	battery_soc_estimated = 0;
 	battery_charger_action = b->status;
 	if (b->full_uah > 0) {
@@ -154,9 +154,21 @@ redwood_battery_report(const struct redwood_battery_state *b)
 	if (b->cycles > 0) {
 		battery_cycles = b->cycles;
 	}
-	battery_source_dsp = 1;
+	battery_source_dsp = from_dsp;
 	battery_updates++;
 	RedwoodBatteryReport(b, sizeof(*b));
+}
+
+void
+redwood_battery_report(const struct redwood_battery_state *b)
+{
+	battery_report(b, 1);
+}
+
+void
+redwood_battery_gauge_report(const struct redwood_battery_state *b)
+{
+	battery_report(b, 0);
 }
 
 static void
@@ -182,7 +194,9 @@ redwood_battery_init(void)
 	uint64_t shared_pa = 0;
 	vm_offset_t page;
 	thread_t thread;
+	extern bool giulia_battery_init(void);
 
+	if (giulia_battery_init()) return;
 	if (!PE_parse_boot_argn("battery", &enabled, sizeof(enabled)) || !enabled) return;
 	if (!PE_parse_boot_argn("battery_shared_pa", &shared_pa, sizeof(shared_pa)) || shared_pa == 0) {
 		printf("battery: xnuloader did not provide battery_shared_pa\n");

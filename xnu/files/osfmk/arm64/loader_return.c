@@ -45,6 +45,9 @@ extern void gic_v3_irq_cpu_shutdown(void);
 void loader_log_putc(char c);
 void loader_return(void);
 extern void redwood_adreno_quiesce(void);
+extern void giulia_battery_stop(void);
+extern void giulia_battery_quiesce(void);
+extern void giulia_cpufreq_quiesce(void);
 extern void redwood_adreno_stop(void);
 extern void redwood_adreno_minute(void);
 extern void redwood_wifi_stop(void);
@@ -369,6 +372,8 @@ loader_return(void)
 	 */
 	psci_smp_stop_others();
 #endif
+	giulia_battery_quiesce();       /* release gauge GPIOs before returning to firmware */
+	giulia_cpufreq_quiesce();       /* restore only the EPSS vote saved by an explicit Ace 5 opt-in */
 	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
 	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
 	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
@@ -436,6 +441,7 @@ loader_return_timer(__unused thread_call_param_t p0, __unused thread_call_param_
 	}
 	PE_parse_boot_argn("return_panic", &as_panic, sizeof(as_panic));
 	if (!as_panic) {
+		giulia_battery_stop();          /* bounded stop while scheduling is still available */
 		redwood_var_save_on_return();   /* the data volume kept, while the system is still whole */
 		redwood_adreno_stop();          /* a GPU kept for the system is given back while there is a thread to wait in */
 		redwood_wifi_stop();            /* and the Wi-Fi DSP, if it runs, shut down */
@@ -482,6 +488,7 @@ loader_stop_poll(__unused thread_call_param_t p0, __unused thread_call_param_t p
 		for (const char *c = banner; *c; c++) {
 			loader_log_putc(*c);
 		}
+		giulia_battery_stop();
 		redwood_var_save_on_return();
 		redwood_adreno_stop();
 		redwood_wifi_stop();

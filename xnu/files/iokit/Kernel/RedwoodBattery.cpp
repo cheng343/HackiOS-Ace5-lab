@@ -43,6 +43,7 @@ private:
 	void number(const char * key, long long value);
 	void flag(const char * key, bool value);
 	void object(const char * key, OSObject * value);
+	void forget(const char * key);
 };
 
 OSDefineMetaClassAndStructors(RedwoodBattery, IOPMPowerSource);
@@ -84,6 +85,19 @@ RedwoodBattery::object(const char * key, OSObject * value)
 	OSSafeReleaseNULL(symbol);
 }
 
+/* Unknown is absence, not a false charger reading retained from another source.
+ * IOPMPowerSource::updateStatus copies its protected properties dictionary, so
+ * remove from that dictionary and the published IORegistry property together. */
+void
+RedwoodBattery::forget(const char * key)
+{
+	if (properties->getObject(key) != NULL) {
+		properties->removeObject(key);
+		settingsChangedSinceUpdate = true;
+	}
+	removeProperty(key);
+}
+
 /*
  * What iOS calls the charger by (IOPSKeysPrivate.h's kIOPSFamilyCode*, iokit_family_err(sub_iokit_usb, n)),
  * from Linux's POWER_SUPPLY_USB_TYPE_*, as the DSP gives it.
@@ -108,11 +122,19 @@ RedwoodBattery::report(const struct redwood_battery_state * b)
 	bool charging = redwood_battery_is_charging(b);
 
 	setBatteryInstalled(b->present != 0);
-	setExternalConnected(b->external != 0);
-	setExternalChargeCapable(b->external != 0);
-	setIsCharging(charging);
-	flag("FullyCharged", b->external && (b->status == 4 || percent == 100));    /* POWER_SUPPLY_STATUS_FULL */
-	flag("AppleRawExternalConnected", b->external != 0);
+	if (b->external >= 0) {
+		setExternalConnected(b->external != 0);
+		setExternalChargeCapable(b->external != 0);
+		setIsCharging(charging);
+		flag("FullyCharged", b->external && (b->status == 4 || percent == 100));
+		flag("AppleRawExternalConnected", b->external != 0);
+	} else {
+		forget(kIOPMPSExternalConnectedKey);
+		forget(kIOPMPSExternalChargeCapableKey);
+		forget(kIOPMPSIsChargingKey);
+		forget("FullyCharged");
+		forget("AppleRawExternalConnected");
+	}
 	setCurrentCapacity((unsigned) percent);
 	setMaxCapacity(100);
 	setVoltage((unsigned) (b->voltage_uv / 1000));
@@ -133,7 +155,7 @@ RedwoodBattery::report(const struct redwood_battery_state * b)
 		setCycleCount((unsigned) b->cycles);
 	}
 
-	if (b->external) {
+	if (b->external == 1) {
 		OSDictionary * adapter = OSDictionary::withCapacity(6);
 		long long mv = b->usb_voltage_uv / 1000, ma = b->usb_current_ua / 1000;
 		OSNumber * n;
@@ -159,7 +181,7 @@ RedwoodBattery::report(const struct redwood_battery_state * b)
 			object(kIOPMPSAdapterDetailsKey, adapter);
 			adapter->release();
 		}
-	} else {
+	} else if (b->external == 0) {
 		OSDictionary * none = OSDictionary::withCapacity(1);
 		OSNumber * n = OSNumber::withNumber(0ULL, 32);    /* kIOPSFamilyCodeDisconnected */
 
@@ -169,6 +191,8 @@ RedwoodBattery::report(const struct redwood_battery_state * b)
 		}
 		OSSafeReleaseNULL(n);
 		OSSafeReleaseNULL(none);
+	} else {
+		forget(kIOPMPSAdapterDetailsKey);
 	}
 	updateStatus();
 }
@@ -214,6 +238,7 @@ RedwoodBatteryReport(const void * state, unsigned size)
 		made->registerService();
 		battery = made;
 		IOLog("RedwoodBattery: the battery's power source is up: %d%%, %s\n", redwood_battery_round_hundredths(b->percent_hundredths),
+		    b->external < 0 ? "charger state unknown" :
 		    b->external ? (redwood_battery_is_charging(b) ? "charging" : "on a charger, not charging") : "not on a charger");
 		return;
 	}

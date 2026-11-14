@@ -20,11 +20,12 @@ case "${1:-}" in
     python3 tools/ace5/test-connectivity-power.py
     python3 tools/ace5/test-qrtr-input.py --cc clang-18
     python3 tools/ace5/test-eagl-surface.py --cc clang-18
+    python3 tools/ace5/test-giulia-battery.py --cc clang-18
     python3 tools/ace5/test-inspect-adreno750-fw.py
     python3 tools/ace5/test-platform-guards.py --cc clang-18
     python3 tools/ace5/test-gpu-lifecycle.py --cc clang-18
     python3 tools/ace5/test-loader-state.py --cc clang-18
-    for name in loader-images s3910-report gmu-fw gmu-hfi gpu-direct gpu-live gpu-submit battery-state; do
+    for name in loader-images s3910-report gmu-fw gmu-hfi gpu-direct gpu-live gpu-submit battery-state giulia-cpufreq; do
       clang-18 -std=gnu11 -O1 -UNDEBUG -g -fsanitize=address,undefined \
         "tools/ace5/test-$name.c" -o "local/ci/tests/$name"
       "local/ci/tests/$name"
