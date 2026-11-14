@@ -177,3 +177,16 @@ PHY、链路训练、SMMU/DMA、MHI 和 ath12k 网络收发尚未接通，不能
 以及 MHI、固件、ath12k 和网络接口。**当前仍不能扫描或联网。**
 参考的 OnePlus Android 6.1 源码仅作为硬件资料，不作为已验证可启动的内核；
 本项目构建 XNU 8796.121.2，未构建或刷入该 Android 内核。
+
+板级接入仍有两个明确限制：link prepare 目前要求复位后的 DBI/iATU 窗口
+已可安全读取，不能把这项前提当成已实现的冷启动地址配置；power 使用的
+TCSR `0x01fc0000 + 0x31100` 来自主线驱动，但本机 Android 设备树的同地址
+syscon 仅声明 `0x30000` 长度。未来 MMIO 适配必须单独确认并覆盖该寄存器，
+不能按这个 syscon 长度映射后越界访问。CESTA 退出、NoC voter 与直接 GCC
+时钟投票的交接也尚未实机验证。
+
+源码提交 `a900b14fcd51ea0c9ff71d548bafbe8d32b818bc` 的
+[云端构建 43584687111](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43584687111)
+已通过 power、PHY、link 和 MSI 的 mock 回归及完整 XNU 构建；下载后核对了
+全部 7 项构建产物的长度和 SHA-256。内核 ccache 命中 1045/1049 次可缓存
+调用（99.62%）。本轮没有将新代码加载到手机，这不是无线功能的实机通过记录。

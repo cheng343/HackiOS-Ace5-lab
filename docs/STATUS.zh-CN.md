@@ -84,6 +84,6 @@
 
 源码新增 **`glslow_ops=1000`**，仅围绕 shader 编译、program 链接和 `glFinish` 计时，耗时至少 1000 微秒时打印 `redwood-gl: slow-op`。它覆盖内部按需创建的 plain/vblur 程序，并保留原有状态查询、调用顺序和同步语义。默认值为 0，不读取计时时钟或增加这类日志；无需打开逐帧 trace。`compile`/`link` 记录包括原调用已有的状态查询，仍不等于独立 GPU 执行时长。它也不覆盖所有可能推迟至首次 draw 的编译工作。
 
-**这次新增的是测量，不是已证实的性能修复。** 本地只做了差异与调用覆盖检查，没有进行本地 C 编译；新测量代码仍待云端 runtime 构建及真机冷/热页面对照验证。
+**这次新增的是测量，不是已证实的性能修复。** 本地只做了差异与调用覆盖检查，没有进行本地 C 编译。源码提交 `a900b14fcd51ea0c9ff71d548bafbe8d32b818bc` 已通过 [runtime 云端构建 43584699668](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43584699668)；下载后核对了全部 68 个组件文件的长度和 SHA-256，并确认 EAGL 产物包含新测量入口。真机冷/热页面对照仍未执行。
 
 Mesa 25.0.7 的磁盘 shader cache 当前仍禁用：Darwin 路径原来缺少 ELF build-id，而自制 RAMFS 没有 Mesa 文件缓存所需的 advisory-lock vnode 操作。库的 Mach-O UUID 可以作为构建身份候选，但不能只打开缓存开关就宣称有命中。现有进程内 shader variant 缓存已经存在；本轮没有修改 Mesa 缓存或文件系统。当前 RAM 启动会重建 `/private/var`，即便加入可写缓存目录，也不等于重启后保留缓存。
