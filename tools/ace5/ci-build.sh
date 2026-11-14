@@ -7,6 +7,13 @@ export THEOS="$PWD/local/ci/theos"
 export JOBS=${JOBS:-2}
 export XNU_CC=${XNU_CC:-/usr/bin/clang-18}
 export XNU_CXX=${XNU_CXX:-/usr/bin/clang++-18}
+if [ "${ACE5_CCACHE:-0}" = 1 ]; then
+  # A single executable path is required: xnu-clang executes "$drv" directly.
+  # Do not also set make's CCACHE variable (that would double-wrap xnu-clang).
+  test -x "$XNU_CC" && test -x "$XNU_CXX" && test -f "${CCACHE_CONFIGPATH:?}"
+  test "$XNU_CC" = "$PWD/local/ci/ccache-bin/clang-18"
+  test "$XNU_CXX" = "$PWD/local/ci/ccache-bin/clang++-18"
+fi
 mkdir -p out/ci/artifacts local/ci/tests
 [ "$(uname -s)" = Linux ] && [ "$(uname -m)" = aarch64 ] || {
   echo 'This workflow requires a Linux ARM64 runner' >&2; exit 1;

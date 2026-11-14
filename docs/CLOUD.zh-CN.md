@@ -6,6 +6,24 @@
 
 依赖按现有教程的固定版本取得。Theos SDK 只检出 iPhoneOS16.5.sdk，SDK、依赖与缓存不提交到 Git，也不作为构建附件上传。先执行主机回归，再编译 loader、准备 XNU 依赖并执行 `build` 目标。每次都从干净的 runner 构建，失败时保留构建诊断。
 
+## 编译缓存
+
+XNU 的 C/C++ 编译器通过实际可执行的 wrapper 接入 `ccache`，GitHub Actions
+在各次运行间保存编译结果缓存，大小上限为 4 GiB。兼容键区分 runner 系统/架构、
+编译器内容、SDK/工具链与相关构建配置；每次保存使用独立键，后续运行可恢复
+同提交或同兼容环境的缓存。缺失或被淘汰的缓存只会导致重新编译。
+
+首次运行填充缓存，后续复用输入匹配的编译结果。每轮仍重新生成构建目录，检查
+依赖和头文件并执行最终链接；没有恢复旧 `BUILD`、SDK 或整份 XNU 源码。
+测试程序、loader 和不经过 XNU 编译器 wrapper 的主机工具不在本轮缓存范围内。
+因此这是编译结果缓存，不是跳过整个构建，也不能保证所有步骤都变快。
+
+恢复缓存后清零统计，构建产物中保留配置、恢复信息及 `ccache` 统计。确认是否
+生效，应看本轮 direct/preprocessed 编译命中数和完整构建结果，不能仅凭
+Actions 的缓存恢复提示。缓存校验保持默认严格行为，未启用 `sloppiness`。
+
+## 产物和边界
+
 Actions 附件 `ace5-arm64-运行编号-尝试编号` 包含已成功生成的内核/loader、SHA-256 清单、资源记录与构建日志，保存七天。失败任务也可能有附件；确认整个任务成功，且 `build-manifest.json` 中 `kernel_built` 为 true，再把它作为内核构建结果。
 
 `loader.efi` 是 UEFI 应用，`usb-payload.bin` 是 loader payload，均不是可刷写的 Android boot image。后续仍需按 [UEFI 教程](UEFI.zh-CN.md)使用本机 DTB 准备 UEFI 启动镜像，并准备系统和 GPU 固件。云编译成功不代表这台 ColorOS 17 已实机兼容，也不代表 Wi-Fi、SIM、相机完成适配。

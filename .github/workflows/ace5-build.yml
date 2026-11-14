@@ -39,16 +39,44 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential git curl xz-utils \
             clang-18 libclang-rt-18-dev lld-18 llvm-18 flex bison m4 perl autoconf automake libtool \
-            pkg-config libncurses-dev uuid-dev python3
+            pkg-config libncurses-dev uuid-dev python3 ccache
           python3 tools/ace5/ci-record.py inventory after-packages
       - name: Source checks and host regressions on the cloud runner
         run: bash tools/ace5/ci-build.sh tests 2>&1 | tee out/ci/host-tests.log
       - name: Build diagnostic and kernel-stage loaders
         run: bash tools/ace5/ci-build.sh loader 2>&1 | tee out/ci/loader-build.log
+      - name: Configure XNU compiler cache identity and wrappers
+        id: ccache-setup
+        run: python3 tools/ace5/ci-ccache.py configure
+      - name: Restore compatible compiler results
+        id: ccache-restore
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ steps.ccache-setup.outputs.path }}
+          key: ${{ steps.ccache-setup.outputs.key }}
+          restore-keys: |
+            ${{ steps.ccache-setup.outputs.source-prefix }}
+            ${{ steps.ccache-setup.outputs.prefix }}
+      - name: Record restoration and reset compiler statistics
+        id: ccache-start
+        env:
+          ACE5_CACHE_KEY: ${{ steps.ccache-setup.outputs.key }}
+          ACE5_CACHE_MATCHED_KEY: ${{ steps.ccache-restore.outputs.cache-matched-key }}
+          ACE5_CACHE_HIT: ${{ steps.ccache-restore.outputs.cache-hit }}
+        run: python3 tools/ace5/ci-ccache.py start
       - name: Prepare pinned XNU dependencies
         run: bash tools/ace5/ci-build.sh dependencies 2>&1 | tee out/ci/dependencies.log
       - name: Build patched XNU
         run: bash tools/ace5/ci-build.sh xnu 2>&1 | tee out/ci/xnu-build.log
+      - name: Record compiler cache statistics and enforce size limit
+        if: always() && steps.ccache-start.outcome == 'success'
+        run: python3 tools/ace5/ci-ccache.py stats
+      - name: Save compiler results from this attempt
+        if: always() && steps.ccache-start.outcome == 'success'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: ${{ steps.ccache-setup.outputs.path }}
+          key: ${{ steps.ccache-setup.outputs.key }}
       - name: Record output hashes and final capacity
         if: always()
         run: |
