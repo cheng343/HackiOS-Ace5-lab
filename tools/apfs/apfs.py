@@ -19,6 +19,7 @@
 import os
 import struct
 import sys
+import threading
 import zlib
 
 BLOCK0 = 0
@@ -176,12 +177,19 @@ def checksum_ok(block):
 
 class RawImage:
     def __init__(self, path):
-        self.fd = os.open(path, os.O_RDONLY)
+        self.fd = os.open(path, os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+        self.read_lock = threading.Lock()
         self.size = os.lseek(self.fd, 0, os.SEEK_END)
         self.path = path
 
     def read(self, off, length):
-        return os.pread(self.fd, length, off)
+        if hasattr(os, 'pread'):
+            return os.pread(self.fd, length, off)
+        # Windows lacks pread. Protect the seek/read pair so independent
+        # readers sharing this image still get bytes from the requested offset.
+        with self.read_lock:
+            os.lseek(self.fd, off, os.SEEK_SET)
+            return os.read(self.fd, length)
 
     def close(self):
         os.close(self.fd)
