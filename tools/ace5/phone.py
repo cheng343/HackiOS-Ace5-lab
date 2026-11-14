@@ -212,6 +212,14 @@ def check_wifi_probe_log(mode, text, log):
         raise RuntimeError(f'Wi-Fi handoff probe incomplete; see {log}')
 
 
+def ace5_aop_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware):
+    if not enabled:
+        return ''
+    if not kernel or bootcpu != 1 or not 10 <= seconds <= 300 or other_hardware:
+        raise RuntimeError('--aop-channel-test requires --kernel, --bootcpu 1, 10..300 seconds and no other hardware probes')
+    return ' ace5_aop_channel_test=1'
+
+
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
 sub = ap.add_subparsers(dest='command', required=True)
@@ -228,6 +236,8 @@ run.add_argument('--root-image', type=Path, help='Local small APFS image, e.g. w
 run.add_argument('--touch', action='store_true', help='Enable the giulia S3910 driver; requires --kernel')
 run.add_argument('--wifi-probe', type=int, choices=[1, 2, 3],
                  help='Read-only Ace 5 handoff probe: 1 baseline, 2 also CESTA/CRM, 3 also AOP headers; requires --kernel, CPU 1 and a finite run')
+run.add_argument('--aop-channel-test', action='store_true',
+                 help='Open/close only the AOP host channel while loader firmware clients are parked; requires CPU 1 and 10..300 seconds')
 run.add_argument('--battery', action='store_true',
                  help='Experimental Ace 5 NFG8011B sampling; requires --kernel and --bootcpu 1')
 run.add_argument('--cpu-khz', type=int, default=0,
@@ -364,6 +374,8 @@ try:
             commandline += ace5_driver_arguments(args.bootcpu, args.kernel, args.battery, args.cpu_khz)
         if args.command == 'run':
             commandline += ace5_wifi_probe_arguments(args.wifi_probe, args.bootcpu, args.kernel, seconds)
+            commandline += ace5_aop_test_arguments(args.aop_channel_test, args.bootcpu, args.kernel,
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -445,6 +457,8 @@ try:
         check_kernel_log(saved_log, log)
         if args.command == 'run':
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
+            if args.aop_channel_test and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:
+                raise RuntimeError(f'AOP channel handshake incomplete; see {log}')
         if args.command == 'run' and args.gpu_probe and f'ace5-gpu: stage {args.gpu_probe} complete' not in saved_log:
             raise RuntimeError(f'GPU probe did not complete requested stage {args.gpu_probe}; see {log}')
         if args.command == 'run' and args.gpu_keep and 'ace5-gpu: persistent startup ready=1' not in saved_log:

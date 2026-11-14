@@ -17,7 +17,7 @@ from unittest.mock import Mock
 SOURCE = Path(__file__).with_name('phone.py')
 FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect_run_diagnostics',
              'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel',
-             'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log'}
+             'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments'}
 
 
 class Clock:
@@ -152,6 +152,17 @@ class PhoneTests(unittest.TestCase):
         self.results = ['result: returned 0 0\n']
         with self.assertRaisesRegex(RuntimeError, 'selftest failed: returned'):
             self.collect(command='selftest')
+
+    def test_aop_channel_trial_is_explicit_and_isolated(self):
+        args = self.namespace['ace5_aop_test_arguments']
+        self.assertEqual(args(False, 0, None, 0, True), '')
+        self.assertEqual(args(True, 1, 'kernel', 90, False), ' ace5_aop_channel_test=1')
+        for cpu, kernel, seconds, other in ((0, 'kernel', 90, False), (1, None, 90, False),
+                (1, 'kernel', 0, False), (1, 'kernel', 9, False), (1, 'kernel', 301, False),
+                (1, 'kernel', 90, True)):
+            with self.assertRaises(RuntimeError):
+                args(True, cpu, kernel, seconds, other)
+        self.assertEqual(self.commands, [])
 
     def test_failure_statuses_are_not_success_and_logs_survive(self):
         for status in ('not-started', 'early-exception', 'checkpoint', 'idle', 'other-core-hung', 'selftest-ok'):

@@ -295,3 +295,25 @@ AOP link/channel 均 UP；host link/ACK 为 UP，host channel/ACK 为 DOWN。
 包含实际核心的 inherited-link 成功/故障测试和完整 XNU 构建。七项产物长度与
 SHA-256 已核对，ccache 命中 1054/1057（99.72%）。本轮真机实际加载的是前一个
 `1797b2a` 的只读 probe 3；这些构建结果不能算第三种写入策略的硬件通过记录。
+
+## 后续：固件交接窗口与 AOP 通道实测入口
+
+`xnuloader` 以 CPU0 观察 CPU1 上的 XNU，原来仍可能调用 UEFI 日志、USB、存储
+和充电服务。现在增加显式的 firmware-quiet 请求/确认 ABI：仅指定
+`ace5_aop_channel_test=1` 的 giulia 副核运行会发布对应设备树属性。loader 屏蔽
+其 CPU 的中断后才确认，在请求解除前仅轮询共享内存并按原预算喂 hypervisor
+watchdog，不调用上述 UEFI 服务。XNU 结束时也解除等待；不会因任意短超时而在
+仍活跃的借用者下面恢复固件服务。请求、确认分别占独立的 128-byte cache 区域，
+避免不同 CPU 的 cache clean 覆盖对方写入。
+
+`giulia_aop_xnu.c` 提供真正的 MMIO/IPCC adapter 和独立通道测试入口，要求精确
+giulia、单 XNU CPU、bootcpu1、10..300 秒有限会话，以及其他实验硬件入口关闭。
+它验证 loader ABI，取得 quiet ACK 后才打开主机通道，随后关闭该通道并核对
+继承 link/local channel 状态；全部成功才打印 handshake complete。失败不冒充
+成功；若通道不能关闭，保留映射和 quiet 请求到内核返回。此入口不发送 PDC 表、
+不改 rail votes，也不启动无线芯片。
+
+主机回归直接编译这个 XNU adapter 和生产 QMP 核心，模拟真实观测的 descriptor
+与 AOP ACK。另有测试提取实际 loader quiet 控制流，检查中断先于 ACK、请求取消、
+内核返回和 ACK 清除/中断恢复；CPU 间缓存、真实固件 ACK 仍需真机验证。
+使用 `phone.py run --aop-channel-test` 显式选择；普通启动流程默认关闭。

@@ -12,6 +12,7 @@
 #include "efi.h"
 #include "identity.h"         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
 #include "image.h"
+#include "../xnu/files/sys/loader_firmware_quiet.h"
 
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
@@ -955,6 +956,12 @@ static uint64_t sound_len;
 #define START_SECONDS           5
 #define SILENCE_SECONDS         50
 #define NOTE_SECONDS            24      /* how long the kernel's progress is written down as it happens */
+
+static struct loader_firmware_quiet firmware_quiet = {
+    .magic = LOADER_QUIET_MAGIC, .version = LOADER_QUIET_VERSION,
+    .size = sizeof(struct loader_firmware_quiet)
+};
+static int firmware_quiet_enabled;
 
 static void wdt_pet(void);
 static int wdt_armed;
@@ -2274,6 +2281,59 @@ observer_watchdog_within_budget(uint64_t elapsed, uint64_t budget)
  * return). `live` is where the kernel shows its signs of life, if it has such a place;
  * `budget` is how many seconds it has said it will run.
  */
+static void
+quiet_interrupts_mask(uint64_t *daif, uint64_t *group1)
+{
+    *daif = READ_SYSREG(DAIF);
+    __asm__ volatile ("msr daifset, #0xf");
+    *group1 = READ_SYSREG(S3_0_C12_C12_7);
+    __asm__ volatile ("msr S3_0_C12_C12_7, %0\nisb" : : "r" ((uint64_t)0));
+}
+static void
+quiet_interrupts_restore(uint64_t daif, uint64_t group1)
+{
+    __asm__ volatile ("msr S3_0_C12_C12_7, %0\nisb" : : "r" (group1));
+    __asm__ volatile ("msr daif, %0" : : "r" (daif));
+}
+/* A request is ACKed only after firmware interrupts are masked. While ACK is
+ * nonzero this loop calls no UEFI, USB, storage, charger or log service.
+ * An arbitrary timeout must not resume firmware underneath a live borrower.
+ * A hung borrower instead meets the existing finite-run watchdog budget.
+ */
+static int
+observer_firmware_quiet(uint64_t started, uint64_t budget, uint64_t *last_pet)
+{
+    uint64_t daif, group1, base = (uint64_t)(uintptr_t)&firmware_quiet;
+    uint32_t request;
+    if (!firmware_quiet_enabled) return 0;
+    flush_dcache(base, base + 128);
+    request = firmware_quiet.request;
+    if (!request) return 0;
+    flush_dcache((uint64_t)(uintptr_t)&other_cpu_done, (uint64_t)(uintptr_t)&other_cpu_done + 8);
+    if (other_cpu_done) return 0;
+    quiet_interrupts_mask(&daif, &group1);
+    flush_dcache(base, base + 128);
+    request = firmware_quiet.request;
+    if (request) {
+        firmware_quiet.active = 1;
+        firmware_quiet.ack = request;
+        clean_dcache(base + 128, base + sizeof(firmware_quiet));
+        do {
+            flush_dcache(base, base + 128);
+            flush_dcache((uint64_t)(uintptr_t)&other_cpu_done, (uint64_t)(uintptr_t)&other_cpu_done + 8);
+            if (other_cpu_done || firmware_quiet.request != request) break;
+            if (wdt_armed && seconds_since(*last_pet) >= 5 &&
+                observer_watchdog_within_budget(seconds_since(started), budget)) {
+                wdt_pet(); *last_pet = READ_SYSREG(CNTVCT_EL0);
+            }
+        } while (1);
+        firmware_quiet.ack = firmware_quiet.active = 0;
+        clean_dcache(base + 128, base + sizeof(firmware_quiet));
+    }
+    quiet_interrupts_restore(daif, group1);
+    return other_cpu_done ? 0 : 1;
+}
+
 static int64_t
 run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const struct kernel_live *live, uint64_t slide,
     uint64_t budget)
@@ -2306,6 +2366,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 		flush_log();
 	}
 	while (status == 0) {
+        if (observer_firmware_quiet(started, budget, &last_pet)) continue;
 		/*
 		 * The first seconds are the ones in which a new arrangement goes wrong, and a machine
 		 * that resets takes this loader's memory with it: where there is storage for the log,
@@ -3016,6 +3077,23 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_prop_u32(&w, "#size-cells", 2);
 
 	dt_begin(&w, "chosen");
+    firmware_quiet_enabled = 0;
+#if defined(HACKIOS_GIULIA)
+    if (kernel_mpidr != this_mpidr) {
+        for (const char *c = pi.cmdline; *c; c++) {
+            static const char flag[] = "ace5_aop_channel_test=1";
+            if ((c == pi.cmdline || c[-1] == ' ') && starts_with(c, flag) &&
+                (c[sizeof(flag)-1] == 0 || c[sizeof(flag)-1] == ' '))
+                firmware_quiet_enabled = 1;
+        }
+    }
+#endif
+    if (firmware_quiet_enabled) {
+        firmware_quiet.request = firmware_quiet.ack = firmware_quiet.active = 0;
+        clean_dcache((uint64_t)(uintptr_t)&firmware_quiet,
+            (uint64_t)(uintptr_t)&firmware_quiet + sizeof(firmware_quiet));
+        dt_prop_u64(&w, "loader-firmware-quiet", (uint64_t)(uintptr_t)&firmware_quiet);
+    }
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", phys_base);
 	dt_prop_u64(&w, "dram-size", win_size);

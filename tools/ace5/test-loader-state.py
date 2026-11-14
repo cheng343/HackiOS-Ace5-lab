@@ -63,10 +63,15 @@ def main() -> int:
         watchdog = section(text, 'static int\nobserver_watchdog_within_budget(',
                            '/*\n * Run the kernel on the core with that MPIDR', source)
         (build / "watchdog-budget.inc").write_text(watchdog, encoding="utf-8")
-        for name in ("download", "run", "watchdog"):
+        quiet = section(text, 'static int\nobserver_firmware_quiet(', 'static int64_t\nrun_on_other_cpu(', source)
+        (build / 'quiet-observer.inc').write_text(quiet, encoding='utf8')
+        if '\twhile (status == 0) {\n        if (observer_firmware_quiet(started, budget, &last_pet)) continue;' not in text:
+            raise ValueError('firmware quiet must gate every observer iteration before firmware services')
+        for name in ("download", "run", "watchdog", "quiet"):
             exe = build / (name + (".exe" if sys.platform == "win32" else ""))
             run(args.cc + ["-std=c11", "-O1", "-UNDEBUG", "-Wall", "-Wextra",
-                           "-I", str(build), str(fixtures / f"test-{name}.c"), "-o", str(exe)])
+                           "-I", str(build), "-I", str(root/'xnu/files/sys'),
+                           str(fixtures / f"test-{name}.c"), "-o", str(exe)])
             run([str(exe)])
     print("PASS: loader download, per-run storage state and watchdog budget (host stubs; no hardware)")
     return 0
