@@ -147,3 +147,33 @@ W1C 分发和关闭；`giulia_pcie_msi_xnu.c/.h` 提供实际 MMIO 操作及 GIC
 此接收层需要后续 PCIe 板级驱动调用；现有 `--wifi` 保护仍然生效。PCIe 电源、
 PHY、链路训练、SMMU/DMA、MHI 和 ath12k 网络收发尚未接通，不能扫描或联网。
 没有在这轮修改中导入厂商固件，也没有在手机上执行新增寄存器写入。
+
+## 2026-11-14：PCIe 电源、PHY 与链路驱动核心
+
+新增三段实际寄存器操作代码，分别链接相同源码执行云端 mock 测试，并加入
+完整 XNU 编译。它们通过回调访问寄存器，目前没有板级自动启动调用者。
+
+- `giulia_pcie_power.c`：PCIe0 GDSC、GCC/TCSR 时钟、AUX/RCHNG RCG、
+  CORE/PHY reset 和 PIPE 切换；外部无线供电与 NoC 请求不在这段代码中。
+- `giulia_pcie_phy.c`：QMP Gen3 x2 / v5 控制布局，Ace 5 公开设备树的
+  112 项 PHY 参数、PIPE 开启与 reset/start 顺序、PHYSTATUS 有界等待。
+  两条 TX lane 的参数不同于 SM8550 参考板，未整套照搬参考板设置。
+  已与留存的三份本机 ColorOS 17 设备树逐项、逐序核对，这 112 项参数
+  及另外三项 power/reset/start 控制值均一致；这仍不代替 XNU 实机初始化验证。
+- `giulia_pcie_link.c`：PARF/根端口设置、链路训练、配置窗口 iATU、
+  `17cb:1107` 端点核对、capability 与 64 位 BAR 尺寸核对、BAR 分配。
+  端点内存解码和 Bus Master 均保持关闭，不启动 DMA 或无线固件。
+
+需要由同一板级 owner 串行执行：完成真实供电/NoC/所有权交接并拉低 PERST#，
+启动 power，执行 link prepare，再启动 PHY，经规定 PERST# 延时后训练链路。
+退出时先停上层/MSI、拉低 PERST#，再依次停 link、PHY、power；恢复失败保留
+资源和状态供重试。前置条件标志不能代替真实供电、时钟或 AOP/CESTA 交接。
+
+云端 `test-pcie-bringup.py --cc clang-18` 将生产核心与 mock-MMIO 链接，
+检查超时、丢失写入、无效读回和退出恢复；本机仅可用 `--check-only` 检查
+输入文件。这些测试不能证明真实 PCIe 链路已建立。
+
+尚待完成板级供电/NoC/GPIO 与实际 MMIO 适配、SMMU/DMA、MSI 路由接合，
+以及 MHI、固件、ath12k 和网络接口。**当前仍不能扫描或联网。**
+参考的 OnePlus Android 6.1 源码仅作为硬件资料，不作为已验证可启动的内核；
+本项目构建 XNU 8796.121.2，未构建或刷入该 Android 内核。

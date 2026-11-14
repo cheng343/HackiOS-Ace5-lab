@@ -65,7 +65,7 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 44274016a4cf..09871102847f 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,43 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,46 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -80,6 +80,9 @@ index 44274016a4cf..09871102847f 100644
 +bsd/dev/giulia_cpufreq.c	standard
 +bsd/dev/giulia_pcie_msi.c	standard
 +bsd/dev/giulia_pcie_msi_xnu.c	standard
++bsd/dev/giulia_pcie_power.c	standard
++bsd/dev/giulia_pcie_phy.c	standard
++bsd/dev/giulia_pcie_link.c	standard
 +bsd/dev/redwood_ufs.c	standard
 +bsd/dev/redwood_ufshc.c	standard
 +bsd/dev/redwood_net.c		standard

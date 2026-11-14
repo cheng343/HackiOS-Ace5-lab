@@ -29,6 +29,7 @@ case "${1:-}" in
     python3 tools/ace5/test-eagl-surface.py --cc clang-18
     python3 tools/ace5/test-giulia-battery.py --cc clang-18
     python3 tools/ace5/test-pcie-msi.py --cc clang-18
+    python3 tools/ace5/test-pcie-bringup.py --cc clang-18
     python3 tools/ace5/test-inspect-adreno750-fw.py
     python3 tools/ace5/test-platform-guards.py --cc clang-18
     python3 tools/ace5/test-gpu-lifecycle.py --cc clang-18

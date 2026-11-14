@@ -56,7 +56,9 @@
  * fetch_offered), glgroup=0 leaves vibrant layers inside groups as they were (see group_draw_begin()), glprecision=0 leaves the shaders' "lowp" and "mediump" as they are (see all_highp), glenv=NAME=VALUE puts that into the environment for the library to find
  * (its own switches: FD_MESA_DEBUG=sysmem, say), vblur=0 blurs nothing whose radius varies and
  * vblur=2 paints such blurs by their masks instead (see vblur_on), glframes=1 writes a line for
- * every frame (see frame_end()).
+ * every frame (see frame_end()). glslow_ops=US times only shader compilation, program linking and
+ * explicit GPU completion waits; only operations taking at least US are printed. It includes
+ * our lazy helper programs, without logging every frame or timing every GL entry point.
  */
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
@@ -140,6 +142,7 @@ static int eagl_tracing;                /* this frame's calls are written down (
 static int frame_lines;                 /* boot-arg glframes=1: a line for every frame (see frame_end()) */
 static int latency_lines;               /* boot-arg touch_lat=1: when every frame began and ended (see frame_end()) */
 static uint64_t slow_calls_us;          /* boot-arg glslow=US: a line for every call that takes longer (eagl_leave()) */
+static uint64_t slow_ops_us;            /* boot-arg glslow_ops=US: only compile/link/finish calls, including our helpers */
 static uint64_t call_began_us;          /* (when the call in progress began) */
 static uint64_t now_us(void);
 static void eagl_trace(const char *format, ...) __attribute__((format(printf, 1, 2)));
@@ -416,6 +419,55 @@ eagl_leave(struct eagl *e, unsigned offset)
 			    e->in_frame ? "" : " (before its first draw)");
 		}
 	}
+}
+
+/* Keep these measurements around the operation itself. In particular, a FinishObject entry
+ * also ends a frame, and the whole entry's time cannot tell a GPU wait from the mirror blit.
+ * A zero threshold does not read the clock. Status queries stay exactly where callers had
+ * them: asking one earlier would itself change synchronization of shader compilation.
+ */
+static void
+slow_operation_done(const char *operation, const char *where, GLuint object, uint64_t began)
+{
+	if (slow_ops_us != 0) {
+		uint64_t ended = now_us();
+
+		if (ended - began >= slow_ops_us) {
+			say("redwood-gl: slow-op %s %llu us at %llu: %s object=%u frame=%u\n", operation,
+			    ended - began, ended, where, object, current ? current->frames + 1 : 0);
+		}
+	}
+}
+
+static void
+compile_shader(GLuint shader, GLint *status, const char *where)
+{
+	uint64_t began = slow_ops_us != 0 ? now_us() : 0;
+
+	glCompileShader(shader);
+	if (status != NULL) {
+		glGetShaderiv(shader, GL_COMPILE_STATUS, status);
+	}
+	slow_operation_done("compile", where, shader, began);
+}
+
+static void
+link_program(GLuint program, GLint *status, const char *where)
+{
+	uint64_t began = slow_ops_us != 0 ? now_us() : 0;
+
+	glLinkProgram(program);
+	glGetProgramiv(program, GL_LINK_STATUS, status);
+	slow_operation_done("link", where, program, began);
+}
+
+static void
+finish_gpu(const char *where)
+{
+	uint64_t began = slow_ops_us != 0 ? now_us() : 0;
+
+	glFinish();
+	slow_operation_done("finish", where, 0, began);
 }
 
 /* An entry the library has no function for: say so, once an entry. */
@@ -1063,7 +1115,7 @@ frame_end(struct eagl *e, bool finished)
 		}
 	}
 	if (in_place != 0 && !finished && wait_for_frames) {
-		glFinish();             /* the display's driver reads the surface as soon as it is told of it */
+		finish_gpu("frame-end"); /* the display's driver reads the surface as soon as it is told of it */
 	} else if (in_place != 0 && !finished && sync_frames) {
 		/*
 		 * The display's driver waits for the last submission that named the surface -- and Mesa's
@@ -2012,13 +2064,12 @@ vblur_program(const char *vertex, const char *fragment, const char *what)
 	shader = glCreateShader(GL_VERTEX_SHADER);
 	text = vertex;
 	glShaderSource(shader, 1, &text, NULL);
-	glCompileShader(shader);
+	compile_shader(shader, NULL, what);
 	glAttachShader(program, shader);
 	shader = glCreateShader(GL_FRAGMENT_SHADER);
 	text = fragment;
 	glShaderSource(shader, 1, &text, NULL);
-	glCompileShader(shader);
-	glGetShaderiv(shader, GL_COMPILE_STATUS, &good);
+	compile_shader(shader, &good, what);
 	if (!good) {
 		glGetShaderInfoLog(shader, sizeof(said), NULL, said);
 	}
@@ -2027,8 +2078,7 @@ vblur_program(const char *vertex, const char *fragment, const char *what)
 	glBindAttribLocation(program, 1, "vertex_color");
 	glBindAttribLocation(program, 2, "vertex_texcoord0");
 	glBindAttribLocation(program, 3, "vertex_texcoord1");
-	glLinkProgram(program);
-	glGetProgramiv(program, GL_LINK_STATUS, &good);
+	link_program(program, &good, what);
 	say("redwood-gl: a program of ours for the blur whose radius varies (%s): %s %s\n", what, good ? "made" : "NOT MADE", said);
 	return good ? program : 0;
 }
@@ -2204,18 +2254,17 @@ plain_program(const char *fragment, const char *what)
 	shader = glCreateShader(GL_VERTEX_SHADER);
 	text = plain_vertex;
 	glShaderSource(shader, 1, &text, NULL);
-	glCompileShader(shader);
+	compile_shader(shader, NULL, what);
 	glAttachShader(program, shader);
 	shader = glCreateShader(GL_FRAGMENT_SHADER);
 	text = fragment;
 	glShaderSource(shader, 1, &text, NULL);
-	glCompileShader(shader);
+	compile_shader(shader, NULL, what);
 	glAttachShader(program, shader);
 	glBindAttribLocation(program, 0, "vertex_position");
 	glBindAttribLocation(program, 1, "vertex_color");
 	glBindAttribLocation(program, 2, "vertex_texcoord0");
-	glLinkProgram(program);
-	glGetProgramiv(program, GL_LINK_STATUS, &good);
+	link_program(program, &good, what);
 	say("redwood-gl: a program of ours for the draws CoreAnimation makes with none (%s): %s\n", what, good ? "made" : "NOT MADE");
 	return program;
 }
@@ -3204,7 +3253,7 @@ my_glFinish(void *context)
 		eagl_trace("glFinish()\n");
 	}
 	clear_now(e);
-	glFinish();
+	finish_gpu("glFinish");
 	frame_end(e, true);
 	EAGL_LEAVE(e, 0x2d0);
 }
@@ -3237,7 +3286,7 @@ my_glFinishObjectAPPLE(void *context, GLenum object, GLint name)
 	(void)name;
 	EAGL_ENTER(e, 0xeb8);
 	clear_now(e);
-	glFinish();
+	finish_gpu("glFinishObjectAPPLE");
 	frame_end(e, true);
 	EAGL_LEAVE(e, 0xeb8);
 }
@@ -3774,8 +3823,7 @@ my_glCompileShader(void *context, GLuint shader)
 	char said[1024] = "";
 
 	EAGL_ENTER(e, 0x12a8);
-	glCompileShader(shader);
-	glGetShaderiv(shader, GL_COMPILE_STATUS, &good);
+	compile_shader(shader, &good, "CoreAnimation");
 	e->shaders++;
 	if (!good) {
 		glGetShaderInfoLog(shader, sizeof(said), NULL, said);
@@ -3798,8 +3846,7 @@ my_glLinkProgram(void *context, GLuint program)
 	char said[1024] = "";
 
 	EAGL_ENTER(e, 0x12c0);
-	glLinkProgram(program);
-	glGetProgramiv(program, GL_LINK_STATUS, &good);
+	link_program(program, &good, "CoreAnimation");
 	e->programs++;
 	if (!good) {
 		glGetProgramInfoLog(program, sizeof(said), NULL, said);
@@ -4139,6 +4186,9 @@ install(void)
 		latency_lines = strstr(arguments, "touch_lat=1") != NULL;
 		if ((argument = strstr(arguments, "glslow=")) != NULL) {
 			slow_calls_us = strtoull(argument + 7, NULL, 10);
+		}
+		if ((argument = strstr(arguments, "glslow_ops=")) != NULL) {
+			slow_ops_us = strtoull(argument + 11, NULL, 10);
 		}
 		full_precision = strstr(arguments, "glprecision=0") == NULL;
 		vblur_on = strstr(arguments, "vblur=0") != NULL ? 0 : strstr(arguments, "vblur=2") != NULL ? 2 : 1;
