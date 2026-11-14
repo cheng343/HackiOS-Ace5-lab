@@ -199,17 +199,26 @@ static int save(struct giulia_pcie_link *s, unsigned r, uint32_t o,
     return 1;
 }
 
-static int snapshot(struct giulia_pcie_link *s)
+static int snapshot_parf(struct giulia_pcie_link *s)
 {
-    static const uint32_t parf[] = {PARF_LTSSM, PARF_TYPE, PARF_PHY,
+    /* These are the only registers changed before DBI/ATU admission. LTSSM
+     * is checked separately and must not be written on a foreign-core reject. */
+    static const uint32_t parf[] = {PARF_TYPE, PARF_PHY,
         PARF_SYS, PARF_PM, PARF_MHI, PARF_HALT, PARF_DBI_LO, PARF_DBI_HI,
         PARF_ATU_LO, PARF_ATU_HI, PARF_SLV_LO, PARF_SLV_HI};
+    for (unsigned i = 0; i < sizeof(parf) / sizeof(parf[0]); i++)
+        if (!save(s, GIULIA_LINK_PARF, parf[i], 4)) return 0;
+    s->parf_count = s->saved_count;
+    return 1;
+}
+
+static int snapshot_core(struct giulia_pcie_link *s)
+{
     static const uint32_t dbi[] = {DBI_RO, PCI_BUS, PCI_BAR0, PCI_BAR1,
         PCI_MEM, DBI_LINK, DBI_WIDTH};
     static const uint32_t atu[] = {ATU_CTRL1, ATU_CTRL2, ATU_BASE_LO,
         ATU_BASE_HI, ATU_LIMIT, ATU_TARGET_LO, ATU_TARGET_HI, ATU_LIMIT_HI};
-    for (unsigned i = 0; i < sizeof(parf) / sizeof(parf[0]); i++)
-        if (!save(s, GIULIA_LINK_PARF, parf[i], 4)) return 0;
+    if (!save(s, GIULIA_LINK_PARF, PARF_LTSSM, 4)) return 0;
     /* RO enable saved first, restored last among DBI registers. */
     for (unsigned i = 0; i < sizeof(dbi) / sizeof(dbi[0]); i++)
         if (!save(s, GIULIA_LINK_DBI, dbi[i], 4)) return 0;
@@ -222,6 +231,45 @@ static int snapshot(struct giulia_pcie_link *s)
         for (unsigned i = 0; i < sizeof(atu) / sizeof(atu[0]); i++)
             if (!save(s, GIULIA_LINK_ATU, n * 0x200u + atu[i], 4)) return 0;
     return 1;
+}
+
+static int restore_saved(struct giulia_pcie_link *s, unsigned count)
+{
+    int okay = 1;
+    for (unsigned i = count; i > 0; i--) {
+        const struct giulia_pcie_link_saved *v = &s->saved[i - 1u];
+        if (v->width == 2) {
+            okay &= put16(s, v->region, v->offset, (uint16_t)v->value);
+        } else {
+            uint32_t mask = 0xffffffffu;
+            if (v->region == GIULIA_LINK_DBI && v->offset == DBI_WIDTH)
+                mask &= ~BIT(17);
+            if (v->region == GIULIA_LINK_DBI && v->offset == PCI_BAR0)
+                mask &= ~0xfu;
+            if (v->region == GIULIA_LINK_DBI && v->offset == PCI_MEM)
+                mask = 0xfff0fff0u;
+            okay &= put32(s, v->region, v->offset, v->value, mask);
+        }
+    }
+    return okay;
+}
+
+/* PARF is always accessible through its dedicated peripheral aperture.
+ * This phase deliberately performs no DBI/ATU access, including on failure. */
+static int configure_parf(struct giulia_pcie_link *s)
+{
+    return put32(s, GIULIA_LINK_PARF, PARF_TYPE, 4, 0xffffffffu) &&
+        change32(s, GIULIA_LINK_PARF, PARF_PHY, BIT(0), 0, BIT(0)) &&
+        put32(s, GIULIA_LINK_PARF, PARF_DBI_LO, GIULIA_PCIE_LINK_DBI_PA, 0xffffffffu) &&
+        put32(s, GIULIA_LINK_PARF, PARF_DBI_HI, 0, 0xffffffffu) &&
+        put32(s, GIULIA_LINK_PARF, PARF_ATU_LO, GIULIA_PCIE_LINK_ATU_PA, 0xffffffffu) &&
+        put32(s, GIULIA_LINK_PARF, PARF_ATU_HI, 0, 0xffffffffu) &&
+        put32(s, GIULIA_LINK_PARF, PARF_SLV_LO, 0, 0xffffffffu) &&
+        put32(s, GIULIA_LINK_PARF, PARF_SLV_HI, 0x80000000u, 0xffffffffu) &&
+        change32(s, GIULIA_LINK_PARF, PARF_SYS, BIT(29), 0, BIT(29)) &&
+        change32(s, GIULIA_LINK_PARF, PARF_MHI, 0, BIT(4), BIT(4)) &&
+        change32(s, GIULIA_LINK_PARF, PARF_PM, BIT(5), 0, BIT(5)) &&
+        change32(s, GIULIA_LINK_PARF, PARF_HALT, 0, BIT(31), BIT(31));
 }
 
 static int quiesce_controller(struct giulia_pcie_link *s)
@@ -246,9 +294,9 @@ static int record_failure(struct giulia_pcie_link *s, int error)
 
 static int fail(struct giulia_pcie_link *s, int error)
 {
-    /* Ownership has already been admitted. No ATU access is needed before
-     * its first mutation (including if PARF address setup fails). Full
-     * restoration waits for the board owner to assert PERST# and call stop. */
+    /* Full core ownership has already been admitted. Early PARF-only failures
+     * use reject_after_parf instead. Complete restoration waits for the board
+     * owner to assert PERST# and call stop. */
     (void)quiesce_controller(s);
     return record_failure(s, error);
 }
@@ -258,6 +306,19 @@ static int reject(struct giulia_pcie_link *s, int error)
     /* Read-only admission failure never acquires the controller. */
     s->error = error;
     s->failure_stage = s->stage;
+    return error;
+}
+
+static int reject_after_parf(struct giulia_pcie_link *s, int error)
+{
+    s->error = error;
+    s->failure_stage = s->stage;
+    /* Core admission/snapshot has not completed: never touch its registers
+     * during rollback, even if an enabled MSI receiver/window was observed. */
+    if (!restore_saved(s, s->parf_count))
+        return record_failure(s, GIULIA_LINK_READBACK);
+    s->parf_owned = 0;
+    s->state = GIULIA_LINK_STOPPED;
     return error;
 }
 
@@ -279,46 +340,46 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags,
     *s = (struct giulia_pcie_link){0};
     s->io = copy;
     s->stage = GIULIA_LINK_STAGE_ADMISSION;
+    /* Only PARF may be accessed before cold CPU aperture setup. Flags assert
+     * the caller already owns RC reset and has physically asserted PERST#. */
+    v = r32(s, GIULIA_LINK_PARF, PARF_LTSSM);
+    if (v == 0xffffffffu) return reject(s, GIULIA_LINK_READBACK);
+    if (v & BIT(8)) return reject(s, GIULIA_LINK_BUSY);
+    v = r32(s, GIULIA_LINK_PARF, PARF_INT_MASK);
+    if (v == 0xffffffffu) return reject(s, GIULIA_LINK_READBACK);
+    if (v) return reject(s, GIULIA_LINK_BUSY);
+    if (!snapshot_parf(s)) return reject(s, GIULIA_LINK_READBACK);
+    s->parf_owned = 1;
+    s->stage = GIULIA_LINK_STAGE_PARF;
+    if (!configure_parf(s)) return reject_after_parf(s, GIULIA_LINK_READBACK);
+    s->stage = GIULIA_LINK_STAGE_ADMISSION;
     s->root_id = r32(s, GIULIA_LINK_DBI, 0);
+    if (s->root_id == 0xffffffffu) return reject_after_parf(s, GIULIA_LINK_READBACK);
     if ((s->root_id & 0xffffu) != 0x17cbu ||
         (r16(s, GIULIA_LINK_DBI, PCI_HEADER) & 0x7fu) != 1u)
-        return reject(s, GIULIA_LINK_ENDPOINT);
+        return reject_after_parf(s, GIULIA_LINK_ENDPOINT);
     if (!capabilities(s, GIULIA_LINK_DBI, &s->root_pcie_cap,
-        &unused_msi, &unused_msix)) return reject(s, GIULIA_LINK_CAPABILITY);
-    if ((r32(s, GIULIA_LINK_PARF, PARF_LTSSM) & BIT(8)) || link_up(s) ||
-        (r16(s, GIULIA_LINK_DBI, PCI_COMMAND) & BIT(2)) ||
-        r32(s, GIULIA_LINK_PARF, PARF_INT_MASK))
-        return reject(s, GIULIA_LINK_BUSY);
+        &unused_msi, &unused_msix)) return reject_after_parf(s, GIULIA_LINK_CAPABILITY);
+    if (link_up(s)) return reject_after_parf(s, GIULIA_LINK_BUSY);
+    if (s->link_status == 0xffffu) return reject_after_parf(s, GIULIA_LINK_READBACK);
+    v = r16(s, GIULIA_LINK_DBI, PCI_COMMAND);
+    if (v == 0xffffu) return reject_after_parf(s, GIULIA_LINK_READBACK);
+    if (v & BIT(2)) return reject_after_parf(s, GIULIA_LINK_BUSY);
     /* The fixed 4 KiB unrolled aperture covers eight outbound/inbound pairs.
      * Refuse all active windows, not just the two that this probe will use. */
     for (unsigned n = 0; n < 8; n++) {
-        if ((r32(s, GIULIA_LINK_ATU, n * 0x200u + ATU_CTRL2) & ATU_ENABLE) ||
-            (r32(s, GIULIA_LINK_ATU, n * 0x200u + 0x100u + ATU_CTRL2) & ATU_ENABLE) ||
-            r32(s, GIULIA_LINK_DBI, DBI_MSI_ENABLE + n * 12u))
-            return reject(s, GIULIA_LINK_BUSY);
+        uint32_t out = r32(s, GIULIA_LINK_ATU, n * 0x200u + ATU_CTRL2);
+        uint32_t in = r32(s, GIULIA_LINK_ATU, n * 0x200u + 0x100u + ATU_CTRL2);
+        uint32_t msi = r32(s, GIULIA_LINK_DBI, DBI_MSI_ENABLE + n * 12u);
+        if (out == 0xffffffffu || in == 0xffffffffu || msi == 0xffffffffu)
+            return reject_after_parf(s, GIULIA_LINK_READBACK);
+        if ((out & ATU_ENABLE) || (in & ATU_ENABLE) || msi)
+            return reject_after_parf(s, GIULIA_LINK_BUSY);
     }
-    if (!snapshot(s)) return reject(s, GIULIA_LINK_READBACK);
-    s->stage = GIULIA_LINK_STAGE_PARF;
-#define PWRITE(o, value) do { if (!put32(s, GIULIA_LINK_PARF, (o), \
-    (value), 0xffffffffu)) return fail(s, GIULIA_LINK_READBACK); } while (0)
-#define PCHANGE(o, clear, set) do { if (!change32(s, GIULIA_LINK_PARF, (o), \
-    (clear), (set), (clear) | (set))) return fail(s, GIULIA_LINK_READBACK); } while (0)
-    PWRITE(PARF_TYPE, 4);
-    PCHANGE(PARF_PHY, BIT(0), 0);
-    PWRITE(PARF_DBI_LO, GIULIA_PCIE_LINK_DBI_PA);
-    PWRITE(PARF_DBI_HI, 0);
-    PWRITE(PARF_ATU_LO, GIULIA_PCIE_LINK_ATU_PA);
-    PWRITE(PARF_ATU_HI, 0);
-    /* v6.12 configure_dbi_atu_base uses a 64-bit slave-space extent. Do not
-     * mix this CPU-address convention with vendor driver's DBI-relative 0. */
-    PWRITE(PARF_SLV_LO, 0);
-    PWRITE(PARF_SLV_HI, 0x80000000u);
-    PCHANGE(PARF_SYS, BIT(29), 0);
-    PCHANGE(PARF_MHI, 0, BIT(4));
-    PCHANGE(PARF_PM, BIT(5), 0);
-    PCHANGE(PARF_HALT, 0, BIT(31));
-#undef PWRITE
-#undef PCHANGE
+    if (!snapshot_core(s)) return reject_after_parf(s, GIULIA_LINK_READBACK);
+    s->core_owned = 1;
+    /* LTSSM snapshot is the one additional PARF entry in the core snapshot. */
+    s->parf_count++;
     s->stage = GIULIA_LINK_STAGE_ROOT;
     v = r32(s, GIULIA_LINK_DBI, DBI_RO);
     if (v == 0xffffffffu ||
@@ -468,7 +529,7 @@ int giulia_pcie_link_train(struct giulia_pcie_link *s, uint32_t flags)
     if (!program_atu(s, 1, GIULIA_PCIE_LINK_BAR0_PA, GIULIA_PCIE_LINK_BAR0_PA,
         GIULIA_PCIE_LINK_BAR0_SIZE, 0)) return fail(s, GIULIA_LINK_READBACK);
     /* Bridge memory window 0x60400000..0x605fffff, but both command MEM bits
-     * remain zero. A future explicit BAR-only API must keep BME disabled. */
+     * remain zero until the explicit CPU-only MEM API is called. */
     if (!put32(s, GIULIA_LINK_DBI, PCI_MEM, 0x60506040u, 0xfff0fff0u) ||
         !endpoint_quiet(s)) return fail(s, GIULIA_LINK_READBACK);
     if (r16(s, GIULIA_LINK_DBI, PCI_COMMAND) & 7u)
@@ -478,30 +539,177 @@ int giulia_pcie_link_train(struct giulia_pcie_link *s, uint32_t flags)
     return GIULIA_LINK_OK;
 }
 
-int giulia_pcie_link_stop(struct giulia_pcie_link *s, uint32_t flags)
+static int atu_matches(struct giulia_pcie_link *s, unsigned region,
+    uint32_t cpu, uint32_t target, uint32_t size, uint32_t type)
 {
-    int okay = 1;
+    const uint32_t offsets[] = {ATU_CTRL1, ATU_CTRL2, ATU_BASE_LO,
+        ATU_BASE_HI, ATU_LIMIT, ATU_TARGET_LO, ATU_TARGET_HI, ATU_LIMIT_HI};
+    uint32_t expected[] = {type, ATU_ENABLE, cpu, 0, cpu + size - 1u,
+        target, 0, 0};
+    for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+        uint32_t got = r32(s, GIULIA_LINK_ATU, region * 0x200u + offsets[i]);
+        uint32_t mask = i == 0 ? ~BIT(8) : 0xffffffffu; /* 4.90a TD workaround */
+        if (got == 0xffffffffu || ((got ^ expected[i]) & mask)) return 0;
+    }
+    return 1;
+}
+
+static int config_window_matches(struct giulia_pcie_link *s)
+{
+    return s->config_atu_enabled && atu_matches(s, 0, GIULIA_PCIE_LINK_CFG_PA,
+        0x01000000u, GIULIA_PCIE_LINK_CFG_SIZE, 4);
+}
+
+/* Read-only admission for CPU decoding. An enabled DMA/IRQ source is a
+ * conflict, not permission to take it over or silently disable another user. */
+static int memory_guard(struct giulia_pcie_link *s, int enabling,
+    uint16_t *root_command, uint16_t *endpoint_command)
+{
+    uint16_t v;
+    uint32_t d;
+    if (!config_window_matches(s)) return GIULIA_LINK_READBACK;
+    if (!link_up(s)) return s->link_status == 0xffffu ?
+        GIULIA_LINK_READBACK : GIULIA_LINK_DOWN;
+    *root_command = r16(s, GIULIA_LINK_DBI, PCI_COMMAND);
+    if (*root_command == 0xffffu || !cr16(s, PCI_COMMAND, endpoint_command))
+        return GIULIA_LINK_READBACK;
+    if ((*root_command & 5u) || (*endpoint_command & 5u) ||
+        !(*root_command & BIT(10)) || !(*endpoint_command & BIT(10)))
+        return GIULIA_LINK_BUSY;
+    if (!cr16(s, s->endpoint_msi_cap + 2u, &v)) return GIULIA_LINK_READBACK;
+    if (v & BIT(0)) return GIULIA_LINK_BUSY;
+    if (s->endpoint_msix_cap) {
+        if (!cr16(s, s->endpoint_msix_cap + 2u, &v)) return GIULIA_LINK_READBACK;
+        if (v & BIT(15)) return GIULIA_LINK_BUSY;
+    }
+    for (unsigned i = 0; i < 8; i++) {
+        d = r32(s, GIULIA_LINK_DBI, DBI_MSI_ENABLE + i * 12u);
+        if (d == 0xffffffffu) return GIULIA_LINK_READBACK;
+        if (d) return GIULIA_LINK_BUSY;
+    }
+    d = r32(s, GIULIA_LINK_PARF, PARF_INT_MASK);
+    if (d == 0xffffffffu) return GIULIA_LINK_READBACK;
+    if (d) return GIULIA_LINK_BUSY;
+    if (!enabling) return GIULIA_LINK_OK;
+    if (!atu_matches(s, 1, GIULIA_PCIE_LINK_BAR0_PA, GIULIA_PCIE_LINK_BAR0_PA,
+        GIULIA_PCIE_LINK_BAR0_SIZE, 0)) return GIULIA_LINK_READBACK;
+    d = r32(s, GIULIA_LINK_DBI, PCI_MEM);
+    if (d == 0xffffffffu || (d & 0xfff0fff0u) != 0x60506040u)
+        return GIULIA_LINK_READBACK;
+    d = r32(s, GIULIA_LINK_DBI, PCI_BUS);
+    if (d == 0xffffffffu || (d & 0x00ffffffu) != 0x00010100u)
+        return GIULIA_LINK_READBACK;
+    if (!cr32(s, 0, &d) || d != GIULIA_PCIE_LINK_EP_ID)
+        return GIULIA_LINK_ENDPOINT;
+    if (!cr32(s, PCI_BAR0, &d) || d != (GIULIA_PCIE_LINK_BAR0_PA | 4u) ||
+        !cr32(s, PCI_BAR1, &d) || d != 0)
+        return GIULIA_LINK_BAR;
+    if (((*root_command & BIT(1)) != 0) != (s->memory_enabled != 0) ||
+        ((*endpoint_command & BIT(1)) != 0) != (s->memory_enabled != 0))
+        return GIULIA_LINK_BUSY;
+    return GIULIA_LINK_OK;
+}
+
+static int clear_cpu_memory(struct giulia_pcie_link *s)
+{
+    uint16_t v;
+    int endpoint_okay = 0;
+    int root_okay;
+    /* Never follow a corrupted CFG0 window. Still close the root side when
+     * possible; PERST# + stop is required if the endpoint cannot be verified. */
+    if (config_window_matches(s) && cr16(s, PCI_COMMAND, &v))
+        endpoint_okay = cp16(s, PCI_COMMAND, (uint16_t)((v & ~7u) | BIT(10)));
+    root_okay = change16(s, GIULIA_LINK_DBI, PCI_COMMAND, 7u, BIT(10));
+    if (endpoint_okay && root_okay) s->memory_enabled = 0;
+    return endpoint_okay && root_okay;
+}
+
+int giulia_pcie_link_mem_enable(struct giulia_pcie_link *s, uint32_t flags)
+{
+    uint16_t root_command, endpoint_command;
+    int error;
+    if (!s) return GIULIA_LINK_ARGUMENT;
+    if ((flags & GIULIA_LINK_MEMORY_REQUIRED) != GIULIA_LINK_MEMORY_REQUIRED ||
+        (flags & GIULIA_LINK_PERST_ASSERTED)) return GIULIA_LINK_PREREQUISITE;
+    if (s->state != GIULIA_LINK_READY || !s->core_owned)
+        return GIULIA_LINK_STATE;
+    s->stage = GIULIA_LINK_STAGE_MEMORY_ENABLE;
+    error = memory_guard(s, 1, &root_command, &endpoint_command);
+    if (error) return record_failure(s, error);
+    if (s->memory_enabled) {
+        s->stage = GIULIA_LINK_STAGE_READY;
+        return GIULIA_LINK_OK;
+    }
+    s->memory_owned = 1; /* A failed readback may still have changed hardware. */
+    if (!put16(s, GIULIA_LINK_DBI, PCI_COMMAND,
+            (uint16_t)((root_command & ~7u) | BIT(10) | BIT(1))) ||
+        !cp16(s, PCI_COMMAND,
+            (uint16_t)((endpoint_command & ~7u) | BIT(10) | BIT(1)))) {
+        (void)clear_cpu_memory(s);
+        return record_failure(s, GIULIA_LINK_READBACK);
+    }
+    s->memory_enabled = 1;
+    s->stage = GIULIA_LINK_STAGE_READY;
+    return GIULIA_LINK_OK;
+}
+
+int giulia_pcie_link_mem_disable(struct giulia_pcie_link *s, uint32_t flags)
+{
+    uint16_t root_command, endpoint_command;
+    int error;
+    if (!s) return GIULIA_LINK_ARGUMENT;
+    if ((flags & GIULIA_LINK_MEMORY_REQUIRED) != GIULIA_LINK_MEMORY_REQUIRED ||
+        (flags & GIULIA_LINK_PERST_ASSERTED)) return GIULIA_LINK_PREREQUISITE;
+    if (!s->core_owned || (s->state != GIULIA_LINK_READY &&
+        !(s->state == GIULIA_LINK_FAULT && s->memory_owned)))
+        return GIULIA_LINK_STATE;
+    s->stage = GIULIA_LINK_STAGE_MEMORY_DISABLE;
+    error = memory_guard(s, 0, &root_command, &endpoint_command);
+    if (error) {
+        if (error != GIULIA_LINK_BUSY) (void)clear_cpu_memory(s);
+        return record_failure(s, error);
+    }
+    if (!s->memory_owned && ((root_command | endpoint_command) & BIT(1)))
+        return record_failure(s, GIULIA_LINK_BUSY);
+    if (s->memory_owned && !clear_cpu_memory(s))
+        return record_failure(s, GIULIA_LINK_READBACK);
+    s->memory_enabled = 0;
+    if (s->state == GIULIA_LINK_READY) s->stage = GIULIA_LINK_STAGE_READY;
+    return GIULIA_LINK_OK;
+}
+
+int giulia_pcie_link_quiesce(struct giulia_pcie_link *s, uint32_t flags)
+{
     unsigned i;
     if (!s) return GIULIA_LINK_ARGUMENT;
     if (s->state == GIULIA_LINK_IDLE || s->state == GIULIA_LINK_STOPPED)
         return GIULIA_LINK_OK;
-    if ((flags & GIULIA_LINK_STOP_REQUIRED) != GIULIA_LINK_STOP_REQUIRED ||
+    if ((flags & GIULIA_LINK_QUIESCE_REQUIRED) != GIULIA_LINK_QUIESCE_REQUIRED ||
         (flags & GIULIA_LINK_PERST_RELEASED_SETTLED))
         return GIULIA_LINK_PREREQUISITE;
     if (s->state != GIULIA_LINK_PREPARED && s->state != GIULIA_LINK_READY &&
-        s->state != GIULIA_LINK_FAULT) return GIULIA_LINK_STATE;
-    s->stage = GIULIA_LINK_STAGE_STOP;
+        s->state != GIULIA_LINK_FAULT && s->state != GIULIA_LINK_QUIESCED)
+        return GIULIA_LINK_STATE;
+    if (s->state == GIULIA_LINK_QUIESCED) return GIULIA_LINK_OK;
+    s->stage = GIULIA_LINK_STAGE_QUIESCE;
+    if (!s->parf_owned) return record_failure(s, GIULIA_LINK_STATE);
+    if (!s->core_owned) {
+        /* This owner never touched or started the core; do not borrow it. */
+        s->state = GIULIA_LINK_QUIESCED;
+        return GIULIA_LINK_OK;
+    }
     /* A previous stop attempt may already have restored an old PARF address
      * convention. Establish the owned CPU decoder using PARF-only accesses
      * before touching DBI/ATU again. No firmware user is active here. */
-    if (!put32(s, GIULIA_LINK_PARF, PARF_DBI_LO, GIULIA_PCIE_LINK_DBI_PA,
-            0xffffffffu) ||
-        !put32(s, GIULIA_LINK_PARF, PARF_DBI_HI, 0, 0xffffffffu) ||
-        !put32(s, GIULIA_LINK_PARF, PARF_ATU_LO, GIULIA_PCIE_LINK_ATU_PA,
-            0xffffffffu) ||
-        !put32(s, GIULIA_LINK_PARF, PARF_ATU_HI, 0, 0xffffffffu))
+    if (!configure_parf(s))
+        return record_failure(s, GIULIA_LINK_READBACK);
+    /* PERST# physically isolates the endpoint, including if config space was
+     * lost during CPU MEM disable. Close the root window without touching the
+     * reset endpoint before disabling LTSSM and restoring the snapshots. */
+    if (!change16(s, GIULIA_LINK_DBI, PCI_COMMAND, 7u, BIT(10)))
         return record_failure(s, GIULIA_LINK_READBACK);
     if (!quiesce_controller(s)) return record_failure(s, GIULIA_LINK_READBACK);
+    s->memory_enabled = 0;
     for (i = 0; i <= 100; i++) {
         int active = link_up(s);
         if (s->link_status == 0xffffu)
@@ -510,27 +718,43 @@ int giulia_pcie_link_stop(struct giulia_pcie_link *s, uint32_t flags)
         if (i < 100) delay(s, 1000);
     }
     if (i > 100) return record_failure(s, GIULIA_LINK_TIMEOUT);
+    s->state = GIULIA_LINK_QUIESCED;
+    return GIULIA_LINK_OK;
+}
+
+int giulia_pcie_link_stop(struct giulia_pcie_link *s, uint32_t flags)
+{
+    int err;
+    if (!s) return GIULIA_LINK_ARGUMENT;
+    if (s->state == GIULIA_LINK_IDLE || s->state == GIULIA_LINK_STOPPED)
+        return GIULIA_LINK_OK;
+    if ((flags & GIULIA_LINK_STOP_REQUIRED) != GIULIA_LINK_STOP_REQUIRED ||
+        (flags & GIULIA_LINK_PERST_RELEASED_SETTLED))
+        return GIULIA_LINK_PREREQUISITE;
+    if (s->state != GIULIA_LINK_PREPARED && s->state != GIULIA_LINK_READY &&
+        s->state != GIULIA_LINK_FAULT && s->state != GIULIA_LINK_QUIESCED)
+        return GIULIA_LINK_STATE;
+    s->stage = GIULIA_LINK_STAGE_STOP;
+    if (!s->parf_owned) return record_failure(s, GIULIA_LINK_STATE);
+    if (!s->core_owned) {
+        /* Early decoder/snapshot failure: even stop must remain PARF-only. */
+        if (!restore_saved(s, s->parf_count))
+            return record_failure(s, GIULIA_LINK_READBACK);
+        s->parf_owned = 0;
+        s->state = GIULIA_LINK_STOPPED;
+        return GIULIA_LINK_OK;
+    }
+    err = giulia_pcie_link_quiesce(s, flags);
+    if (err) return err;
+    s->stage = GIULIA_LINK_STAGE_STOP;
     if (!change32(s, GIULIA_LINK_DBI, DBI_RO, 0, BIT(0), BIT(0)))
         return record_failure(s, GIULIA_LINK_READBACK);
     /* All captured ATU enables were zero and PERST# remains asserted. Keep
      * every snapshot on failure so stop can be retried without losing owner. */
-    for (i = s->saved_count; i > 0; i--) {
-        const struct giulia_pcie_link_saved *v = &s->saved[i - 1u];
-        if (v->width == 2) {
-            okay &= put16(s, v->region, v->offset, (uint16_t)v->value);
-        } else {
-            uint32_t mask = 0xffffffffu;
-            if (v->region == GIULIA_LINK_DBI && v->offset == DBI_WIDTH)
-                mask &= ~BIT(17);
-            if (v->region == GIULIA_LINK_DBI && v->offset == PCI_BAR0)
-                mask &= ~0xfu;
-            if (v->region == GIULIA_LINK_DBI && v->offset == PCI_MEM)
-                mask = 0xfff0fff0u;
-            okay &= put32(s, v->region, v->offset, v->value, mask);
-        }
-    }
+    if (!restore_saved(s, s->saved_count))
+        return record_failure(s, GIULIA_LINK_READBACK);
     /* No DBI/ATU accesses after restoring PARF's address convention. */
-    if (!okay) return record_failure(s, GIULIA_LINK_READBACK);
+    s->parf_owned = s->core_owned = s->memory_owned = 0;
     s->state = GIULIA_LINK_STOPPED;
     return GIULIA_LINK_OK;
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Cloud-only tests of the actual SM8650 PCIe power/PHY/link source.
+"""Cloud-only tests of the actual SM8650 Wi-Fi board/PCIe transport sources.
 
 MMIO and clock services are mocked; success cannot establish hardware support.
 Use --check-only locally to inspect inputs without compiling C.
@@ -21,7 +21,14 @@ def main():
     root = Path(__file__).resolve().parents[2]
     drivers = root/'xnu/files/bsd/dev'
     cases = [(drivers/f'giulia_pcie_{name}.c', root/f'tools/ace5/test-pcie-{name}.c')
-             for name in ('power', 'phy', 'link')]
+             for name in ('power', 'phy', 'link', 'noc')]
+    cases += [
+        (drivers/'giulia_wifi_gpio.c', root/'tools/ace5/test-wifi-gpio.c'),
+        (drivers/'giulia_rpmh.c', drivers/'giulia_wlan_rails.c', root/'tools/ace5/test-rpmh.c'),
+        (drivers/'giulia_wifi_board.c', root/'tools/ace5/test-wifi-board.c'),
+        (drivers/'giulia_mhi_snapshot.c', root/'tools/ace5/test-mhi-snapshot.c'),
+        (root/'tools/ace5/test-wifi-probe.c',),
+    ]
     for case in cases:
         for path in case:
             path.read_text(encoding='utf-8')
@@ -29,11 +36,12 @@ def main():
         print('PCIe bringup source inputs present; C tests NOT compiled or executed')
         return
     with tempfile.TemporaryDirectory(prefix='ace5-pcie-bringup-', dir=root.parent) as temporary:
-        for source, test in cases:
+        for case in cases:
+            *sources, test = case
             exe = Path(temporary)/(test.stem + ('.exe' if sys.platform == 'win32' else ''))
             subprocess.run(args.cc + ['-std=c11', '-O1', '-g', '-UNDEBUG', '-Wall', '-Wextra',
                 '-Werror', '-fsanitize=address,undefined', '-I', str(drivers),
-                str(source), str(test), '-o', str(exe)], check=True, timeout=90)
+                *map(str, sources), str(test), '-o', str(exe)], check=True, timeout=90)
             subprocess.run([str(exe)], check=True, timeout=30)
 
 

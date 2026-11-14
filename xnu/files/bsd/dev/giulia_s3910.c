@@ -9,6 +9,7 @@
 #include <pexpert/pexpert.h>
 #include <sys/redwood_input.h>
 #include <sys/systm.h>
+#include "giulia_rpmh.h"
 extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern vm_offset_t ml_io_map_wcomb(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
@@ -34,7 +35,14 @@ static void s3910_thread(__unused void *arg, __unused wait_result_t wait) {
     h->rsc=ml_io_map(S39_RSC_PA,0x10000);
     h->db=ml_io_map_wcomb(S39_DB_PA,0x20000);
     if (!h->gpio || !h->rsc || !h->db) goto failed;
+    /* Touch and Wi-Fi share DRV2 ACTIVE TCS slots. Keep the common claim
+     * across the complete transaction, including its bounded wait. A touch
+     * timeout leaves a command in flight: retain its token rather than let
+     * another driver overwrite that slot or the global interrupt state. */
+    rc=giulia_rpmh_bus_claim(h);
+    if (rc) { rc=-14; goto failed; }
     rc=s39_power(h);
+    if (rc!=-13) (void)giulia_rpmh_bus_release(h);
     printf("s3910: power rc=%d RSC=%#x ldob4=%#x slot=%u\n",rc,h->rsc_id,h->regulator,h->slot);
     if (rc) goto failed;
     s39_bus_init(h); s39_reset(h);

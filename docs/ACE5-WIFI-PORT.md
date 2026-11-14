@@ -166,8 +166,9 @@ PHY、链路训练、SMMU/DMA、MHI 和 ath12k 网络收发尚未接通，不能
 
 需要由同一板级 owner 串行执行：完成真实供电/NoC/所有权交接并拉低 PERST#，
 启动 power，执行 link prepare，再启动 PHY，经规定 PERST# 延时后训练链路。
-退出时先停上层/MSI、拉低 PERST#，再依次停 link、PHY、power；恢复失败保留
-资源和状态供重试。前置条件标志不能代替真实供电、时钟或 AOP/CESTA 交接。
+退出时先停上层/MSI、拉低 PERST#，再让 link 静止、停 PHY、最终恢复 link，
+然后停 power。不能在 PHY 清理前恢复可能关闭 PHY 访问的 PARF 配置；恢复失败
+保留资源和状态供重试。前置条件标志不能代替真实供电、时钟或 AOP/CESTA 交接。
 
 云端 `test-pcie-bringup.py --cc clang-18` 将生产核心与 mock-MMIO 链接，
 检查超时、丢失写入、无效读回和退出恢复；本机仅可用 `--check-only` 检查
@@ -178,8 +179,8 @@ PHY、链路训练、SMMU/DMA、MHI 和 ath12k 网络收发尚未接通，不能
 参考的 OnePlus Android 6.1 源码仅作为硬件资料，不作为已验证可启动的内核；
 本项目构建 XNU 8796.121.2，未构建或刷入该 Android 内核。
 
-板级接入仍有两个明确限制：link prepare 目前要求复位后的 DBI/iATU 窗口
-已可安全读取，不能把这项前提当成已实现的冷启动地址配置；power 使用的
+上述构建的 link prepare 要求复位后的 DBI/iATU 窗口已可安全读取；后续修改
+已将 PARF decoder 设置移到首次 DBI/iATU 访问之前，见下一节。power 使用的
 TCSR `0x01fc0000 + 0x31100` 来自主线驱动，但本机 Android 设备树的同地址
 syscon 仅声明 `0x30000` 长度。未来 MMIO 适配必须单独确认并覆盖该寄存器，
 不能按这个 syscon 长度映射后越界访问。CESTA 退出、NoC voter 与直接 GCC
@@ -190,3 +191,48 @@ syscon 仅声明 `0x30000` 长度。未来 MMIO 适配必须单独确认并覆�
 已通过 power、PHY、link 和 MSI 的 mock 回归及完整 XNU 构建；下载后核对了
 全部 7 项构建产物的长度和 SHA-256。内核 ccache 命中 1045/1049 次可缓存
 调用（99.62%）。本轮没有将新代码加载到手机，这不是无线功能的实机通过记录。
+
+## 2026-11-14：板级时序、无线供电与交接诊断
+
+以下是后续源码实现，验证结果与前一构建分开记录；尚未在手机执行无线寄存器
+写入，不能据此宣称 Wi-Fi 可扫描或联网。
+
+- `giulia_rpmh.c` 解析本次启动的 CMD DB，执行 DRV2 active TCS 事务、完成检查、
+  有界等待及超时恢复。Wi-Fi 与原触摸电源路径共用非递归事务锁；超时保留锁，
+  避免另一客户端覆盖尚未结束的事务。其他 RSC 客户端和中断所有权仍需平台证明。
+- `giulia_wlan_rails.c` 控制设备树所列七路电源的电压与 enable 投票。默认要求
+  已知的原始每客户端投票，才能失败回滚；聚合电压、sysfs 和 TCS 残留都不能
+  充当这个基线。显式的保留投票试验模式不会自动启用，也不声称恢复成功。
+  电源 mode、AOP/QMP 与共享资源的接管仍是外部前提。
+- `giulia_wifi_gpio.c` 实现 WLAN_EN、PERST、CLKREQ、WAKE 的真实 GPIO 配置与
+  延时，保留不属于驱动的位；BT/SW_CTRL 只读取。失败保存恢复状态，支持重试。
+- `giulia_pcie_link.c` 在首次读取 DBI/iATU 前完成 PARF decoder 设置，分别跟踪
+  PARF 和核心窗口所有权。新增独立的 CPU BAR 内存解码开关；仍禁止 Bus Master
+  与 MSI。退出拆成 quiesce 和最终恢复，保证 PHY 停止前仍能访问所需资源。
+- `giulia_wifi_board.c` 串行调用 GPIO、power、link、PHY，成功上限是 CPU 可访问
+  BAR。每阶段重新检查外部资源租约；失败退出遵循 PERST、link quiesce、PHY、
+  link restore、power、GPIO 的顺序。停止失败不释放仍在使用的电源/NoC 租约。
+- `giulia_pcie_noc.c` 提供有界的 CESTA/CRM 只读快照，不写投票，不根据快照
+  自动认定 NoC ready 或 CESTA 已交权。完整运行时快照需要另行证明访问条件。
+- `giulia_mhi_snapshot.c` 在 BAR 已可访问后，仅读取 MHI/BHI/BHIE 状态白名单，
+  校验完整偏移及 BAR 边界，最多 28 次读取。不读取芯片序列/密钥，不启动 DMA、
+  不加载固件；BHIE RX 上电值未定义，不能当作成功传输。
+
+新增 XNU 入口 `ace5_wifi_probe=1|2` 默认关闭，只允许 giulia。模式 1 读取已知
+GCC、GPIO、RSC 和 CMD DB；模式 2 仅额外读取 vendor 早期 probe 访问的两个
+SM override/mask 与四个 CRM header 寄存器，完整运行时表留待后续。此入口没有
+设备寄存器写入，也不会调用上述电源或 PCIe 启动核心。读取 MMIO 本身仍可能因
+未验证的启动环境而异常；可读 header 也不证明控制权已经移交。
+
+`phone.py run --wifi-probe 2` 要求显式 `--kernel`、`--bootcpu 1` 和正数
+`--seconds`。最终日志必须包含该模式的开始及完成标记，模式 2 还需 header
+完成标记；仅成功启动内核不能算诊断完成。短诊断只需小 root 镜像，无需传输
+整套 iOS system 镜像，也不以进入桌面为成功标准。
+
+云端统一测试入口仍为 `tools/ace5/test-pcie-bringup.py --cc clang-18`，新增
+RPMh/rails、GPIO、board、NoC、MHI 与 XNU probe 用例。board 测试检查实际协调器
+的调用顺序，叶子驱动由各自真实源码 mock-MMIO 测试覆盖；这些均不证明硬件时序。
+本机只执行 Python/源码检查，C 回归与完整内核构建使用 GitHub Actions。
+
+下一步依赖真实交接状态补齐 AOP/NoC/CESTA 的平台实现，再接 SMMU/DMA、MSI、
+MHI 固件启动、ath12k 与网络接口；当前没有用全置位前置条件跳过这些缺口。

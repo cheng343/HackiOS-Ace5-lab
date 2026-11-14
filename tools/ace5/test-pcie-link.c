@@ -11,6 +11,9 @@ struct fake {
     uint32_t regs[4][0x3000 / 4];
     uint32_t original[4][0x3000 / 4];
     unsigned reads, writes, cfg_accesses, bar_probes, barriers;
+    unsigned core_reads, core_writes, cold_aperture, allow_memory, perst_asserted;
+    char memory_events[64];
+    unsigned memory_event_count;
     unsigned link_reads, link_after, crs_reads, drop_link_after;
     uint64_t delay_total;
     uint32_t bar_mask;
@@ -42,7 +45,23 @@ static void access_check(struct fake *f, unsigned r, uint32_t o, unsigned width)
     assert(!(o & (width - 1u)));
     if (f->check_decoders && f->old_decoder)
         assert(r != GIULIA_LINK_DBI && r != GIULIA_LINK_ATU);
+    if (f->cold_aperture && r != GIULIA_LINK_PARF) {
+        /* Cold RC reset leaves DBI/ATU inaccessible until PARF setup. */
+        assert(f->regs[GIULIA_LINK_PARF][0x1000 / 4] == 4);
+        assert(!(f->regs[GIULIA_LINK_PARF][0x40 / 4] & 1));
+        assert(f->regs[GIULIA_LINK_PARF][0x350 / 4] == GIULIA_PCIE_LINK_DBI_PA);
+        assert(f->regs[GIULIA_LINK_PARF][0x354 / 4] == 0);
+        assert(f->regs[GIULIA_LINK_PARF][0x634 / 4] == GIULIA_PCIE_LINK_ATU_PA);
+        assert(f->regs[GIULIA_LINK_PARF][0x638 / 4] == 0);
+        assert(f->regs[GIULIA_LINK_PARF][0x358 / 4] == 0);
+        assert(f->regs[GIULIA_LINK_PARF][0x35c / 4] == 0x80000000u);
+        assert(!(f->regs[GIULIA_LINK_PARF][0] & BIT(29)));
+        assert(f->regs[GIULIA_LINK_PARF][0x174 / 4] & BIT(4));
+        assert(!(f->regs[GIULIA_LINK_PARF][0x20 / 4] & BIT(5)));
+        assert(f->regs[GIULIA_LINK_PARF][0x1a8 / 4] & BIT(31));
+    }
     if (r == GIULIA_LINK_CFG) {
+        assert(!f->perst_asserted);
         assert(up(f));
         assert(f->regs[GIULIA_LINK_ATU][4 / 4] & BIT(31));
         f->cfg_accesses++;
@@ -65,6 +84,7 @@ static uint32_t read32(void *p, unsigned r, uint32_t o)
     uint32_t v;
     access_check(f, r, o, 4);
     f->reads++;
+    if (r != GIULIA_LINK_PARF) f->core_reads++;
     v = f->regs[r][o / 4];
     if (r == GIULIA_LINK_CFG && o == 0 && f->crs_reads) {
         f->crs_reads--;
@@ -82,6 +102,7 @@ static uint16_t read16(void *p, unsigned r, uint32_t o)
     uint16_t v;
     access_check(f, r, o, 2);
     f->reads++;
+    if (r != GIULIA_LINK_PARF) f->core_reads++;
     v = raw16(f, r, o);
     if (r == GIULIA_LINK_DBI && o == 0x82) {
         if (f->regs[GIULIA_LINK_PARF][0x1b0 / 4] & BIT(8)) f->link_reads++;
@@ -104,6 +125,7 @@ static void write32(void *p, unsigned r, uint32_t o, uint32_t v)
     struct fake *f = p;
     access_check(f, r, o, 4);
     f->writes++;
+    if (r != GIULIA_LINK_PARF) f->core_writes++;
     /* A 32-bit command/status write would acknowledge W1C status bits. */
     assert(!((r == GIULIA_LINK_DBI || r == GIULIA_LINK_CFG) && o == 4));
     if (r == GIULIA_LINK_CFG && (o == 0x10 || o == 0x14)) {
@@ -123,8 +145,16 @@ static void write16(void *p, unsigned r, uint32_t o, uint16_t v)
     struct fake *f = p;
     access_check(f, r, o, 2);
     f->writes++;
-    if ((r == GIULIA_LINK_DBI || r == GIULIA_LINK_CFG) && o == 4)
-        assert((v & 7u) == 0); /* No IO, MEM or BME, including failures. */
+    if (r != GIULIA_LINK_PARF) f->core_writes++;
+    if ((r == GIULIA_LINK_DBI || r == GIULIA_LINK_CFG) && o == 4) {
+        assert((v & 5u) == 0); /* No IO or BME, including failures. */
+        if (v & BIT(1)) assert(f->allow_memory);
+        if (f->allow_memory) {
+            assert(f->memory_event_count < sizeof(f->memory_events) - 1);
+            f->memory_events[f->memory_event_count++] = r == GIULIA_LINK_DBI ?
+                ((v & BIT(1)) ? 'R' : 'r') : ((v & BIT(1)) ? 'E' : 'e');
+        }
+    }
     v = (uint16_t)dropped(f, r, o, v, raw16(f, r, o));
     seed16(f, r, o, v);
     after_cfg(f, r);
@@ -142,6 +172,7 @@ static void init(struct fake *f, struct giulia_pcie_link *s)
 {
     memset(f, 0, sizeof(*f));
     memset(s, 0, sizeof(*s));
+    f->cold_aperture = 1;
     f->bar_mask = 0xffe00004u;
     f->link_after = 3;
     f->regs[GIULIA_LINK_PARF][0] = BIT(29) | 0x365eu;
@@ -179,6 +210,7 @@ static void stop(struct fake *f, struct giulia_pcie_link *s)
 {
     unsigned accesses = f->cfg_accesses;
     f->check_decoders = 1;
+    f->perst_asserted = 1;
     assert(giulia_pcie_link_stop(s, GIULIA_LINK_STOP_REQUIRED) == 0);
     assert(s->state == GIULIA_LINK_STOPPED);
     assert(f->cfg_accesses == accesses); /* No config accesses after PERST#. */
@@ -246,12 +278,14 @@ static void test_busy(void)
             init(&f, &s); io = io_for(&f);
             f.regs[GIULIA_LINK_ATU][(n * 0x200 + inbound * 0x100 + 4) / 4] = BIT(31);
             assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED, &io) == GIULIA_LINK_BUSY);
-            assert(f.writes == 0);
+            assert(f.core_writes == 0 && s.state == GIULIA_LINK_STOPPED);
+            assert(memcmp(f.regs[GIULIA_LINK_PARF], f.original[GIULIA_LINK_PARF],
+                sizeof(f.regs[GIULIA_LINK_PARF])) == 0);
         }
         init(&f, &s); io = io_for(&f);
         f.regs[GIULIA_LINK_DBI][(0x828 + n * 12) / 4] = 1;
         assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED, &io) == GIULIA_LINK_BUSY);
-        assert(f.writes == 0);
+        assert(f.core_writes == 0 && s.state == GIULIA_LINK_STOPPED);
     }
     init(&f, &s); io = io_for(&f);
     f.regs[GIULIA_LINK_PARF][0x1b0 / 4] = BIT(8);
@@ -259,7 +293,7 @@ static void test_busy(void)
     assert(f.writes == 0);
     init(&f, &s); io = io_for(&f); seed16(&f, GIULIA_LINK_DBI, 4, BIT(2));
     assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED, &io) == GIULIA_LINK_BUSY);
-    assert(f.writes == 0);
+    assert(f.core_writes == 0 && s.state == GIULIA_LINK_STOPPED);
     init(&f, &s); io = io_for(&f); f.regs[GIULIA_LINK_PARF][0x22c / 4] = BIT(13);
     assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED, &io) == GIULIA_LINK_BUSY);
     assert(f.writes == 0);
@@ -282,7 +316,7 @@ static void test_wrong_endpoint_and_capabilities(void)
     struct fake f; struct giulia_pcie_link s; struct giulia_pcie_link_io io;
     init(&f, &s); io = io_for(&f); seed16(&f, GIULIA_LINK_DBI, 0x70, 0x7010);
     assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED, &io) == GIULIA_LINK_CAPABILITY);
-    assert(f.writes == 0);
+    assert(f.core_writes == 0 && s.state == GIULIA_LINK_STOPPED);
     init(&f, &s); prepare(&f, &s); f.regs[GIULIA_LINK_CFG][0] = 0x123417cb;
     assert(giulia_pcie_link_train(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_ENDPOINT);
     assert(f.bar_probes == 0); stop(&f, &s);
@@ -348,9 +382,10 @@ static void test_all_ones_reads(void)
         init(&f, &s); io = io_for(&f);
         f.fault_on = 1; f.fault_region = regions[n]; f.fault_offset = offsets[n];
         assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED, &io) == GIULIA_LINK_READBACK);
-        assert(s.state == GIULIA_LINK_IDLE && f.writes == 0);
+        if (n == 0) assert(s.state == GIULIA_LINK_IDLE && f.writes == 0);
+        else assert(s.state == GIULIA_LINK_STOPPED && f.core_writes == 0);
         for (unsigned j = 0; j < s.saved_count; j++) assert(s.saved[j].value != 0xffffffffu);
-        assert(giulia_pcie_link_stop(&s, 0) == 0 && f.writes == 0);
+        assert(giulia_pcie_link_stop(&s, 0) == 0 && f.core_writes == 0);
     }
     /* Snapshot succeeded, then an RMW source fails: never write derived ones. */
     init(&f, &s); io = io_for(&f);
@@ -388,6 +423,169 @@ static void test_all_ones_reads(void)
     assert(f.regs[GIULIA_LINK_DBI][0x18 / 4] == 0x00010100u);
     f.fault_on = 0; stop(&f, &s);
 }
+
+static void test_cold_decoder_failures(void)
+{
+    struct fake f; struct giulia_pcie_link s; struct giulia_pcie_link_io io;
+    const uint32_t offsets[] = {0x1000, 0x40, 0x350, 0x354, 0x634, 0x638,
+        0x358, 0x35c, 0, 0x174, 0x20, 0x1a8};
+    for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+        init(&f, &s); io = io_for(&f);
+        f.fault_on = 1; f.fault_region = GIULIA_LINK_PARF;
+        f.fault_offset = offsets[i]; f.fault_after_writes = 1;
+        assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED, &io) == GIULIA_LINK_READBACK);
+        assert(s.state == GIULIA_LINK_FAULT && s.parf_owned && !s.core_owned);
+        assert(f.core_reads == 0 && f.core_writes == 0);
+        f.fault_on = 0; stop(&f, &s);
+        assert(f.core_reads == 0 && f.core_writes == 0 && !s.parf_owned);
+    }
+    /* Discovering a foreign core never grants permission to disable it, even
+     * if restoring the provisional PARF decoder subsequently fails. */
+    init(&f, &s); io = io_for(&f);
+    f.regs[GIULIA_LINK_DBI][0x828 / 4] = 1;
+    f.drop_on = 1; f.drop_region = GIULIA_LINK_PARF; f.drop_offset = 0;
+    f.drop_mask = BIT(29); f.drop_value_only = 1;
+    f.drop_value = f.original[GIULIA_LINK_PARF][0];
+    assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED, &io) == GIULIA_LINK_READBACK);
+    assert(s.state == GIULIA_LINK_FAULT && s.parf_owned && !s.core_owned);
+    assert(f.core_writes == 0 && f.regs[GIULIA_LINK_DBI][0x828 / 4] == 1);
+    {
+        unsigned reads = f.core_reads;
+        f.drop_on = 0;
+        assert(giulia_pcie_link_quiesce(&s, GIULIA_LINK_QUIESCE_REQUIRED) == 0);
+        assert(s.state == GIULIA_LINK_QUIESCED && !s.core_owned);
+        assert(f.core_reads == reads && f.core_writes == 0);
+        assert(giulia_pcie_link_stop(&s, GIULIA_LINK_STOP_REQUIRED) == 0);
+        assert(f.core_reads == reads && f.core_writes == 0);
+        assert(f.regs[GIULIA_LINK_DBI][0x828 / 4] == 1);
+        assert(!s.parf_owned && !s.core_owned);
+    }
+}
+
+static void ready_for_memory(struct fake *f, struct giulia_pcie_link *s)
+{
+    init(f, s); prepare(f, s);
+    assert(s->parf_owned && s->core_owned);
+    assert(giulia_pcie_link_train(s, GIULIA_LINK_TRAIN_REQUIRED) == 0);
+    f->allow_memory = 1;
+}
+static void test_memory_enable_disable(void)
+{
+    struct fake f; struct giulia_pcie_link s;
+    unsigned accesses, writes;
+    ready_for_memory(&f, &s);
+    accesses = f.reads + f.writes;
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED &
+        ~GIULIA_LINK_USERS_QUIESCED) == GIULIA_LINK_PREREQUISITE);
+    assert(f.reads + f.writes == accesses);
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == 0);
+    assert(s.memory_owned && s.memory_enabled && s.state == GIULIA_LINK_READY);
+    assert(strcmp(f.memory_events, "RE") == 0);
+    assert((raw16(&f, GIULIA_LINK_DBI, 4) & 7u) == 2u);
+    assert((raw16(&f, GIULIA_LINK_CFG, 4) & 7u) == 2u);
+    assert((raw16(&f, GIULIA_LINK_CFG, 0x52) & 1u) == 0);
+    assert(raw16(&f, GIULIA_LINK_DBI, 6) == 0xa510u);
+    assert(raw16(&f, GIULIA_LINK_CFG, 6) == 0x4310u);
+    writes = f.writes;
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == 0);
+    assert(f.writes == writes); /* Idempotent enable still verifies safety. */
+    assert(giulia_pcie_link_mem_disable(&s, GIULIA_LINK_MEMORY_REQUIRED) == 0);
+    assert(strcmp(f.memory_events, "REer") == 0 && !s.memory_enabled);
+    assert((raw16(&f, GIULIA_LINK_DBI, 4) & 7u) == 0);
+    assert((raw16(&f, GIULIA_LINK_CFG, 4) & 7u) == 0);
+    stop(&f, &s);
+    /* PERST# isolation also permits stop without a previous MEM-disable call.
+     * The core must make no endpoint transactions once reset is asserted. */
+    ready_for_memory(&f, &s);
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == 0);
+    stop(&f, &s);
+    assert(!s.memory_enabled && !s.memory_owned && !s.core_owned);
+}
+
+static void test_memory_guard_failures(void)
+{
+    struct fake f; struct giulia_pcie_link s;
+    unsigned writes, accesses;
+    ready_for_memory(&f, &s);
+    f.regs[GIULIA_LINK_ATU][0x14 / 4] ^= 0x01000000u;
+    writes = f.writes; accesses = f.cfg_accesses;
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_READBACK);
+    assert(f.writes == writes && f.cfg_accesses == accesses && !s.memory_owned);
+    stop(&f, &s);
+    ready_for_memory(&f, &s);
+    f.regs[GIULIA_LINK_ATU][0x214 / 4] ^= 0x200000;
+    writes = f.writes;
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_READBACK);
+    assert(f.writes == writes && !s.memory_owned); stop(&f, &s);
+    ready_for_memory(&f, &s); seed16(&f, GIULIA_LINK_CFG, 0x52, 0x015b);
+    writes = f.writes;
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_BUSY);
+    assert(f.writes == writes && !s.memory_owned); stop(&f, &s);
+    ready_for_memory(&f, &s); seed16(&f, GIULIA_LINK_CFG, 4, BIT(10) | BIT(2));
+    writes = f.writes;
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_BUSY);
+    assert(f.writes == writes && !s.memory_owned); stop(&f, &s);
+    ready_for_memory(&f, &s); f.regs[GIULIA_LINK_CFG][0x10 / 4] = 0x60600004;
+    writes = f.writes;
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_BAR);
+    assert(f.writes == writes && !s.memory_owned); stop(&f, &s);
+}
+
+static void test_memory_readback_and_retry(void)
+{
+    struct fake f; struct giulia_pcie_link s;
+    for (unsigned r = GIULIA_LINK_DBI; r <= GIULIA_LINK_CFG; r += 2) {
+        ready_for_memory(&f, &s);
+        f.drop_on = 1; f.drop_region = r; f.drop_offset = 4; f.drop_mask = BIT(1);
+        assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_READBACK);
+        assert(s.state == GIULIA_LINK_FAULT && s.memory_owned && !s.memory_enabled);
+        assert((raw16(&f, GIULIA_LINK_DBI, 4) & 7u) == 0);
+        assert((raw16(&f, GIULIA_LINK_CFG, 4) & 7u) == 0);
+        f.drop_on = 0;
+        assert(giulia_pcie_link_mem_disable(&s, GIULIA_LINK_MEMORY_REQUIRED) == 0);
+        assert(s.state == GIULIA_LINK_FAULT); /* No implicit fault dismissal. */
+        stop(&f, &s);
+    }
+    ready_for_memory(&f, &s);
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == 0);
+    f.drop_on = 1; f.drop_region = GIULIA_LINK_CFG; f.drop_offset = 4; f.drop_mask = BIT(1);
+    assert(giulia_pcie_link_mem_disable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_READBACK);
+    assert(s.state == GIULIA_LINK_FAULT && s.memory_owned);
+    assert((raw16(&f, GIULIA_LINK_DBI, 4) & 7u) == 0);
+    assert((raw16(&f, GIULIA_LINK_CFG, 4) & 7u) == 2u);
+    f.drop_on = 0;
+    assert(giulia_pcie_link_mem_disable(&s, GIULIA_LINK_MEMORY_REQUIRED) == 0);
+    assert(!s.memory_enabled); stop(&f, &s);
+    ready_for_memory(&f, &s);
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == 0);
+    f.lost_link = 1;
+    {
+        unsigned accesses = f.cfg_accesses;
+        assert(giulia_pcie_link_mem_disable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_DOWN);
+        assert(f.cfg_accesses == accesses && s.state == GIULIA_LINK_FAULT);
+        assert((raw16(&f, GIULIA_LINK_DBI, 4) & 7u) == 0);
+    }
+    stop(&f, &s);
+}
+static void test_deferred_parf_restore(void)
+{
+    struct fake f; struct giulia_pcie_link s;
+    unsigned writes;
+    ready_for_memory(&f, &s);
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == 0);
+    f.perst_asserted = 1;
+    assert(giulia_pcie_link_quiesce(&s, GIULIA_LINK_QUIESCE_REQUIRED) == 0);
+    assert(s.state == GIULIA_LINK_QUIESCED && s.parf_owned && s.core_owned);
+    assert(!s.memory_enabled && !s.config_atu_enabled);
+    assert((f.regs[GIULIA_LINK_PARF][0x40 / 4] & 1u) == 0);
+    assert(f.regs[GIULIA_LINK_DBI][0x18 / 4] == 0x00010100u);
+    writes = f.writes;
+    assert(giulia_pcie_link_stop(&s, GIULIA_LINK_QUIESCE_REQUIRED) == GIULIA_LINK_PREREQUISITE);
+    assert(giulia_pcie_link_quiesce(&s, GIULIA_LINK_QUIESCE_REQUIRED) == 0);
+    assert(f.writes == writes); /* QMP can now stop while PARF remains held. */
+    stop(&f, &s);
+    assert((f.regs[GIULIA_LINK_PARF][0x40 / 4] & 1u) == 1u);
+}
 int main(void)
 {
     test_default_and_gates();
@@ -398,6 +596,11 @@ int main(void)
     test_bar_and_msix();
     test_write_failures_and_retry();
     test_all_ones_reads();
+    test_cold_decoder_failures();
+    test_memory_enable_disable();
+    test_memory_guard_failures();
+    test_memory_readback_and_retry();
+    test_deferred_parf_restore();
     puts("SM8650 PCIe link: ownership, training, config, BAR and rollback mocks passed");
     return 0;
 }

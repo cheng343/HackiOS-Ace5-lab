@@ -191,6 +191,25 @@ def ace5_driver_arguments(bootcpu, kernel, battery, cpu_khz):
 
 
 ROOT = Path(__file__).resolve().parents[2]
+def ace5_wifi_probe_arguments(mode, bootcpu, kernel, seconds):
+    if not mode:
+        return ''
+    if mode not in (1, 2) or not kernel or bootcpu != 1 or seconds <= 0:
+        raise RuntimeError('--wifi-probe requires mode 1 or 2, --kernel, --bootcpu 1 and a finite run')
+    return f' ace5_wifi_probe={mode}'
+
+
+def check_wifi_probe_log(mode, text, log):
+    if not mode:
+        return
+    markers = [f'ace5-wifi: probe={mode} read-only begin',
+               'ace5-wifi: read-only probe complete']
+    if mode == 2:
+        markers.append('ace5-wifi: early CESTA/CRM headers captured')
+    if any(marker not in text for marker in markers):
+        raise RuntimeError(f'Wi-Fi handoff probe incomplete; see {log}')
+
+
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
 sub = ap.add_subparsers(dest='command', required=True)
@@ -205,6 +224,8 @@ run.add_argument('--verbose', action='store_true')
 run.add_argument('--kernel', type=Path, help='Explicit locally built Mach-O kernel')
 run.add_argument('--root-image', type=Path, help='Local small APFS image, e.g. with device firmware')
 run.add_argument('--touch', action='store_true', help='Enable the giulia S3910 driver; requires --kernel')
+run.add_argument('--wifi-probe', type=int, choices=[1, 2],
+                 help='Read-only Ace 5 handoff probe: 1 GCC/GPIO/CMD DB, 2 also CESTA/CRM; requires --kernel, CPU 1 and a finite run')
 run.add_argument('--battery', action='store_true',
                  help='Experimental Ace 5 NFG8011B sampling; requires --kernel and --bootcpu 1')
 run.add_argument('--cpu-khz', type=int, default=0,
@@ -339,6 +360,8 @@ try:
                        'touchscreen=0 buttons=0 cpufreq=0 gpu=0 wifi=0 adsp=0')
         if args.command == 'run':
             commandline += ace5_driver_arguments(args.bootcpu, args.kernel, args.battery, args.cpu_khz)
+        if args.command == 'run':
+            commandline += ace5_wifi_probe_arguments(args.wifi_probe, args.bootcpu, args.kernel, seconds)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -418,6 +441,8 @@ try:
             if re.search(r'ace5-gpu: (stage [0-9]+|probe ended|.*cleanup FAILED)', line):
                 print(line, flush=True)
         check_kernel_log(saved_log, log)
+        if args.command == 'run':
+            check_wifi_probe_log(args.wifi_probe, saved_log, log)
         if args.command == 'run' and args.gpu_probe and f'ace5-gpu: stage {args.gpu_probe} complete' not in saved_log:
             raise RuntimeError(f'GPU probe did not complete requested stage {args.gpu_probe}; see {log}')
         if args.command == 'run' and args.gpu_keep and 'ace5-gpu: persistent startup ready=1' not in saved_log:

@@ -17,7 +17,7 @@ from unittest.mock import Mock
 SOURCE = Path(__file__).with_name('phone.py')
 FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect_run_diagnostics',
              'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel',
-             'ace5_driver_arguments'}
+             'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log'}
 
 
 class Clock:
@@ -119,6 +119,31 @@ class PhoneTests(unittest.TestCase):
         self.assertIn('returned', self.collect())
         self.assertEqual(self.log.read_text(), 'diagnostic bytes\n')
         self.assertEqual(self.commands[-1], ('get_staged', self.log))
+
+    def test_wifi_probe_rejects_unobserved_or_persistent_runs(self):
+        arguments = self.namespace['ace5_wifi_probe_arguments']
+        self.assertEqual(arguments(None, 0, None, 0), '')
+        for mode, cpu, kernel, seconds in ((3, 1, 'kernel', 30), (1, 0, 'kernel', 30),
+                                           (2, 1, None, 30), (1, 1, 'kernel', 0),
+                                           (2, 1, 'kernel', -1)):
+            with self.subTest(mode=mode, cpu=cpu, seconds=seconds), self.assertRaises(RuntimeError):
+                arguments(mode, cpu, kernel, seconds)
+        for mode in (1, 2):
+            self.assertEqual(arguments(mode, 1, 'kernel', 30), f' ace5_wifi_probe={mode}')
+        self.assertEqual(self.commands, [])
+
+    def test_wifi_probe_requires_its_actual_completion(self):
+        check = self.namespace['check_wifi_probe_log']
+        check(None, '', self.log)
+        for mode in (1, 2):
+            start = f'ace5-wifi: probe={mode} read-only begin'
+            end = 'ace5-wifi: read-only probe complete'
+            header = 'ace5-wifi: early CESTA/CRM headers captured'
+            text = '\n'.join([start, end] + ([header] if mode == 2 else []))
+            check(mode, text, self.log)
+            for marker in [start, end] + ([header] if mode == 2 else []):
+                with self.subTest(mode=mode, missing=marker), self.assertRaises(RuntimeError):
+                    check(mode, text.replace(marker, ''), self.log)
 
     def test_selftest_requires_its_own_success(self):
         self.results = ['result: selftest-ok 0 0\n']
