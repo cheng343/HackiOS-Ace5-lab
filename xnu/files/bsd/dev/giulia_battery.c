@@ -8,7 +8,7 @@
  * Not validated on hardware; no initial cached/default readings are published.
  */
 #include <kern/clock.h>
-#include <kern/sched_prim.h>
+#include <kern/cpu_data.h> /* XNU 8796: disable_preemption()/enable_preemption() */
 #include <kern/thread.h>
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
