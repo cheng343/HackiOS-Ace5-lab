@@ -23,7 +23,7 @@ typedef int wait_result_t;
 typedef void *thread_t;
 static unsigned mode, board, creates, exits, deallocs, lines, mapped, unmapped;
 static uint32_t failed_pa;
-static int thread_error, saw_complete, saw_noc, saw_aop, resolver_calls;
+static int thread_error, saw_complete, saw_noc, saw_aop, saw_full, resolver_calls;
 static _Alignas(0x4000) uint32_t gcc[0x70000 / 4], gpio[0x100000 / 4], rsc[0x10000 / 4];
 static _Alignas(0x4000) uint32_t db[0x20000 / 4], sm_pages[0xc000 / 4], crm_pages[0x4000 / 4];
 static _Alignas(0x4000) uint32_t aop_pages[0x4000 / 4];
@@ -88,6 +88,7 @@ void loader_log_line(const char *text)
     if (strstr(text, "read-only probe complete")) saw_complete = 1;
     if (strstr(text, "early CESTA/CRM headers captured")) saw_noc = 1;
     if (strstr(text, "AOP descriptor captured")) saw_aop = 1;
+    if (strstr(text, "full SM/CRM snapshot captured; no table/channel writes")) saw_full = 1;
 }
 int giulia_rpmh_resolve_vrm(const uint8_t *data, uint32_t bytes, uint32_t version,
     const char *name, uint32_t *address)
@@ -109,7 +110,7 @@ static void setup(unsigned requested)
 {
     mode = requested; board = HACKIOS_PLATFORM_GIULIA;
     creates = exits = deallocs = lines = mapped = unmapped = failed_pa = 0;
-    thread_error = saw_complete = saw_noc = saw_aop = resolver_calls = 0;
+    thread_error = saw_complete = saw_noc = saw_aop = saw_full = resolver_calls = 0;
     wifi_probe_started = wifi_probe_mode = 0;
     memset(db, 0, sizeof(db));
     memset(sm_pages, 0, sizeof(sm_pages)); memset(crm_pages, 0, sizeof(crm_pages));
@@ -132,13 +133,18 @@ static void check(void)
 int main(void)
 {
     setup(0); giulia_wifi_init(); assert(!creates && !mapped);
-    setup(4); giulia_wifi_init(); assert(!creates && !mapped);
+    setup(5); giulia_wifi_init(); assert(!creates && !mapped);
     setup(1); board = 1; giulia_wifi_init(); assert(!creates && !mapped);
     setup(1); giulia_wifi_init(); check();
     assert(mapped == 15 && saw_complete && !saw_noc && resolver_calls == 7);
     giulia_wifi_init(); assert(creates == 1);
     setup(2); giulia_wifi_init(); check(); assert(mapped == 63 && saw_noc && saw_complete);
     setup(3); giulia_wifi_init(); check(); assert(mapped == 127 && saw_noc && saw_aop && saw_complete);
+    setup(4); giulia_wifi_init(); check(); assert(mapped == 127 && saw_full && saw_aop && saw_complete);
+    setup(4); sm[0x1078/4] = UINT32_MAX; original = fingerprint();
+    giulia_wifi_init(); check(); assert(saw_aop && !saw_full && !saw_complete);
+    setup(4); crm[1] ^= 0x10; original = fingerprint();
+    giulia_wifi_init(); check(); assert(!saw_full && !saw_complete);
     setup(3); failed_pa = 0x0c300000; giulia_wifi_init(); check(); assert(!saw_aop && !saw_complete);
     setup(3); aop_pages[1] = 2; original = fingerprint();
     giulia_wifi_init(); check(); assert(!saw_aop && !saw_complete);
@@ -152,5 +158,6 @@ int main(void)
     giulia_wifi_init(); check(); assert(!resolver_calls && saw_complete);
     setup(1); thread_error = 1; giulia_wifi_init(); assert(creates == 1 && !mapped && !exits);
     puts("Ace5 XNU Wi-Fi probe: opt-in, board gate, read-only maps and cleanup passed");
+    puts("Ace5 XNU NoC snapshot: actual full capture, read failures and untouched MMIO passed");
     return 0;
 }
