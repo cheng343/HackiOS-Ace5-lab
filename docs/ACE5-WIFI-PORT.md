@@ -236,3 +236,11 @@ RPMh/rails、GPIO、board、NoC、MHI 与 XNU probe 用例。board 测试检查�
 
 下一步依赖真实交接状态补齐 AOP/NoC/CESTA 的平台实现，再接 SMMU/DMA、MSI、
 MHI 固件启动、ath12k 与网络接口；当前没有用全置位前置条件跳过这些缺口。
+
+提交 `cd98988ebde62c421b64757b8ea8048eca044b64` 已通过
+[云端构建 43587684062](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43587684062)：
+上述新增模拟回归、loader 与完整 XNU 均成功。下载后核对了全部 7 项产物长度与
+SHA-256，内核为 `9d43c3434bac22359fb63a09ebf0eaffbc2f25e823b6bf1a9ed7836a3deed090`。
+ccache 命中 1045/1056 次可缓存编译（98.96%），11 次未命中；这不是整棵 make
+工作目录的增量复用。仅准备了临时诊断包，尚未取得本次真机交接日志，不能把
+编译和模拟回归通过记为 Wi-Fi 实机可用。
