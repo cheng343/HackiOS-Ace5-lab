@@ -15,7 +15,8 @@ from unittest.mock import Mock
 
 
 SOURCE = Path(__file__).with_name('phone.py')
-FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect_run_diagnostics'}
+FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect_run_diagnostics',
+             'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel'}
 
 
 class Clock:
@@ -42,6 +43,7 @@ class PhoneTests(unittest.TestCase):
         self.commands = []
         self.snapshot_error = None
         self.live_response = 'OKAY'
+        self.staged_logs = []
         self.namespace = dict(re=re, subprocess=subprocess, sys=sys, time=self.clock,
                               fb=self.fb, call=self.call, print=Mock())
         exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), self.namespace)
@@ -62,7 +64,10 @@ class PhoneTests(unittest.TestCase):
         if command[0] == 'get_staged':
             if self.snapshot_error:
                 raise self.snapshot_error
-            Path(command[1]).write_text('diagnostic bytes\n', encoding='utf-8')
+            text = self.staged_logs.pop(0) if self.staged_logs else 'diagnostic bytes\n'
+            Path(command[1]).write_text(text, encoding='utf-8')
+            return 'OKAY'
+        if command == ('oem', 'stop'):
             return 'OKAY'
         self.fail('Unexpected fastboot command: ' + repr(command))
 
@@ -160,6 +165,119 @@ class PhoneTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Live-log request failed'):
             self.collect(live_log=True)
         self.assertTrue((self.directory / 'run-poll-failure-staged.log').is_file())
+
+    def timing(self, **changes):
+        values = dict(seconds=0, bootcpu=1, gpu_probe=20, gpu_direct=True,
+                      gpu_keep=True, gpu_step_delay=0, live_log=False)
+        values.update(changes)
+        return self.namespace['validate_run_timing'](**values)
+
+    def observe(self, timeout=120):
+        return self.namespace['observe_persistent_startup'](self.directory, self.log, timeout)
+
+    def test_no_timer_requires_complete_persistent_profile(self):
+        self.assertTrue(self.timing())
+        for changed in ({'bootcpu': 0}, {'gpu_probe': None}, {'gpu_probe': 1}, {'gpu_probe': 19},
+                        {'gpu_direct': False}, {'gpu_keep': False}, {'gpu_step_delay': 1},
+                        {'live_log': True}):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                self.timing(**changed)
+
+    def test_finite_timing_keeps_probe_guards(self):
+        self.assertFalse(self.timing(seconds=120))
+        self.assertFalse(self.timing(seconds=120, gpu_probe=None, bootcpu=0, gpu_direct=False, gpu_keep=False))
+        self.assertFalse(self.timing(seconds=1, gpu_probe=2, bootcpu=0, gpu_direct=False, gpu_keep=False))
+        for changed in ({'seconds': -1}, {'seconds': 3601}, {'seconds': 120, 'bootcpu': 0},
+                        {'seconds': 9}, {'seconds': 10, 'gpu_step_delay': 1},
+                        {'seconds': 120, 'gpu_step_delay': 3001},
+                        {'seconds': 120, 'gpu_step_delay': -1},
+                        {'seconds': 120, 'gpu_probe': None, 'bootcpu': 0, 'live_log': True}):
+            with self.subTest(changed=changed), self.assertRaises(RuntimeError):
+                self.timing(**changed)
+
+    def test_persistent_requires_both_ready_markers_and_final_running_result(self):
+        self.staged_logs = ['ace5-gpu: stage 20 complete\n',
+                            'ace5-gpu: stage 20 complete\nace5-gpu: persistent startup ready=1\n']
+        self.assertIn('running', self.observe())
+        self.assertEqual(self.commands[-1], ('getvar', 'result'))
+        self.assertEqual(sum(c == ('live-log',) for c in self.commands), 2)
+        self.assertEqual(self.clock.now, 2)
+        self.assertNotIn(('oem', 'stop'), self.commands)
+        self.assertIn('not a stability test', str(self.namespace['print'].call_args))
+
+    def test_persistent_rejects_premature_return_even_after_ready_log(self):
+        self.staged_logs = ['ace5-gpu: stage 20 complete\nace5-gpu: persistent startup ready=1\n', 'final log\n']
+        self.results = ['result: running\n', 'result: returned\n']
+        with self.assertRaisesRegex(RuntimeError, 'ended before confirmation: returned'):
+            self.observe()
+        self.assertEqual(self.log.read_text(), 'final log\n')
+        self.assertNotIn(('oem', 'stop'), self.commands)
+
+    def test_persistent_nonrunning_status_saves_final_diagnostics(self):
+        for state in ('returned', 'not-started', 'other-core-hung', 'idle'):
+            with self.subTest(state=state):
+                self.results = [f'result: {state}\n']
+                with self.assertRaisesRegex(RuntimeError, 'ended before confirmation: ' + state):
+                    self.observe()
+                self.assertTrue(self.log.is_file())
+        self.assertNotIn(('live-log',), self.commands)
+
+    def test_persistent_live_log_race_saves_final_and_rejects_success(self):
+        self.results = ['result: running\n', 'result: returned\n']
+        self.live_response = 'FAILED (remote: no live kernel; fetch the final staged log)'
+        with self.assertRaisesRegex(RuntimeError, 'ended before confirmation: returned'):
+            self.observe()
+        self.assertTrue(self.log.is_file())
+        self.assertFalse(list(self.directory.glob('*-startup-0*.log')))
+
+    def test_persistent_timeout_only_stops_host_observation(self):
+        with self.assertRaisesRegex(RuntimeError, 'within 120 seconds.*no automatic stop or reboot'):
+            self.observe()
+        self.assertEqual(self.clock.now, 120)
+        self.assertTrue((self.directory / 'run-startup-unconfirmed-staged.log').is_file())
+        self.assertNotIn(('oem', 'stop'), self.commands)
+        self.assertNotIn(('reboot',), self.commands)
+
+    def test_persistent_failures_are_not_ready(self):
+        for failure in ('panic(cpu 1 caller 0x00)', 'ace5-gpu: stage 20 FAILED',
+                        'ace5-gpu: backend cleanup FAILED', 'ace5-gpu: live failure'):
+            with self.subTest(failure=failure):
+                self.staged_logs = [failure + '\nace5-gpu: stage 20 complete\nace5-gpu: persistent startup ready=1\n']
+                with self.assertRaisesRegex(RuntimeError, 'Kernel/probe failure'):
+                    self.observe()
+        self.assertNotIn(('oem', 'stop'), self.commands)
+
+    def test_persistent_usb_failure_preserves_diagnostics_without_stop(self):
+        self.live_response = 'FAILED (remote: cannot read live log)'
+        with self.assertRaisesRegex(RuntimeError, 'Live-log request failed.*Kernel may still be running'):
+            self.observe()
+        self.assertTrue((self.directory / 'run-startup-unconfirmed-staged.log').is_file())
+        self.assertNotIn(('oem', 'stop'), self.commands)
+
+    def test_manual_stop_waits_for_return_and_saves_log(self):
+        self.results = ['result: running\n', 'result: running\n', 'result: returned\n']
+        self.namespace['stop_running_kernel'](self.directory, self.log)
+        self.assertEqual(self.commands[:2], [('getvar', 'result'), ('oem', 'stop')])
+        self.assertEqual(self.commands[-1], ('get_staged', self.log))
+        self.assertTrue(self.log.is_file())
+
+    def test_manual_stop_skips_inactive_kernel(self):
+        self.results = ['result: returned\n']
+        self.namespace['stop_running_kernel'](self.directory, self.log)
+        self.assertEqual(self.commands, [('getvar', 'result')])
+
+    def test_manual_stop_timeout_never_reboots(self):
+        with self.assertRaisesRegex(RuntimeError, 'No reboot was sent.*physical power'):
+            self.namespace['stop_running_kernel'](self.directory, self.log)
+        self.assertEqual(self.clock.now, 60)
+        self.assertNotIn(('reboot',), self.commands)
+        self.assertTrue((self.directory / 'run-poll-failure-staged.log').is_file())
+
+    def test_manual_stop_rejects_cleanup_failure(self):
+        self.results = ['result: running\n', 'result: returned\n']
+        self.staged_logs = ['ace5-gpu: backend cleanup FAILED\n']
+        with self.assertRaisesRegex(RuntimeError, 'No reboot was sent'):
+            self.namespace['stop_running_kernel'](self.directory, self.log)
 
 
 if __name__ == '__main__':

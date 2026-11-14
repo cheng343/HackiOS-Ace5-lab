@@ -81,6 +81,99 @@ def collect_run_diagnostics(command, seconds, bootcpu, live_log, live_interval, 
     return result
 
 
+def validate_run_timing(seconds, bootcpu, gpu_probe, gpu_direct, gpu_keep, gpu_step_delay, live_log):
+    """Only the complete, independently observed GPU profile may omit its timer."""
+    if not 0 <= seconds <= 3600:
+        raise RuntimeError('seconds must be 0..3600')
+    if not 0 <= gpu_step_delay <= 3000:
+        raise RuntimeError('--gpu-step-delay must be between 0 and 3000 ms')
+    if live_log and (bootcpu != 1 or seconds == 0):
+        raise RuntimeError('--live-log requires --bootcpu 1 and a finite return timer')
+    persistent = (seconds == 0 and bootcpu == 1 and gpu_probe == 20 and
+                  gpu_direct and gpu_keep and gpu_step_delay == 0)
+    if seconds == 0 and not persistent:
+        raise RuntimeError('No-timer mode requires --bootcpu 1 --gpu-probe 20 '
+                           '--gpu-direct --gpu-keep and zero trace delay')
+    if gpu_probe and gpu_probe >= 3 and (bootcpu != 1 or (seconds == 0 and not persistent)):
+        raise RuntimeError('GPU power probes require --bootcpu 1 and a finite return timer')
+    if gpu_probe and gpu_probe >= 17 and not persistent and seconds < 10 + (240 * gpu_step_delay + 999) // 1000:
+        raise RuntimeError('Return timer is too short for all GPU trace steps and cleanup')
+    return persistent
+
+
+def check_kernel_log(saved_log, log):
+    if 'panic(cpu ' in saved_log or re.search(
+            r'ace5-gpu: (stage [0-9]+ FAILED|.*cleanup FAILED|live failure)', saved_log):
+        raise RuntimeError(f'Kernel/probe failure; saved diagnostic log: {log}')
+
+
+def observe_persistent_startup(log_dir, log, timeout=120):
+    """Observe startup without imposing a kernel timer or stopping it on failure."""
+    deadline = time.monotonic() + timeout
+    count = 0
+
+    def require_running(result):
+        actual = loader_result(result)
+        if actual != 'running':
+            fb('get_staged', log)
+            raise RuntimeError(f'Persistent startup ended before confirmation: {actual}; '
+                               f'saved diagnostic log: {log}')
+
+    try:
+        while time.monotonic() < deadline:
+            require_running(fb('getvar', 'result'))
+            response = call(['fastboot', '-s', 'xnuloader', 'oem', 'live-log'], check=False)
+            if 'no live kernel' in response:
+                # The kernel may have returned between getvar and live-log. Its
+                # final staged log must be fetched before any other OEM command.
+                require_running(fb('getvar', 'result'))
+                raise RuntimeError('Live-log unavailable although loader still reports running')
+            if 'OKAY' not in response or 'FAILED' in response:
+                raise RuntimeError('Live-log request failed: ' + response.strip())
+            count += 1
+            snapshot = log_dir / f'{log.stem}-startup-{count:03d}.log'
+            fb('get_staged', snapshot)
+            saved_log = snapshot.read_bytes().decode('utf-8', errors='replace')
+            check_kernel_log(saved_log, snapshot)
+            ready = ('ace5-gpu: stage 20 complete' in saved_log and
+                     'ace5-gpu: persistent startup ready=1' in saved_log)
+            if ready:
+                result = fb('getvar', 'result')
+                require_running(result)
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(f'Startup was not confirmed within {timeout} seconds')
+                print(f'GPU startup confirmed in {snapshot}; loader still reports running. '
+                      'iOS is left running without an automatic return timer. '
+                      'The desktop may still be loading; this is not a stability test. '
+                      'Use the reboot command to stop XNU and return to Android.', flush=True)
+                return result
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+        raise RuntimeError(f'Startup was not confirmed within {timeout} seconds')
+    except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+        partial = log.with_name(log.stem + '-startup-unconfirmed-staged.log')
+        try:
+            fb('get_staged', partial)
+        except (RuntimeError, subprocess.TimeoutExpired, OSError) as fetch_error:
+            print(f'Could not save staged startup diagnostics: {fetch_error}', file=sys.stderr)
+        raise RuntimeError(f'{error}. Kernel may still be running; no automatic stop or reboot was sent. '
+                           'Use the reboot command for a graceful stop; if USB is unavailable, '
+                           'hold physical power + volume-up to restart.') from error
+
+
+def stop_running_kernel(log_dir, log):
+    """Do not reset the device while its other core is known to own live GPU state."""
+    try:
+        if loader_result(fb('getvar', 'result')) != 'running':
+            return
+        fb('oem', 'stop')
+        collect_run_diagnostics('run', 0, 1, False, 10, log_dir, log)
+        check_kernel_log(log.read_bytes().decode('utf-8', errors='replace'), log)
+    except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
+        raise RuntimeError(f'Graceful kernel stop was not confirmed: {error}. No reboot was sent. '
+                           'Preserve the logs; if USB recovery fails, hold physical power + '
+                           'volume-up to restart.') from error
+
+
 ROOT = Path(__file__).resolve().parents[2]
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
@@ -91,7 +184,7 @@ ramdisk = sub.add_parser('ramdisk', help='Upload a system image to RAM')
 ramdisk.add_argument('--image', type=Path, help='Explicit local system APFS image; defaults to userland/system.apfs')
 run = sub.add_parser('run', help='Run single-core iOS, then save logs and framebuffer')
 run.add_argument('--seconds', type=int, default=120,
-                 help='Return after this many seconds; 0 keeps iOS running until a physical restart')
+                 help='Return after this many seconds; 0 requires the complete CPU 1 persistent GPU profile')
 run.add_argument('--verbose', action='store_true')
 run.add_argument('--kernel', type=Path, help='Explicit locally built Mach-O kernel')
 run.add_argument('--root-image', type=Path, help='Local small APFS image, e.g. with device firmware')
@@ -219,10 +312,9 @@ try:
         ensure_loader(kernel=True)
         payload = ROOT / 'out/giulia-kernel/run-payload.bin'
         seconds = args.seconds if args.command == 'run' else 15
-        if not 0 <= seconds <= 3600:
-            raise RuntimeError('seconds must be 0..3600')
-        if args.command == 'run' and args.live_log and (args.bootcpu!=1 or seconds==0):
-            raise RuntimeError('--live-log requires --bootcpu 1 and a finite return timer')
+        persistent = args.command == 'run' and validate_run_timing(
+            seconds, args.bootcpu, args.gpu_probe, args.gpu_direct, args.gpu_keep,
+            args.gpu_step_delay, args.live_log)
         commandline = (f'cpus=1 loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
                        'touchscreen=0 buttons=0 cpufreq=0 gpu=0 wifi=0 adsp=0')
         if args.command == 'run' and args.touch:
@@ -267,13 +359,7 @@ try:
                 raise RuntimeError('ZAP stages require --gpu-direct')
             if not args.kernel:
                 raise RuntimeError('--gpu-probe requires an explicit locally built --kernel')
-            if args.gpu_probe>=3 and (args.bootcpu!=1 or args.seconds==0):
-                raise RuntimeError('GPU power probes require --bootcpu 1 and a finite return timer')
             commandline += f' ace5_gpu_probe={args.gpu_probe}'
-            if not 0<=args.gpu_step_delay<=3000:
-                raise RuntimeError('--gpu-step-delay must be between 0 and 3000 ms')
-            if args.gpu_probe>=17 and args.seconds<10+(240*args.gpu_step_delay+999)//1000:
-                raise RuntimeError('Return timer is too short for all GPU trace steps and cleanup')
             commandline += f' ace5_gpu_step_delay={args.gpu_step_delay}'
         live_interval=args.live_interval if args.command=='run' else 10
         if not 0.1<=live_interval<=60:
@@ -296,12 +382,10 @@ try:
         print(call(command))
         fb('stage', payload, timeout=60)
         print(fb('oem', 'run' if args.command == 'run' else 'selftest'), flush=True)
-        if args.command == 'run' and seconds == 0:
-            print('XNU launch accepted; automatic return is disabled. '
-                  'Use a physical power + volume-up restart to return to Android. '
-                  'USB diagnostics are unavailable while XNU owns CPU 0.', flush=True)
-            sys.exit(0)
         log = logs / (time.strftime('%Y%m%d-%H%M%S') + '-' + args.command + '.log')
+        if persistent:
+            observe_persistent_startup(logs, log)
+            sys.exit(0)
         result = collect_run_diagnostics(args.command, seconds,
                                          args.bootcpu if args.command == 'run' else 0,
                                          args.live_log if args.command == 'run' else False,
@@ -311,8 +395,7 @@ try:
         for line in saved_log.splitlines():
             if re.search(r'ace5-gpu: (stage [0-9]+|probe ended|.*cleanup FAILED)', line):
                 print(line, flush=True)
-        if 'panic(cpu ' in saved_log or re.search(r'ace5-gpu: (stage [0-9]+ FAILED|.*cleanup FAILED|live failure)', saved_log):
-            raise RuntimeError(f'Kernel/probe failure; saved diagnostic log: {log}')
+        check_kernel_log(saved_log, log)
         if args.command == 'run' and args.gpu_probe and f'ace5-gpu: stage {args.gpu_probe} complete' not in saved_log:
             raise RuntimeError(f'GPU probe did not complete requested stage {args.gpu_probe}; see {log}')
         if args.command == 'run' and args.gpu_keep and 'ace5-gpu: persistent startup ready=1' not in saved_log:
@@ -322,6 +405,7 @@ try:
         screenshot()
     else:
         ensure_loader()
+        stop_running_kernel(logs, logs / (time.strftime('%Y%m%d-%H%M%S') + '-stop.log'))
         print(fb('reboot'))
 except (RuntimeError, subprocess.TimeoutExpired, OSError, ValueError) as error:
     raise SystemExit(str(error))
