@@ -21,6 +21,7 @@
 #include "giulia_rpmh.h"
 #include "giulia_wifi_gpio.h"
 #include "giulia_aop.h"
+#include "giulia_bcm.h"
 
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
@@ -194,6 +195,17 @@ static void wifi_probe_thread(__unused void *arg, __unused wait_result_t wait)
         for (unsigned i=0;i<s.perf_resources;i++)
             wifi_log("ace5-wifi: CRM perf-status res=%u raw=%#x\n",i,s.perf_status[i]);
         wifi_log("ace5-wifi: CRM power-index=%#x\n",s.pwr_idx_status);
+        if (db_version && db_version != UINT32_MAX && db_magic == 0x0c0330dbu) {
+            const char *const names[] = {"MC0","SH0","SH1","SN4","ACV","CN0"};
+            for (unsigned i=0;i<6;i++) {
+                struct giulia_bcm_resource resource={0};
+                int error=giulia_bcm_resolve((const uint8_t *)m.db.address,
+                    GIULIA_RPMH_DB_MAX,db_version,names[i],&resource);
+                wifi_log("ace5-wifi: BCM %s rc=%d address=%#x unit=%u width=%u vcd=%u\n",
+                    names[i],error,resource.address,resource.unit,resource.width,resource.vcd);
+            }
+            wifi_log("ace5-wifi: BCM metadata inspection complete; no votes sent\n");
+        }
         wifi_log("ace5-wifi: full SM/CRM snapshot captured; no table/channel writes\n");
     }
     wifi_log("ace5-wifi: read-only probe complete; NoC/CESTA ownership and rail baselines NOT assumed\n");

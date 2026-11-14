@@ -396,3 +396,38 @@ snapshot 和最终 probe complete 均出现，工具才报告诊断完成；完�
 云端测试直接链接 CRM 生产核心，覆盖两个原始通道、最大布局、保留字段、全部
 表写入位置的丢写、切换／回退超时、迟到确认、租约丢失和部分恢复。XNU probe
 测试链接真实 NoC 采集核心，核对完整采集、读失败与 MMIO 内容不变。
+
+提交 `2ddaf4124736132a457fb494945bc38cdae3ca82` 已通过
+[云端构建 43597076888](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43597076888)：
+实际 CRM 核心回归、probe 4 回归、loader 与完整 XNU 均成功，下载后全部七项
+产物长度与 SHA-256 已核对。ccache 命中 1057/1060（99.72%）。已离线准备只读
+诊断包；用户暂时拔下手机并选择先继续源码，因此尚未执行新诊断或 CRM 写入。
+
+## 后续：从 CMD DB 到 BCM 带宽投票，再到 CRM
+
+`giulia_bcm.c/.h` 将当前 CMD DB 的 BCM 地址及 8-byte 辅助数据（unit、width、
+VCD）接入带宽转换和真实 CRM 传输。解析只接受 BCM slave5、匹配的当前 DB
+版本、唯一资源名、完整有界的 entry/aux 数据，不使用其他机型的地址／比例。
+算法依照同一固定官方提交的
+[`icc-rpmh.c`](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/interconnect/qcom/icc-rpmh.c)、
+[`bcm-voter.c`](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/interconnect/qcom/bcm-voter.c)
+与 `tcs.h`：零 unit/width 按 vendor 规则归一到 1，分两级整数除法并保留极小
+非零票，scale=1000，溢出拒绝、14-bit 饱和显式报告。SH1/ACV 使用 enable
+编码，不套用数值带宽比例；CRM 命令带 valid/commit。
+
+Gen1x1 PCIe0 数据路径按官方 `pineapple.c` 生成 12 个字段更新：PERF resource0
+在 states0/1 设为 2，MC0/SH0/SH1/SN4/ACV 分别更新 CRM nodes0/1/2/3/5 的
+states0/1。IP0/node4、其他资源及 states2..4 均保留。公开拓扑中各 node 的
+buswidth/channels 与 BCM enable 编码已分别核对，不能把 VCD 当作 CRM node。
+
+特别核对了留存真机 DT：PCIe0 没有 `qcom,no-client-based-bw-voting`，所以该
+vendor 分支使用 avg=500、peak=800 kB/s。只有 DT 指定按速率投票时，Gen1x1
+才使用 avg=250000、peak=0。两种策略由调用者显式选择，不把 mainline 的 peak
+参数混入此路径。该实现仅覆盖 PCIe 数据路径投票；CPU→PCIe 的 CN0/QoS、CESTA
+当前状态与物理完成仍需接合，不会因此设置整个 NoC ready。
+
+`giulia_bcm_pcie0_start` 连通解析、投票转换和生产 CRM 通道控制。云端集成测试
+使用合成 CMD DB 和 mock MMIO，检查其实际写入、IP0／其他状态保留及退出恢复；
+另测辅助数据损坏、边界、两级除法、enable 编码、溢出与饱和。本机仍不编译 C。
+probe 4 还会只读解析 MC0/SH0/SH1/SN4/ACV/CN0 的地址与辅助参数，逐项记录查询
+结果，不因为某项缺失而伪造参数，也不在此诊断中发送 BCM 票。
