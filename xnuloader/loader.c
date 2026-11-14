@@ -12,7 +12,7 @@
 #include "efi.h"
 #include "identity.h"         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
 #include "image.h"
-#include "../xnu/files/sys/loader_firmware_quiet.h"
+#include "../xnu/files/bsd/sys/loader_firmware_quiet.h"
 
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */

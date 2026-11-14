@@ -70,7 +70,7 @@ def main() -> int:
         for name in ("download", "run", "watchdog", "quiet"):
             exe = build / (name + (".exe" if sys.platform == "win32" else ""))
             run(args.cc + ["-std=c11", "-O1", "-UNDEBUG", "-Wall", "-Wextra",
-                           "-I", str(build), "-I", str(root/'xnu/files/sys'),
+                           "-I", str(build), "-I", str(root/'xnu/files/bsd/sys'),
                            str(fixtures / f"test-{name}.c"), "-o", str(exe)])
             run([str(exe)])
     print("PASS: loader download, per-run storage state and watchdog budget (host stubs; no hardware)")

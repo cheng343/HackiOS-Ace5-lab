@@ -3,7 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include "../../xnu/files/sys/loader_firmware_quiet.h"
+#include "../../xnu/files/bsd/sys/loader_firmware_quiet.h"
 #define GIULIA_AOP_XNU_HOST_TEST
 #define __unused __attribute__((unused))
 #define KERN_SUCCESS 0
