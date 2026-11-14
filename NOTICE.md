@@ -14,6 +14,7 @@
 | [UniXNU/NativeAdreno](https://github.com/UniXNU/NativeAdreno/tree/b686b9054f57d393c80195b82568a09f8ca106a2) | CP 队列初始化、缓存/fence 顺序参考，见 `giulia_gpu_direct.h`、`giulia_gpu_submit.h` | [NativeAdreno MIT](LICENSES/NativeAdreno-MIT.txt)；A740 参考并非 A750 的验证结果 |
 | [OnePlus SM8650 graphics-kernel](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8650/tree/453d8875f815bf9dfad9035982861226a4823a6c/vendor/qcom/opensource/graphics-kernel) | `giulia_gpu_regs.h` 的寄存器/表及协议参考 | 文件保留 Qualcomm / Linux Foundation 版权与 GPL-2.0-only 标记；[协议原文](LICENSES/GPL-2.0-only.txt) |
 | libdeflate | `xnu/files/bsd/miscfs/apfs/libdeflate/` | 随目录保留 [COPYING](xnu/files/bsd/miscfs/apfs/libdeflate/COPYING) |
+| [libzbitmap](https://github.com/eafer/libzbitmap) | `xnu-deps/build/lzbitmap/libzbitmap.c`、`.h`；供 `unzbm` 恢复 LZBITMAP 文件 | 保留 Corellium LLC / Ernesto A. Fernández 署名与 `GPL-2.0+ OR MIT` 标记；Windows 工具包附带 [MIT 许可](LICENSES/libzbitmap-MIT.txt)和源码 |
 | [linux-apfs/apfsprogs](https://github.com/linux-apfs/apfsprogs/tree/1bd1c1c2140d13d1b6d2e03379316572bee70aa3) | APFS 布局参考与构建时取得的检查器 | GPL-2.0；检查器源码由其自身仓库提供 |
 
 更多来源和固定版本见 [历史适配笔记](docs/ACE5.md)末尾，包括 Linux MSM 驱动、UniXNU-sheng、AdrenoFirmware 和 ArmSmmu4K。Theos/cctools/SDK 是本地构建依赖，不作为本仓库资产上传。

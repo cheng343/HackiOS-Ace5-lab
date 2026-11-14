@@ -28,9 +28,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Resource-fork test failed' }
           python -X utf8 tools/ace5/test-ios-listing.py
           if ($LASTEXITCODE -ne 0) { throw 'Listing test failed' }
+          python -X utf8 tools/ace5/test-apfs-host-read.py
+          if ($LASTEXITCODE -ne 0) { throw 'APFS binary read test failed' }
           Get-FileHash out/windows-host/unzbm.exe -Algorithm SHA256 | Format-List
           git rev-parse HEAD | Set-Content out/windows-host/source-commit.txt
           Copy-Item LICENSE out/windows-host/
+          Copy-Item NOTICE.md,LICENSES/libzbitmap-MIT.txt out/windows-host/
+          New-Item -ItemType Directory out/windows-host/source | Out-Null
+          Copy-Item xnu-deps/build/lzbitmap/*.c,xnu-deps/build/lzbitmap/*.h out/windows-host/source/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: ace5-windows-host-${{ github.run_id }}
@@ -38,5 +43,8 @@ jobs:
             out/windows-host/unzbm.exe
             out/windows-host/source-commit.txt
             out/windows-host/LICENSE
+            out/windows-host/NOTICE.md
+            out/windows-host/libzbitmap-MIT.txt
+            out/windows-host/source/
           retention-days: 7
           if-no-files-found: error
