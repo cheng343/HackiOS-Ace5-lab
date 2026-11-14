@@ -164,6 +164,7 @@
 #include <vm/memory_types.h>
 #include <pexpert/pexpert.h>
 #include <sys/errno.h>
+#include <sys/hackios_platform.h>
 #include <sys/redwood_input.h>
 #include <sys/redwood_qrtr.h>
 #include <sys/redwood_sta.h>
@@ -4138,11 +4139,6 @@ redwood_wifi_quiesce(void)
 	new_from = ~0u;                         /* (no pauses) */
 	dsp_shutdown("the kernel is on its way back to the loader");
 }
-
-#define REDWOOD_SOC_BASE        0x00400000ul    /* where the loader says the phone's peripherals begin (its "redwood") */
-
-extern vm_offset_t pe_arm_get_soc_base_phys(void);
-
 /* The steps' end: the DSP stopped, or left as asked. */
 static void
 steps_over(uint32_t done)
@@ -4274,15 +4270,17 @@ redwood_wifi_init(void)
 		printf("wifi: wifi=%u is not understood: wifi=1 turns the radio on, wifi_step=N goes the first N steps of that\n", on);
 		return;
 	}
-	if (pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
-		if (last_step != 0 && PE_parse_boot_argn("wifi_lx", &back, sizeof(back)) && back) {
+	enum hackios_platform platform = hackios_platform();
+	if (platform != HACKIOS_PLATFORM_REDWOOD) {
+		if (platform == HACKIOS_PLATFORM_QEMU_VIRT && last_step != 0 &&
+		    PE_parse_boot_argn("wifi_lx", &back, sizeof(back)) && back == 1) {
 			/* a check of what is under the driver: it gets as far as finding no firmware to talk to */
-			printf("wifi: this is not the phone; with wifi_lx the driver is started all the same, for what it does before "
-			    "it needs a radio\n");
+			printf("wifi: QEMU wifi_lx test; the redwood radio is not started\n");
 			printf("wifi: the driver's start returns %d\n", redwood_lx_start());
 		} else {
-			printf("wifi: wifi=1 and wifi_step=N are for the phone's radio, and this is not the phone\n");
+			printf("wifi: refusing redwood WCN6750 driver on this platform; Ace 5 Wi-Fi is not supported\n");
 		}
+		last_step = 0;
 		return;
 	}
 	redwood_qmi_set_transport(&qrtr_ops);

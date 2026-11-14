@@ -79,6 +79,7 @@
 #include <vm/memory_types.h>
 #include <sys/systm.h>
 #include <sys/conf.h>
+#include <sys/hackios_platform.h>
 #include <sys/uio.h>
 #include <miscfs/devfs/devfs.h>
 #include <sys/redwood_audio.h>
@@ -4177,6 +4178,7 @@ camera_thread(__unused void *parameter, __unused wait_result_t result)
 		serve_ios();
 		say("camera: done\n");
 		thread_terminate(current_thread());
+		return;
 	}
 	wait_ms(secs * 1000);           /* (the system up first: nothing else is on these buses then) */
 	tlmm = ml_io_map(TLMM_PHYS, TLMM_SIZE);
@@ -4227,6 +4229,13 @@ redwood_camera_init(void)
 	uint32_t fake_n = 0;
 
 	fake = level == 5 && PE_parse_boot_argn("cam_fake", &fake_n, sizeof(fake_n)) && fake_n != 0;
+	enum hackios_platform platform = hackios_platform();
+	if (platform != HACKIOS_PLATFORM_REDWOOD && !(platform == HACKIOS_PLATFORM_QEMU_VIRT && fake)) {
+		printf("camera: refusing redwood camera driver on this platform; Ace 5 camera is not supported\n");
+		level = 0;
+		fake = false;
+		return;
+	}
 	if (level >= 3) {
 		/*
 		 * Memory in one piece for the host (cam_keep_mb, default 24: a 12-megapixel NV12 picture of cam=5,

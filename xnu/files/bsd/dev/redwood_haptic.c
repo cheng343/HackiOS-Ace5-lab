@@ -54,6 +54,7 @@
 #include <pexpert/pexpert.h>
 #include <miscfs/devfs/devfs.h>
 #include <sys/conf.h>
+#include <sys/hackios_platform.h>
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <sys/redwood_audio.h>
@@ -980,6 +981,11 @@ redwood_haptic_init(void)
 	thread_t thread;
 
 	if (!PE_parse_boot_argn("haptic", &level, sizeof(level)) || level == 0) {
+		return;
+	}
+	if (hackios_platform() != HACKIOS_PLATFORM_REDWOOD) {
+		printf("haptic: refusing redwood vibration driver on this platform\n");
+		level = 0;
 		return;
 	}
 	if (level > 5) {

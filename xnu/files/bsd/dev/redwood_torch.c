@@ -56,6 +56,7 @@
 #include <miscfs/devfs/devfs.h>
 #include <pexpert/pexpert.h>
 #include <sys/conf.h>
+#include <sys/hackios_platform.h>
 #include <sys/redwood_audio.h>
 #include <sys/redwood_input.h>
 #include <sys/systm.h>
@@ -729,6 +730,11 @@ redwood_torch_init(void)
 	thread_t thread;
 
 	if (!PE_parse_boot_argn("torch", &level, sizeof(level)) || level == 0) {
+		return;
+	}
+	if (hackios_platform() != HACKIOS_PLATFORM_REDWOOD) {
+		printf("torch: refusing redwood flashlight driver on this platform\n");
+		level = 0;
 		return;
 	}
 	level = level > 3 ? 3 : level;

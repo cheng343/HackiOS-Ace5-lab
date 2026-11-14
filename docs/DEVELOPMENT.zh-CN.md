@@ -45,6 +45,20 @@ local/tests/test-zap-start fw-gpu/gen70900_zap.mbn
 
 真实硬件协议、缓存一致性、时序和热状态仍必须实机验证。不要把 host PASS 写成“GPU 完整适配”。
 
+### 旧机型驱动的入口检查
+
+```sh
+python3 tools/ace5/test-platform-guards.py --cc clang
+# Windows 也可以使用已有的 Zig；--cc 后传完整的编译器参数，放在命令末尾。
+python tools/ace5/test-platform-guards.py --cc "C:/path to/zig.exe" cc
+```
+
+测试从实际驱动文件提取初始化函数，编译真实的 `sys/hackios_platform.h`，只将设备树查询、启动参数、内存分配、线程和后续驱动调用替换为计数桩。覆盖 redwood、giulia、QEMU，以及缺失、截断、尾随垃圾和未知的机型身份；检查拒绝是否发生在驱动工作开始之前，并保留合法的 redwood 入口与显式 QEMU 模拟分支。
+
+另有测试执行实际相机线程的控制流，让假画面服务和线程终止桩都返回，检查仍不会继续访问 MMIO；硬件调用在测试中全部替换为计数桩。
+
+编译命令使用 `-UNDEBUG`，测试头会在断言被禁用时直接报错。测试不读取固件或连接手机，不代表完整 XNU 编译通过，也不验证硬件时序和运行稳定性。
+
 ## 验证顺序
 
 1. 解析器/队列测试与源码编译。

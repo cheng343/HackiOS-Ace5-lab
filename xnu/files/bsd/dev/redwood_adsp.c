@@ -87,6 +87,7 @@
 #include <vm/memory_types.h>
 #include <pexpert/pexpert.h>
 #include <sys/errno.h>
+#include <sys/hackios_platform.h>
 #include <sys/kauth.h>
 #include <sys/stat.h>
 #include <sys/systm.h>
@@ -102,7 +103,6 @@ extern void ml_io_unmap(vm_offset_t addr, vm_size_t sz);
 extern uint64_t kvtophys(vm_offset_t va);
 extern void loader_return(void);
 extern kern_return_t thread_terminate(thread_t thread);
-extern vm_offset_t pe_arm_get_soc_base_phys(void);
 extern dev_t mdevlookup(int devid);
 extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
 
@@ -113,7 +113,6 @@ extern lck_mtx_t redwood_smem_alloc_lock;
 static LCK_GRP_DECLARE(adsp_lock_group, "redwood-adsp");
 
 #define STEPS                   11
-#define REDWOOD_SOC_BASE        0x00400000ul    /* where the loader says the phone's peripherals begin */
 
 static uint32_t last_step, pause_ms = 2200, listen_seconds = 3;
 static uint32_t step;                   /* the one being performed */
@@ -3202,8 +3201,9 @@ redwood_adsp_init(void)
 	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
 		return;
 	}
-	if (pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
-		printf("adsp: adsp=1 and adsp_step=N are for the phone's audio DSP, and this is not the phone\n");
+	if (hackios_platform() != HACKIOS_PLATFORM_REDWOOD) {
+		printf("adsp: refusing redwood audio DSP driver on this platform; Ace 5 audio DSP is not supported\n");
+		last_step = 0;
 		return;
 	}
 	if (last_step == 0) {

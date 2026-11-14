@@ -67,6 +67,7 @@
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <pexpert/pexpert.h>
+#include <sys/hackios_platform.h>
 #include <sys/systm.h>
 #include <sys/redwood_audio.h>
 
@@ -1203,6 +1204,11 @@ redwood_speaker_init(void)
 	thread_t thread;
 
 	if (!PE_parse_boot_argn("speaker_probe", &probe_level, sizeof(probe_level)) || probe_level == 0) {
+		return;
+	}
+	if (hackios_platform() != HACKIOS_PLATFORM_REDWOOD) {
+		printf("speaker: refusing redwood amplifier probe on this platform\n");
+		probe_level = 0;
 		return;
 	}
 	if (kernel_thread_start(probe_thread, NULL, &thread) == KERN_SUCCESS) {
