@@ -74,6 +74,8 @@
 #   CHECK=1          check every image (every container) as it is made: apfsck has to find it clean and
 #                    the kernel's apfs_lib has to read every volume back as the directory it was made of
 #                    (../tools/apfs/check-image.sh; the system image takes a few minutes more)
+#   COMPONENTS_ONLY=1 compile our programs/libraries against the SDK without iOS system files;
+#                    stop before copying system files or producing a boot image.
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
 source ../xnu-env.sh
@@ -141,6 +143,10 @@ INJECT=${INJECT-"/redwood/lib/libredwood.dylib backboardd containermanagerd cont
 mkdir -p obj
 
 if [ -z "$PREBUILT" ] && ! command -v ld64 >/dev/null; then PREBUILT=1; fi
+if [ "${COMPONENTS_ONLY:-}" = 1 ] && [ -n "$PREBUILT" ]; then
+	echo "build.sh: COMPONENTS_ONLY needs a working compiler/linker, not prebuilt inputs" >&2
+	exit 1
+fi
 if [ -n "$PREBUILT" ]; then
 	echo "build.sh: not compiling, using the programs in prebuilt/userland"
 	for f in ../prebuilt/userland/*; do
@@ -181,7 +187,7 @@ for d in $EXTRA_SHARE; do
 	[ -d "$d" ] || { echo "build.sh: EXTRA_SHARE: $d is not a directory"; exit 1; }
 	cp -rL "$d" root/share/
 done
-if [ -d $IOS/rootfs/usr/lib ]; then
+if [ -d $IOS/rootfs/usr/lib ] || [ "${COMPONENTS_ONLY:-}" = 1 ]; then
 	if [ -z "$PREBUILT" ]; then
 		# ordinary dynamically linked programs of our own, built against the iOS SDK
 		$DYN -o obj/hello_dyn src/hello_dyn.c
@@ -360,6 +366,10 @@ if [ -d $IOS/rootfs/usr/lib ]; then
 			# and its absence is a sentence the driver prints, not a crash.
 			[ -f $M/libredwoodair.dylib ] && cp $M/libredwoodair.dylib obj/
 		fi
+	fi
+	if [ "${COMPONENTS_ONLY:-}" = 1 ]; then
+		echo "build.sh: compiled runtime components in userland/obj; no iOS image assembled"
+		exit 0
 	fi
 	# The released prebuilt set predates drawable_test. It is an optional diagnostic,
 	# not required for init, launchd or SpringBoard.

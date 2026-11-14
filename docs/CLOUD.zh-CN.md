@@ -13,3 +13,5 @@ Actions 附件 `ace5-arm64-运行编号-尝试编号` 包含已成功生成的�
 本机仅用于编辑/上传源码与下载云端产物；此流程不会连接手机或运行刷写命令。
 
 另一个 **Ace 5 UEFI components** 流程在云端编译固定 Mu UEFI、BootShim 与 loader，产物不含本机设备树。在电脑上运行 `tools/ace5/assemble-boot.py`，将这些已编译组件与只保存在本机的 giulia DTB 组装成临时启动镜像；组装过程只压缩/打包字节，不调用编译器、不连接设备。
+
+**Ace 5 runtime components** 可在没有 iOS IPSW 的情况下单独编译项目的 init/stage0、注入库、Mesa、EAGL 和 Metal 组件。它只下载构建工具、SDK 与开源依赖，不下载 iOS 系统固件，不读取手机或打包厂商固件。附件中的 `components.json` 标明完整性与 SHA-256；这些组件仍需结合匹配的 iOS 系统文件、真实 GPU 固件及系统镜像后才能启动桌面。
