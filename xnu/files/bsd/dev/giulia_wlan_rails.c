@@ -15,6 +15,9 @@ static const char *const resource[GIULIA_WLAN_RAIL_COUNT] = {
 static const uint32_t millivolts[GIULIA_WLAN_RAIL_COUNT] = {
     1800, 1200, 940, 976, 916, 1864, 1316
 };
+/* Fixed rpmh-regulator.c PMIC5 raw encodings, not framework mode enums. */
+static const uint32_t dt_mode[7] = {7,7,0,0,0,0,3};
+#define DT_MODE_MASK 0x43u
 static uintptr_t rail_owner;
 static int own(struct giulia_wlan_rails *p)
 {
@@ -28,17 +31,22 @@ static int release(struct giulia_wlan_rails *p)
     return __atomic_compare_exchange_n(&rail_owner, &expected, 0,
         0, __ATOMIC_RELEASE, __ATOMIC_RELAXED) ? 0 : GIULIA_RPMH_STATE;
 }
-static int vote(struct giulia_wlan_rails *p, unsigned i, uint32_t mv, uint32_t enable)
+static int vote(struct giulia_wlan_rails *p, unsigned i, uint32_t mv, uint32_t enable, uint32_t mode)
 {
-    struct giulia_rpmh_command cmd[2];
+    struct giulia_rpmh_command cmd[3];
     /* On withdrawal, remove enable before lowering its voltage vote. For an
      * enabled baseline, restore voltage before enabling. All commands wait.
      */
+    unsigned count = (p->mode_mask & (1u << i)) ? 3 : 2;
     unsigned voltage = enable ? 0 : 1;
-    unsigned en = voltage ^ 1u;
+    unsigned en = enable ? count - 1 : 0;
     cmd[voltage].address = p->address[i]; cmd[voltage].data = mv;
     cmd[en].address = p->address[i] + 4; cmd[en].data = enable;
-    return giulia_rpmh_write(p->transport, cmd, 2);
+    if (count == 3) {
+        unsigned m = enable ? 1 : 2;
+        cmd[m].address = p->address[i] + 8; cmd[m].data = mode;
+    }
+    return giulia_rpmh_write(p->transport, cmd, count);
 }
 int giulia_wlan_rails_stop(struct giulia_wlan_rails *p, int endpoint_quiesced)
 {
@@ -60,7 +68,8 @@ int giulia_wlan_rails_stop(struct giulia_wlan_rails *p, int endpoint_quiesced)
         unsigned index = i - 1;
         if (!(p->attempted_mask & (1u << index))) continue;
         if ((r = vote(p, index, p->baseline[index].millivolts,
-            p->baseline[index].enable))) goto failed;
+            p->baseline[index].enable, (p->mode_mask & (1u << index)) ?
+            p->baseline[index].mode : 0))) goto failed;
         p->attempted_mask &= ~(1u << index);
     }
     if ((r = release(p))) goto failed;
@@ -70,10 +79,10 @@ failed:
     p->state = GIULIA_WLAN_RAIL_FAULT; p->cleanup_error = r;
     return r;
 }
-int giulia_wlan_rails_start(struct giulia_wlan_rails *p, struct giulia_rpmh *transport,
+static int start(struct giulia_wlan_rails *p, struct giulia_rpmh *transport,
     const uint8_t *db, uint32_t bytes, uint32_t expected_version,
     const struct giulia_wlan_rail_baseline *baseline, uint32_t prerequisites,
-    enum giulia_wlan_rail_policy policy)
+    enum giulia_wlan_rail_policy policy, uint32_t mode_mask)
 {
     unsigned i, j;
     int r;
@@ -83,6 +92,8 @@ int giulia_wlan_rails_start(struct giulia_wlan_rails *p, struct giulia_rpmh *tra
         return GIULIA_RPMH_STATE;
     if ((prerequisites & GIULIA_WLAN_RAIL_REQUIRED) != GIULIA_WLAN_RAIL_REQUIRED)
         return GIULIA_RPMH_PREREQUISITE;
+    if (mode_mask && !(prerequisites & GIULIA_WLAN_RAIL_MODE_WRITE_SAFE))
+        return GIULIA_RPMH_PREREQUISITE;
     if ((transport->prerequisites & GIULIA_RPMH_REQUIRED) != GIULIA_RPMH_REQUIRED)
         return GIULIA_RPMH_PREREQUISITE;
     if (transport->state != GIULIA_RPMH_IDLE && transport->state != GIULIA_RPMH_DONE)
@@ -90,10 +101,17 @@ int giulia_wlan_rails_start(struct giulia_wlan_rails *p, struct giulia_rpmh *tra
     if (policy == GIULIA_WLAN_RESTORE_BASELINE) {
         if (!baseline) return GIULIA_WLAN_RAIL_BASELINE_UNKNOWN;
         for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++)
-            if (baseline[i].known != 3 || baseline[i].enable > 1 ||
+            if ((baseline[i].known & 3u) != 3u || baseline[i].enable > 1 ||
                 /* Official VRM voltage range: 0..8191000 microvolts. */
                 baseline[i].millivolts > 8191u)
                 return GIULIA_WLAN_RAIL_BASELINE_UNKNOWN;
+        for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++) {
+            if (!(mode_mask & (1u << i))) continue;
+            if (!(baseline[i].known & 4u) ||
+                (baseline[i].mode != 3 && baseline[i].mode != 7 &&
+                 !(i < 2 && baseline[i].mode == 4)))
+                return GIULIA_WLAN_RAIL_BASELINE_UNKNOWN;
+        }
     }
     for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++) {
         r = giulia_rpmh_resolve_vrm(db, bytes, expected_version, resource[i], &p->address[i]);
@@ -103,13 +121,14 @@ int giulia_wlan_rails_start(struct giulia_wlan_rails *p, struct giulia_rpmh *tra
     }
     if ((r = own(p))) return r;
     p->transport = transport; p->policy = policy;
+    p->mode_mask = mode_mask;
     p->attempted_mask = p->completed_mask = 0;
     p->error = p->cleanup_error = 0; p->state = GIULIA_WLAN_RAIL_FAULT;
     if (policy == GIULIA_WLAN_RESTORE_BASELINE)
         for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++) p->baseline[i] = baseline[i];
     for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++) {
         p->attempted_mask |= 1u << i; /* May have issued even if cleanup fails. */
-        r = vote(p, i, millivolts[i], 1);
+        r = vote(p, i, millivolts[i], 1, dt_mode[i]);
         if (transport->completed) p->completed_mask |= 1u << i;
         if (r) {
             if (!transport->triggered) p->attempted_mask &= ~(1u << i);
@@ -124,3 +143,13 @@ int giulia_wlan_rails_start(struct giulia_wlan_rails *p, struct giulia_rpmh *tra
     p->state = GIULIA_WLAN_RAIL_ACTIVE;
     return 0;
 }
+int giulia_wlan_rails_start(struct giulia_wlan_rails *p, struct giulia_rpmh *transport,
+    const uint8_t *db, uint32_t bytes, uint32_t version,
+    const struct giulia_wlan_rail_baseline *baseline, uint32_t flags,
+    enum giulia_wlan_rail_policy policy)
+{ return start(p,transport,db,bytes,version,baseline,flags,policy,0); }
+int giulia_wlan_rails_start_with_dt_modes(struct giulia_wlan_rails *p, struct giulia_rpmh *transport,
+    const uint8_t *db, uint32_t bytes, uint32_t version,
+    const struct giulia_wlan_rail_baseline *baseline, uint32_t flags,
+    enum giulia_wlan_rail_policy policy)
+{ return start(p,transport,db,bytes,version,baseline,flags,policy,DT_MODE_MASK); }

@@ -330,3 +330,34 @@ giulia、单 XNU CPU、bootcpu1、10..300 秒有限会话，以及其他实验�
 没有发送 WLAN PDC/rail 消息、没有上电无线芯片，尚未扫描或联网。此结果为一次
 有限会话的通道验证，不代表持续电源管理或完整 Wi-Fi 功能通过。
 按用户要求，测试后设备转入原厂 Fastboot，供用户测试自行编译的 Recovery。
+
+## 后续：无线 PDC 电源表与七路电源的模式投票
+
+`giulia_wlan_pdc.c` 将已验证的 QMP 传输用于原厂的十条 `wlan_pdc` 消息：
+RF S3C 916/612、S1C 1316/944、S6C 1864/1820，BB S2C 976/512、S4I
+940/420，数值单位为 mV，分别是 upval/dwnval。来源为固定官方
+[`pineapple-kiwi-cnss.dtsi`](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8650/blob/453d8875f815bf9dfad9035982861226a4823a6c/vendor/qcom/proprietary/wlan-devicetree/pineapple-kiwi-cnss.dtsi)
+与同提交 `cnss2/power.c`。留存的本机 ColorOS 17 设备树包含相同十条消息，
+属性总长 508 字节。启动要求当前 DT 属性逐字匹配，依次发送 64 字节零填充消息，
+第一处失败即停止；迟到 ACK 只观察、不重发。
+
+电源表没有已实现的原值读取接口。默认恢复策略要求调用者提供真实的全部原值，
+按相反顺序补偿所有可能已发布的消息；部分补偿超时保留所有权和进度，收到迟到
+ACK 后继续剩余项。显式 KEEP_TABLE 为单向修改，不声称关闭通道能恢复原表。
+两种策略都要求真实持有 QMP/quiet、无线/蓝牙/控制线和 DMA 的交接条件；没有
+从 DT、TX 缓冲区或 ACK 伪造原值，也没有把这段代码接入普通自动启动。
+
+`giulia_wlan_rails_start_with_dt_modes` 是新增可选入口：根据同一份真机 DT，
+L15B/L3C 的 `qcom,init-mode=4` 经 PMIC5 LDO mode map 转成 HPM 原始值 7，
+S1C 的 `qcom,init-mode=1` 经 PMIC5 FTSMPS map 转成 RET 原始值 3；另外四路
+未指定的 mode 不写。编码依据固定官方
+[`rpmh-regulator.c`](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/regulator/rpmh-regulator.c)。
+启用顺序为电压、模式、enable，撤销禁用票时为 enable、电压、模式。
+旧入口仍只写电压与 enable。mode 写入另需证明对应物理电源已关闭，或真实
+owner 已证明目标模式正在生效；本客户端 enable=0 不能证明共享电源物理关闭。
+可恢复策略还要求三路旧 mode 票已知，部分失败后恢复全部已尝试的字段。
+
+云端测试直接链接生产 PDC/QMP、RPMh/rails 源码，检查消息内容、填充与顺序、
+未知基线拒绝、迟到 ACK、部分发送/补偿失败和模式写入顺序。本机仅检查源码与
+Python，不编译 C。新 PDC 与 mode 写入尚未真机执行；完整供电/NoC 交接、PCIe
+端点、DMA/MHI/无线固件和网络栈仍需继续接合，当前仍不能扫描或联网。

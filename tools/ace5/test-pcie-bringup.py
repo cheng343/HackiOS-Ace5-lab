@@ -25,6 +25,7 @@ def main():
     cases += [
         (drivers/'giulia_aop.c', root/'tools/ace5/test-aop.c'),
         (drivers/'giulia_aop.c', root/'tools/ace5/test-aop-xnu.c'),
+        (drivers/'giulia_aop.c', drivers/'giulia_wlan_pdc.c', root/'tools/ace5/test-wlan-pdc.c'),
         (drivers/'giulia_wifi_gpio.c', root/'tools/ace5/test-wifi-gpio.c'),
         (drivers/'giulia_rpmh.c', drivers/'giulia_wlan_rails.c', root/'tools/ace5/test-rpmh.c'),
         (drivers/'giulia_wifi_board.c', root/'tools/ace5/test-wifi-board.c'),

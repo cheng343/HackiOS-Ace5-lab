@@ -17,10 +17,11 @@
 #define CSTATUS (TCS + 0x40u)
 struct mock {
     uint32_t regs[0x2000 / 4], original[0x2000 / 4];
-    uint32_t vote[7][2];
+    uint32_t vote[7][3];
+    uint32_t command[32][3], count[32];
     uint32_t allones, drop, cleanup_block;
     unsigned reads, writes, barriers, elapsed, triggers, pending, hold_at;
-    unsigned incomplete, changed_irq;
+    unsigned incomplete, changed_irq, partial_words;
 };
 static void set(struct mock *m, uint32_t o, uint32_t v) { m->regs[o / 4] = v; }
 static uint32_t get(struct mock *m, uint32_t o) { return m->regs[o / 4]; }
@@ -34,7 +35,11 @@ static void init(struct mock *m)
     for (i = 0; i < 16; i++) for (j = 0; j < 3; j++)
         set(m, MSG + i * 24 + j * 4, 0x8000u + i * 4 + j);
     memcpy(m->original, m->regs, sizeof(m->regs));
-    for (i = 0; i < 7; i++) { m->vote[i][0] = 100 + i; m->vote[i][1] = i & 1u; }
+    for (i = 0; i < 7; i++) {
+        m->vote[i][0] = 100 + i; m->vote[i][1] = i & 1u;
+        m->vote[i][2] = i < 2 ? 4 : (i == 6 ? 7 : 99);
+    }
+    m->partial_words = 1;
 }
 static void execute(struct mock *m, int partial)
 {
@@ -46,11 +51,11 @@ static void execute(struct mock *m, int partial)
         if (!(mask & BIT(i))) continue;
         assert(get(m, MSG + i * 24) == 0x10108);
         addr = get(m, MSG + i * 24 + 4); value = get(m, MSG + i * 24 + 8);
-        assert(addr >= 0x40000 && addr <= 0x40064 && !(addr & 3u));
-        assert((addr & 15u) == 0 || (addr & 15u) == 4);
+        assert(addr >= 0x40000 && addr <= 0x40068 && !(addr & 3u));
+        assert((addr & 15u) <= 8);
         m->vote[(addr - 0x40000) / 16][(addr & 15u) / 4] = value;
         set(m, CSTATUS + i * 24, BIT(8) | (m->incomplete ? 0 : BIT(16)));
-        if (partial) return;
+        if (partial && i + 1 == m->partial_words) return;
     }
     set(m, STATUS, 1); set(m, TCS + 4, get(m, TCS + 4) | 1u);
     m->pending = 0;
@@ -74,6 +79,13 @@ static void write32(void *cookie, uint32_t off, uint32_t value)
     if (off == TCS + 8) { set(m, TCS + 4, get(m, TCS + 4) & ~value); return; }
     set(m, off, value);
     if (off == CTRL && (value & BIT(24))) {
+        unsigned n = 0;
+        assert(m->triggers < 32);
+        for (unsigned i = 0; i < 16; i++) if (get(m,ENABLE) & BIT(i)) {
+            assert(n < 3);
+            m->command[m->triggers][n++] = get(m,MSG + i*24 + 4);
+        }
+        m->count[m->triggers] = n;
         m->triggers++;
         if (m->changed_irq) set(m, TCS, get(m, TCS) | BIT(7));
         set(m, STATUS, 0); m->pending = 1;
@@ -208,12 +220,18 @@ static void db_tests(void)
 static void baselines(struct giulia_wlan_rail_baseline b[7])
 {
     unsigned i;
-    for (i = 0; i < 7; i++) { b[i].millivolts = 100 + i; b[i].enable = i & 1u; b[i].known = 3; }
+    for (i = 0; i < 7; i++) {
+        b[i].millivolts = 100 + i; b[i].enable = i & 1u; b[i].known = 3;
+        b[i].mode = i < 2 ? 4 : (i == 6 ? 7 : 99);
+    }
 }
 static void votes_restored(struct mock *m)
 {
     unsigned i;
-    for (i = 0; i < 7; i++) assert(m->vote[i][0] == 100 + i && m->vote[i][1] == (i & 1u));
+    for (i = 0; i < 7; i++) {
+        assert(m->vote[i][0] == 100 + i && m->vote[i][1] == (i & 1u));
+        assert(m->vote[i][2] == (i < 2 ? 4u : (i == 6 ? 7u : 99u)));
+    }
 }
 static void rail_tests(void)
 {
@@ -271,9 +289,59 @@ static void forward_only_last(void)
     assert(m.vote[0][0] == 1800 && m.vote[0][1] == 1);
     assert(giulia_wlan_rails_stop(&p,1) == GIULIA_WLAN_RAIL_RETAINED);
 }
+static void mode_tests(void)
+{
+    struct mock m; struct giulia_rpmh t; struct giulia_wlan_rails p = {0};
+    struct giulia_wlan_rail_baseline b[7]; uint8_t db[1024];
+    unsigned flags = GIULIA_WLAN_RAIL_REQUIRED | GIULIA_WLAN_RAIL_MODE_WRITE_SAFE;
+    database(db); baselines(b); setup(&m,&t);
+    assert(giulia_wlan_rails_start_with_dt_modes(&p,&t,db,sizeof(db),1,b,
+        GIULIA_WLAN_RAIL_REQUIRED,0) == GIULIA_RPMH_PREREQUISITE);
+    assert(giulia_wlan_rails_start_with_dt_modes(&p,&t,db,sizeof(db),1,b,flags,0)
+        == GIULIA_WLAN_RAIL_BASELINE_UNKNOWN);
+    b[0].known = b[1].known = b[6].known = 7; b[6].mode = 4;
+    assert(giulia_wlan_rails_start_with_dt_modes(&p,&t,db,sizeof(db),1,b,flags,0)
+        == GIULIA_WLAN_RAIL_BASELINE_UNKNOWN);
+    assert(!m.reads && !m.writes); b[6].mode = 7;
+    assert(giulia_wlan_rails_start_with_dt_modes(&p,&t,db,sizeof(db),1,b,flags,0) == 0);
+    for (unsigned i = 0; i < 7; i++) {
+        uint32_t base = 0x40000 + 16*i;
+        unsigned managed = i < 2 || i == 6;
+        assert(m.count[i] == (managed ? 3u : 2u));
+        assert(m.command[i][0] == base);
+        assert(m.command[i][managed ? 2 : 1] == base+4);
+        if (managed) {
+            assert(m.command[i][1] == base+8);
+            assert(m.vote[i][2] == (i < 2 ? 7u : 3u));
+        } else assert(m.vote[i][2] == 99);
+    }
+    assert(giulia_wlan_rails_stop(&p,1) == 0);
+    for (unsigned n = 7; n < 14; n++) {
+        unsigned i = 13-n, managed = i < 2 || i == 6;
+        uint32_t base = 0x40000 + 16*i;
+        if (i & 1u) {
+            assert(m.command[n][0] == base);
+            assert(m.command[n][managed ? 2 : 1] == base+4);
+            if (managed) assert(m.command[n][1] == base+8);
+        } else {
+            assert(m.command[n][0] == base+4 && m.command[n][1] == base);
+            if (managed) assert(m.command[n][2] == base+8);
+        }
+    }
+    votes_restored(&m); restored(&m,&t);
+    memset(&p,0,sizeof(p)); setup(&m,&t); m.hold_at = 2; m.partial_words = 2;
+    assert(giulia_wlan_rails_start_with_dt_modes(&p,&t,db,sizeof(db),1,b,flags,0)
+        == GIULIA_RPMH_TIMEOUT);
+    assert(p.attempted_mask == 3 && p.state == GIULIA_WLAN_RAIL_FAULT);
+    assert(m.vote[1][2] == 7 && giulia_rpmh_bus_owned(&t));
+    m.hold_at = 0;
+    assert(giulia_wlan_rails_stop(&p,1) == 0 && m.triggers == 4);
+    votes_restored(&m); restored(&m,&t);
+    puts("Ace5 WLAN rails: DT modes, V-M-E ordering and partial mode compensation passed");
+}
 int main(void)
 {
-    transport_tests(); db_tests(); rail_tests(); forward_only_last();
+    transport_tests(); db_tests(); rail_tests(); mode_tests(); forward_only_last();
     puts("SM8650 RPMh transport and WLAN rail vote tests passed");
     return 0;
 }
