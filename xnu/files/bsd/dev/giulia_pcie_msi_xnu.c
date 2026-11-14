@@ -7,8 +7,7 @@
 #include <mach/mach_types.h>
 #include <kern/cpu_data.h> /* XNU 8796 preemption declarations */
 #include <machine/machine_routines.h>
-#include <arm/cpu_data_internal.h>
-#include <arm/cpu_internal.h>
+#include <machine/cpu_number.h> /* exported to the BSD build, unlike cpu_data_internal */
 #endif
 #include <stdbool.h>
 #include "giulia_pcie_msi_xnu.h"
