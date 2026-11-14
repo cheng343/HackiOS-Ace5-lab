@@ -148,7 +148,7 @@ KEEP_LANG = ('en', 'Base', 'English', 'en_US', 'en_GB')
 def entries(listing):
     """Yield one dict per entry of a 7z technical listing."""
     entry = {}
-    for line in open(listing, errors='replace'):
+    for line in open(listing, encoding='utf-8', errors='strict'):
         line = line.rstrip('\n')
         if not line:
             if 'Path' in entry and 'Mode' in entry:
@@ -156,7 +156,10 @@ def entries(listing):
             entry = {}
         elif ' = ' in line or line.endswith(' ='):
             key, _, value = line.partition(' =')
-            entry[key] = value[1:] if value.startswith(' ') else value
+            value = value[1:] if value.startswith(' ') else value
+            # 7-Zip on Windows prints archive paths with backslashes. The
+            # selection rules and the APFS manifest always use POSIX paths.
+            entry[key] = value.replace('\\', '/') if key == 'Path' else value
     if 'Path' in entry and 'Mode' in entry:
         yield entry
 
@@ -254,7 +257,8 @@ def main():
             chosen.add(path)
 
     total = count = 0
-    with open(files_out, 'w') as files, open(manifest_out, 'w') as manifest:
+    with open(files_out, 'w', encoding='utf-8', newline='\n') as files, \
+            open(manifest_out, 'w', encoding='utf-8', newline='\n') as manifest:
         for path in sorted(chosen):
             if path not in meta:
                 continue

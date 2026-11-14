@@ -1,0 +1,42 @@
+name: Ace 5 Windows extraction tool
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  unzbm:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Compile extraction helper in GitHub
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out/windows-host | Out-Null
+          $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (-not $vs) { throw 'Visual C toolchain unavailable' }
+          $vcvars = Join-Path $vs 'VC/Auxiliary/Build/vcvars64.bat'
+          $command = '"' + $vcvars + '" && cl /nologo /std:c11 /O2 /MT /D_CRT_SECURE_NO_WARNINGS /Foout/windows-host/ /Feout/windows-host/unzbm.exe xnu-deps/build/lzbitmap/unzbm.c xnu-deps/build/lzbitmap/libzbitmap.c'
+          & cmd.exe /d /s /c $command
+          if ($LASTEXITCODE -ne 0) { throw 'C compilation failed' }
+      - name: Check Windows streams and listing compatibility
+        shell: pwsh
+        run: |
+          python -X utf8 tools/ace5/test-unzbm.py out/windows-host/unzbm.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Resource-fork test failed' }
+          python -X utf8 tools/ace5/test-ios-listing.py
+          if ($LASTEXITCODE -ne 0) { throw 'Listing test failed' }
+          Get-FileHash out/windows-host/unzbm.exe -Algorithm SHA256 | Format-List
+          git rev-parse HEAD | Set-Content out/windows-host/source-commit.txt
+          Copy-Item LICENSE out/windows-host/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ace5-windows-host-${{ github.run_id }}
+          path: |
+            out/windows-host/unzbm.exe
+            out/windows-host/source-commit.txt
+            out/windows-host/LICENSE
+          retention-days: 7
+          if-no-files-found: error
