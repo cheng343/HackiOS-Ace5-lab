@@ -1,5 +1,7 @@
 # HackiOS on OnePlus Ace 5
 
+本仓库是基于 [YiKongk/HackiOS-Ace5](https://github.com/YiKongk/HackiOS-Ace5) 的源码修复与云编译研究分支。新增 GPU 生命周期、启动错误处理及旧驱动机型检查修复；[GitHub ARM64 云编译说明](docs/CLOUD.zh-CN.md)记录流程与产物边界。下述实机记录来自原项目基线，本研究分支的后续修改需要单独验证。
+
 一加 Ace 5 **PKG110 / giulia / Snapdragon 8 Gen 3（SM8650）** 的 HackiOS 研究性移植。
 通过临时 UEFI / XNU loader 在 RAM 中启动 iOS 16.5，包含 S3910 触摸适配、Adreno 750 桌面合成、实验性 Metal 支持、原生壁纸修复和单核桌面优化。
 

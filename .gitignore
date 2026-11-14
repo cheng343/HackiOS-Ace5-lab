@@ -2,6 +2,7 @@
 # The public snapshot contains both kernel and userland source in one Git tree.
 /*
 !/.gitignore
+!/.github/
 !/README.md
 !/LICENSE
 !/common/

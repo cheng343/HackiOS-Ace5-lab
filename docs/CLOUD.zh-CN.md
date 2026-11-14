@@ -1,0 +1,13 @@
+# GitHub ARM64 云编译
+
+本研究仓库基于 [YiKongk/HackiOS-Ace5](https://github.com/YiKongk/HackiOS-Ace5)，保留原署名与许可证，加入源码修复和云端构建。此流程编译 XNU 内核及 diagnostic/kernel 两种 loader，未包含完整 iOS、Mu UEFI、手机 DTB 或厂商固件。
+
+在 Actions 中选择 **Ace 5 ARM64 build → Run workflow**，或向 main 推送提交。使用标准 `ubuntu-24.04-arm`，默认两个编译任务并行。每次在安装依赖前后、构建后记录实际磁盘总量/可用量和内存，容量以本次日志为准。
+
+依赖按现有教程的固定版本取得。Theos SDK 只检出 iPhoneOS16.5.sdk，SDK、依赖与缓存不提交到 Git，也不作为构建附件上传。先执行主机回归，再编译 loader、准备 XNU 依赖并执行 `build` 目标。每次都从干净的 runner 构建，失败时保留构建诊断。
+
+Actions 附件 `ace5-arm64-运行编号-尝试编号` 包含已成功生成的内核/loader、SHA-256 清单、资源记录与构建日志，保存七天。失败任务也可能有附件；确认整个任务成功，且 `build-manifest.json` 中 `kernel_built` 为 true，再把它作为内核构建结果。
+
+`loader.efi` 是 UEFI 应用，`usb-payload.bin` 是 loader payload，均不是可刷写的 Android boot image。后续仍需按 [UEFI 教程](UEFI.zh-CN.md)使用本机 DTB 准备 UEFI 启动镜像，并准备系统和 GPU 固件。云编译成功不代表这台 ColorOS 17 已实机兼容，也不代表 Wi-Fi、SIM、相机完成适配。
+
+本机仅用于编辑/上传源码与下载云端产物；此流程不会连接手机或运行刷写命令。

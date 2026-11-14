@@ -1,0 +1,67 @@
+name: Ace 5 ARM64 build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ace5-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  kernel-and-loader:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    env:
+      JOBS: '2'
+      XNU_CC: /usr/bin/clang-18
+      XNU_CXX: /usr/bin/clang++-18
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Record actual runner capacity
+        run: |
+          mkdir -p out/ci
+          python3 tools/ace5/ci-record.py inventory initial
+          df -h . /tmp
+          free -h
+          nproc
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential git curl xz-utils \
+            clang-18 libclang-rt-18-dev lld-18 llvm-18 flex bison m4 perl autoconf automake libtool \
+            pkg-config libncurses-dev uuid-dev python3
+          python3 tools/ace5/ci-record.py inventory after-packages
+      - name: Source checks and host regressions on the cloud runner
+        run: bash tools/ace5/ci-build.sh tests 2>&1 | tee out/ci/host-tests.log
+      - name: Build diagnostic and kernel-stage loaders
+        run: bash tools/ace5/ci-build.sh loader 2>&1 | tee out/ci/loader-build.log
+      - name: Prepare pinned XNU dependencies
+        run: bash tools/ace5/ci-build.sh dependencies 2>&1 | tee out/ci/dependencies.log
+      - name: Build patched XNU
+        run: bash tools/ace5/ci-build.sh xnu 2>&1 | tee out/ci/xnu-build.log
+      - name: Record output hashes and final capacity
+        if: always()
+        run: |
+          python3 tools/ace5/ci-record.py inventory final
+          python3 tools/ace5/ci-record.py manifest
+          df -h . /tmp
+          du -sh local xnu-src xnu-deps out 2>/dev/null || true
+          find xnu-deps -maxdepth 1 -type f -name '*.log' -exec cp '{}' out/ci/ ';'
+      - name: Upload build outputs and diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ace5-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/ci/
+          retention-days: 7
+          if-no-files-found: error
