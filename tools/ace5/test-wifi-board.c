@@ -14,6 +14,7 @@ struct mock {
     unsigned phy_reads, phy_writes, phy_barriers, phy_delays;
     char start_fail, stop_fail, reject_start;
     unsigned phy_auto_cleanup;
+    unsigned handoff;
 };
 static struct mock *current;
 static int event(char c)
@@ -31,6 +32,8 @@ static int external(void *p, uint32_t need)
 {
     struct mock *m = p;
     assert(m == current);
+    assert(!!(need & GIULIA_WBOARD_RCHNG_HANDOFF) == !!m->handoff);
+    need &= ~GIULIA_WBOARD_RCHNG_HANDOFF;
     assert(need == GIULIA_WBOARD_START_REQUIRED || need == GIULIA_WBOARD_STOP_REQUIRED);
     m->external_calls++;
     if (m->external_fail_at && (m->external_calls == m->external_fail_at ||
@@ -131,6 +134,7 @@ int giulia_pcie_power_start(struct giulia_pcie_power *p,
     int rc;
     assert(p == &current->board->power && io->cookie == current);
     required(flags, GIULIA_POWER_REQUIRED);
+    assert(!!(flags & GIULIA_POWER_RCHNG_HANDOFF) == !!current->handoff);
     assert(current->board->perst_isolated && current->board->gpio.state == GIULIA_WGPIO_ON);
     rc = event('P');
     if (current->reject_start == 'P') return -55;
@@ -281,6 +285,14 @@ static void test_default_and_success(void)
     assert(b.state == GIULIA_WBOARD_STOPPED && !b.owned);
     calls = m.external_calls;
     assert(giulia_wifi_board_stop(&b, 0) == 0 && m.external_calls == calls);
+    io = init(&m, &b); m.handoff = 1;
+    assert(giulia_wifi_board_start(&b, &io,
+        GIULIA_WBOARD_START_REQUIRED | GIULIA_WBOARD_RCHNG_HANDOFF) == 0);
+    calls = m.external_calls;
+    assert(giulia_wifi_board_stop(&b, GIULIA_WBOARD_STOP_REQUIRED) == GIULIA_WBOARD_PREREQUISITE);
+    assert(m.external_calls == calls);
+    assert(giulia_wifi_board_stop(&b,
+        GIULIA_WBOARD_STOP_REQUIRED | GIULIA_WBOARD_RCHNG_HANDOFF) == 0);
 }
 static void test_every_start_failure(void)
 {

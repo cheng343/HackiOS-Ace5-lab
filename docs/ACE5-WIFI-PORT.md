@@ -244,3 +244,34 @@ SHA-256，内核为 `9d43c3434bac22359fb63a09ebf0eaffbc2f25e823b6bf1a9ed7836a3de
 ccache 命中 1045/1056 次可缓存编译（98.96%），11 次未命中；这不是整棵 make
 工作目录的增量复用。仅准备了临时诊断包，尚未取得本次真机交接日志，不能把
 编译和模拟回归通过记为 Wi-Fi 实机可用。
+
+## 后续：继承时钟与 AOP/QMP
+
+在 `cd98988` 的短只读真机会话中，七路 VRM 地址成功解析，CESTA/CRM header
+读取完成，静态 init 的 35 项检查通过，内核正常返回并重启回 Android。
+采集表明 core/PHY GDSC 均报告 down complete，普通 PCIe0 leaf votes 已撤销，
+但 RCHNG 的 GCC vote bit 22 仍为 1、分支仍运行。这不是 Wi-Fi 启动成功记录。
+
+`giulia_pcie_power` 增加显式的 RCHNG handoff 路径：调用者须真实取得前一使用者
+移交的控制权，同时保留原有供电、NoC、CESTA 和 PERST 前提。核心在写入前再次
+检查两个域均 collapsed/down、RCHNG 运行且其他 PCIe leaves 已关。整个启动、
+失败恢复和停止过程保留原 bit 22，恢复原 RCG 配置；默认入口继续拒绝继承票。
+板级协调器将这份可选租约一直保留到 power restore 完成，不能在 stop 时省略。
+
+`giulia_aop.c/.h` 实现实际的 32-bit AOSS/QMP descriptor/握手/消息传输协议。
+冷启动通道和明确取得租约后借用已打开通道是不同策略；消息缓冲区地址和长度
+从有效 descriptor 得到，全部做边界校验。消息长度在 payload 写完后才发布，
+等待 ACK 有一秒上限。超时保留待确认消息，恢复只观察迟到 ACK，不重发、不清除
+长度；关闭借用的通道不写 DOWN。它不恢复 AOP 已消费的电源表，也不将 ACK 等同
+于某个 regulator 命令的结果或原表读回。平台仍需提供独占 QMP 服务与 IPCC kick。
+
+协议与 doorbell 依据固定官方
+[qcom_aoss.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/soc/qcom/qcom_aoss.c)、
+[qcom-ipcc.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/mailbox/qcom-ipcc.c)
+和相同提交的 `qcom-ipcc.h`。AOP/QMP client/signal 是 0/0，SEND_ID offset 为
+`0xc`，编码为 `(client << 16) | signal`；尚未自动向该寄存器发送。
+
+`ace5_wifi_probe=3` 额外只读采集 AOP header、mailbox length 和前后变化状态，
+不读取消息内容、不触发通道握手或发送电源消息。对应 cloud runner 直接链接
+生产 AOP 核心，覆盖握手失败、全局 owner、超时/迟到 ACK、借用通道保留、payload
+先于 length、布局漂移，以及 XNU 映射回收。新增代码的硬件写入路径尚未真机验证。

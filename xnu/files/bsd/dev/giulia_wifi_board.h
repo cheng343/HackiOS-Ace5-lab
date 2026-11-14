@@ -21,7 +21,10 @@ enum giulia_wifi_board_condition {
     /* All external config/BAR/MSI/DMA users are stopped and serialized. */
     GIULIA_WBOARD_USERS_QUIESCED = 1u << 6,
     /* Caller is authorized to reset an inactive WLAN/BT/PCIe0 instance. */
-    GIULIA_WBOARD_COLD_RESET_ALLOWED = 1u << 7
+    GIULIA_WBOARD_COLD_RESET_ALLOWED = 1u << 7,
+    /* Optional lease of the dedicated inherited RCHNG branch, retained
+     * through final power restoration; not implied by a cold GDSC snapshot. */
+    GIULIA_WBOARD_RCHNG_HANDOFF = 1u << 8
 };
 #define GIULIA_WBOARD_START_REQUIRED 0xffu
 #define GIULIA_WBOARD_STOP_REQUIRED 0x7fu

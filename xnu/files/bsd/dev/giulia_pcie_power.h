@@ -29,7 +29,13 @@ enum giulia_pcie_power_prerequisite {
     GIULIA_POWER_DIRECT_VOTES = 1u << 4,
     GIULIA_POWER_XO_19M2_GPLL0_EVEN_300M = 1u << 5,
     GIULIA_POWER_ENDPOINT_RESET = 1u << 6,
-    GIULIA_POWER_LINK_DMA_QUIET = 1u << 7
+    GIULIA_POWER_LINK_DMA_QUIET = 1u << 7,
+    /* Optional platform handoff of an inherited PCIe0-only RCHNG vote.
+     * Requires all ordinary prerequisites AND confirmed relinquishment by
+     * every previous clock user. The core independently checks both domains
+     * are collapsed/down and every other PCIe leaf is disabled before writes.
+     * This flag never follows merely from reading the inherited vote. */
+    GIULIA_POWER_RCHNG_HANDOFF = 1u << 8
 };
 #define GIULIA_POWER_REQUIRED 0xffu
 enum giulia_pcie_power_stop_condition {
@@ -52,6 +58,7 @@ struct giulia_pcie_power_io {
 struct giulia_pcie_power {
     struct giulia_pcie_power_io io;
     uint32_t state, dirty, saved[GIULIA_POWER_SAVED_REGS];
+    uint32_t inherited_rchng;
     int last_error, cleanup_error;
 };
 
@@ -61,6 +68,10 @@ struct giulia_pcie_power {
  * gates. DIRECT_VOTES means vendor CESTA/firmware no longer owns this sequence.
  * This module neither proves those facts nor changes shared PLL frequencies.
  * It refuses live PCIe0 branch votes, an RCG update in progress or GDSC HW mode.
+ * RCHNG_HANDOFF alone permits the inherited RCHNG branch after cold-state
+ * admission. Its vote remains asserted throughout start/rollback/stop and its
+ * original RCG fields are restored; no shared PLL is reprogrammed. This is not
+ * a running-link handoff or permission to take a clock from firmware.
  * start powers domains, enables host clocks, pulses core then PHY BCR and
  * enables PHY aux/ref/rchng resources. PIPE stays disabled on the XO mux.
  * CORE BCR is held 1000 us, then settled 1000 us; PHY BCR is held 200 us.

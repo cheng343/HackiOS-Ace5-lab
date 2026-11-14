@@ -194,8 +194,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def ace5_wifi_probe_arguments(mode, bootcpu, kernel, seconds):
     if not mode:
         return ''
-    if mode not in (1, 2) or not kernel or bootcpu != 1 or seconds <= 0:
-        raise RuntimeError('--wifi-probe requires mode 1 or 2, --kernel, --bootcpu 1 and a finite run')
+    if mode not in (1, 2, 3) or not kernel or bootcpu != 1 or seconds <= 0:
+        raise RuntimeError('--wifi-probe requires mode 1..3, --kernel, --bootcpu 1 and a finite run')
     return f' ace5_wifi_probe={mode}'
 
 
@@ -204,8 +204,10 @@ def check_wifi_probe_log(mode, text, log):
         return
     markers = [f'ace5-wifi: probe={mode} read-only begin',
                'ace5-wifi: read-only probe complete']
-    if mode == 2:
+    if mode >= 2:
         markers.append('ace5-wifi: early CESTA/CRM headers captured')
+    if mode == 3:
+        markers.append('ace5-wifi: AOP descriptor captured')
     if any(marker not in text for marker in markers):
         raise RuntimeError(f'Wi-Fi handoff probe incomplete; see {log}')
 
@@ -224,8 +226,8 @@ run.add_argument('--verbose', action='store_true')
 run.add_argument('--kernel', type=Path, help='Explicit locally built Mach-O kernel')
 run.add_argument('--root-image', type=Path, help='Local small APFS image, e.g. with device firmware')
 run.add_argument('--touch', action='store_true', help='Enable the giulia S3910 driver; requires --kernel')
-run.add_argument('--wifi-probe', type=int, choices=[1, 2],
-                 help='Read-only Ace 5 handoff probe: 1 GCC/GPIO/CMD DB, 2 also CESTA/CRM; requires --kernel, CPU 1 and a finite run')
+run.add_argument('--wifi-probe', type=int, choices=[1, 2, 3],
+                 help='Read-only Ace 5 handoff probe: 1 baseline, 2 also CESTA/CRM, 3 also AOP headers; requires --kernel, CPU 1 and a finite run')
 run.add_argument('--battery', action='store_true',
                  help='Experimental Ace 5 NFG8011B sampling; requires --kernel and --bootcpu 1')
 run.add_argument('--cpu-khz', type=int, default=0,

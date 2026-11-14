@@ -16,6 +16,7 @@ static void refresh_owned(struct giulia_wifi_board *b)
 
 static int external_valid(struct giulia_wifi_board *b, uint32_t required)
 {
+    required |= b->conditions & GIULIA_WBOARD_RCHNG_HANDOFF;
     if ((b->conditions & required) != required) return GIULIA_WBOARD_PREREQUISITE;
     b->external_error = b->io.validate_external(b->io.external_cookie, required);
     return b->external_error ? GIULIA_WBOARD_EXTERNAL : GIULIA_WBOARD_OK;
@@ -46,6 +47,7 @@ static uint32_t power_conditions(struct giulia_wifi_board *b)
         f |= GIULIA_POWER_XO_19M2_GPLL0_EVEN_300M;
     if (b->perst_isolated) f |= GIULIA_POWER_ENDPOINT_RESET;
     if (b->conditions & GIULIA_WBOARD_USERS_QUIESCED) f |= GIULIA_POWER_LINK_DMA_QUIET;
+    if (b->conditions & GIULIA_WBOARD_RCHNG_HANDOFF) f |= GIULIA_POWER_RCHNG_HANDOFF;
     return f;
 }
 static uint32_t link_conditions(struct giulia_wifi_board *b)
@@ -287,7 +289,9 @@ int giulia_wifi_board_stop(struct giulia_wifi_board *b, uint32_t conditions)
         return GIULIA_WBOARD_OK;
     if (b->state != GIULIA_WBOARD_CPU_BAR_READY && b->state != GIULIA_WBOARD_FAULT)
         return GIULIA_WBOARD_STATE;
-    if ((conditions & GIULIA_WBOARD_STOP_REQUIRED) != GIULIA_WBOARD_STOP_REQUIRED)
+    uint32_t required = GIULIA_WBOARD_STOP_REQUIRED |
+        (b->conditions & GIULIA_WBOARD_RCHNG_HANDOFF);
+    if ((conditions & required) != required)
         return GIULIA_WBOARD_PREREQUISITE;
     b->conditions = conditions;
     return cleanup(b);

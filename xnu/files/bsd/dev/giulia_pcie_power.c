@@ -280,6 +280,31 @@ restore(struct giulia_pcie_power *p)
     return GIULIA_POWER_OK;
 }
 
+/* An inherited clock vote is not proof of a running PCIe host. The Ace 5
+ * handoff has both domains DOWN while this dedicated branch still runs.
+ * Only an explicit external clock lease allows reconfiguration; keep its
+ * original vote continuously set so stop does not turn off an inherited
+ * resource. Status bits are from the same fixed gdsc.c / clk-branch.c above.
+ */
+static int
+rchng_handoff_admit(struct giulia_pcie_power *p)
+{
+    static const uint32_t offsets[] = {0x6b004, 0x6b008, 0x6c000,
+        0x6c004, 0x5214c, 0x6b054};
+    uint32_t v[6];
+    unsigned i;
+    for (i = 0; i < 6; i++) {
+        v[i] = p->io.read32(p->io.cookie, GIULIA_POWER_GCC, offsets[i]);
+        if (v[i] == 0xffffffffu) return GIULIA_POWER_READBACK;
+    }
+    if ((v[0] & 7u) != 1u || (v[2] & 7u) != 1u ||
+        (v[1] & (B(15) | B(16))) != B(15) ||
+        (v[3] & (B(15) | B(16))) != B(15) ||
+        (v[4] & 9u) != 9u || (v[5] & B(31)))
+        return GIULIA_POWER_BUSY;
+    return GIULIA_POWER_OK;
+}
+
 int
 giulia_pcie_power_start(struct giulia_pcie_power *p,
     const struct giulia_pcie_power_io *io, uint32_t prerequisites)
@@ -295,6 +320,7 @@ giulia_pcie_power_start(struct giulia_pcie_power *p,
         return GIULIA_POWER_STATE;
     p->io = *io;
     p->dirty = 0;
+    p->inherited_rchng = 0;
     p->last_error = p->cleanup_error = 0;
     for (i = 0; i < GIULIA_POWER_SAVED_REGS; i++) {
         value = read_reg(p, i);
@@ -309,11 +335,18 @@ giulia_pcie_power_start(struct giulia_pcie_power *p,
     /* Shared NoC and ref votes may be inherited; live PCIe0 leaves may not.
      * No write occurs before this admission check completes.
      */
-    if ((p->saved[VOTES1] & 0x3fu) || (p->saved[VOTES0] & B(22)) ||
+    if ((p->saved[VOTES1] & 0x3fu) ||
         (p->saved[CORE_GDSC] & 6u) || (p->saved[PHY_GDSC] & 6u) ||
         (p->saved[PIPE_MUX] != 0 && p->saved[PIPE_MUX] != 2) ||
         (aux_cmd & ROOT_UPDATE) || (rch_cmd & ROOT_UPDATE))
         return GIULIA_POWER_BUSY;
+    if (p->saved[VOTES0] & B(22)) {
+        if (!(prerequisites & GIULIA_POWER_RCHNG_HANDOFF))
+            return GIULIA_POWER_BUSY;
+        if (rch_cmd & ROOT_OFF) return GIULIA_POWER_BUSY;
+        if ((r = rchng_handoff_admit(p))) return r;
+        p->inherited_rchng = 1;
+    }
     p->state = GIULIA_POWER_FAULT; /* Any attempted write now needs cleanup. */
     if ((r = gdsc_on(p, CORE_GDSC, B(0))) ||
         (r = gdsc_on(p, PHY_GDSC, B(3))) ||

@@ -20,6 +20,7 @@ struct mock {
     uint32_t all_ones_off;
     unsigned all_ones_after;
     unsigned blocked;
+    unsigned cold_down, preserve_rchng;
     uint32_t block_off, block_mask;
     uint32_t active_aux, active_rch;
 };
@@ -87,7 +88,7 @@ static uint32_t read32(void *cookie, unsigned block, uint32_t off)
         if (m->other_master_on & vote)
             return BIT(16);
         return !(raw(m, 0, 0x5214c) & vote) && !(m->gdsc_stuck & vote)
-            ? BIT(16) : 0;
+            ? BIT(16) : (m->cold_down ? BIT(15) : 0);
     }
     r = find(m, block, off);
     if (block == 0 && (off == 0x6b074 || off == 0x6b058)) {
@@ -117,6 +118,8 @@ static void write32(void *cookie, unsigned block, uint32_t off, uint32_t v)
      * CFG status, PLL, GPIO, firmware vote or collateral clock writes.
      */
     assert((unsigned)(r - m->regs) < 13);
+    if (m->preserve_rchng && block == 0 && off == 0x52000)
+        assert(v & BIT(22));
     if (m->writes == m->drop_at)
         return;
     if (m->blocked && block == 0 && off == m->block_off)
@@ -235,6 +238,66 @@ static void admission(void)
             GIULIA_POWER_BUSY);
         assert(m.writes == 0 && p.state == GIULIA_POWER_IDLE);
     }
+}
+
+static void inherited_init(struct mock *m)
+{
+    struct reg *r;
+    init(m); m->cold_down = m->preserve_rchng = 1;
+    r = find(m, 0, 0x52000); r->value |= BIT(22); r->original = r->value;
+    r = find(m, 0, 0x6b004); r->value = r->original = 0x22f801;
+    r = find(m, 0, 0x6c000); r->value = r->original = 0x222801;
+    r = find(m, 0, 0x6b05c); r->value = r->original = 0x100000;
+    m->active_rch = 0x100000;
+}
+static void inherited_rchng(void)
+{
+    struct mock m;
+    struct giulia_pcie_power p;
+    struct giulia_pcie_power_io v;
+    unsigned i, limit;
+    const unsigned flags = GIULIA_POWER_REQUIRED | GIULIA_POWER_RCHNG_HANDOFF;
+    inherited_init(&m); memset(&p, 0, sizeof(p)); v = io(&m);
+    assert(giulia_pcie_power_start(&p, &v, flags) == 0 && p.inherited_rchng);
+    assert(m.active_rch == 0x605 && (raw(&m, 0, 0x52000) & BIT(22)));
+    limit = m.writes;
+    assert(giulia_pcie_power_stop(&p, GIULIA_POWER_STOP_REQUIRED) == 0);
+    restored(&m, &p);
+    /* A real cold-domain status and an explicit lease are both required. */
+    for (i = 0; i < 7; i++) {
+        unsigned f = flags;
+        inherited_init(&m); memset(&p, 0, sizeof(p)); v = io(&m);
+        if (i == 0) f &= ~GIULIA_POWER_RCHNG_HANDOFF;
+        if (i == 1) m.cold_down = 0;
+        if (i == 2) m.other_master_on = BIT(0);
+        if (i == 3) find(&m, 0, 0x6c000)->value &= ~1u;
+        if (i == 4) find(&m, 0, 0x5214c)->value &= ~BIT(3);
+        if (i == 5) find(&m, 0, 0x52008)->value |= BIT(3);
+        if (i == 6) m.branch_stuck = 0x6b054;
+        assert(giulia_pcie_power_start(&p, &v, f) == GIULIA_POWER_BUSY);
+        assert(!m.writes && p.state == GIULIA_POWER_IDLE);
+    }
+    inherited_init(&m); memset(&p, 0, sizeof(p)); v = io(&m);
+    m.all_ones_off = 0x6b008;
+    assert(giulia_pcie_power_start(&p, &v, flags) == GIULIA_POWER_READBACK && !m.writes);
+    /* Every start write and rollback must keep the inherited vote set. */
+    for (i = 1; i <= limit; i++) {
+        int rc;
+        inherited_init(&m); memset(&p, 0, sizeof(p)); v = io(&m); m.drop_at = i;
+        rc = giulia_pcie_power_start(&p, &v, flags);
+        assert(rc == 0 || rc == GIULIA_POWER_READBACK || rc == GIULIA_POWER_TIMEOUT);
+        m.drop_at = 0;
+        assert(giulia_pcie_power_stop(&p, GIULIA_POWER_STOP_REQUIRED) == 0);
+        restored(&m, &p);
+    }
+    inherited_init(&m); memset(&p, 0, sizeof(p)); v = io(&m);
+    m.update_stuck = 0x6b058;
+    assert(giulia_pcie_power_start(&p, &v, flags) == GIULIA_POWER_TIMEOUT);
+    assert(p.state == GIULIA_POWER_FAULT && (raw(&m, 0, 0x52000) & BIT(22)));
+    m.update_stuck = 0;
+    assert(giulia_pcie_power_stop(&p, GIULIA_POWER_STOP_REQUIRED) == 0);
+    restored(&m, &p);
+    puts("SM8650 inherited RCHNG: cold handoff, preserved vote and rollback passed");
 }
 
 static void timeouts(void)
@@ -366,6 +429,7 @@ int main(void)
 {
     lifecycle();
     admission();
+    inherited_rchng();
     timeouts();
     readback_and_retry();
     inaccessible_mmio();

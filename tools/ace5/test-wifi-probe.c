@@ -23,9 +23,10 @@ typedef int wait_result_t;
 typedef void *thread_t;
 static unsigned mode, board, creates, exits, deallocs, lines, mapped, unmapped;
 static uint32_t failed_pa;
-static int thread_error, saw_complete, saw_noc, resolver_calls;
+static int thread_error, saw_complete, saw_noc, saw_aop, resolver_calls;
 static _Alignas(0x4000) uint32_t gcc[0x70000 / 4], gpio[0x100000 / 4], rsc[0x10000 / 4];
 static _Alignas(0x4000) uint32_t db[0x20000 / 4], sm_pages[0xc000 / 4], crm_pages[0x4000 / 4];
+static _Alignas(0x4000) uint32_t aop_pages[0x4000 / 4];
 static uint32_t *const sm = sm_pages + 0x3000 / 4;
 static uint32_t *const crm = crm_pages + 0x1000 / 4;
 static uint64_t original;
@@ -59,6 +60,7 @@ vm_offset_t ml_io_map_unmappable(vm_offset_t pa, vm_size_t size, unsigned int fl
     case 0x81c60000: index = 3; base = db; expected = sizeof(db); break;
     case 0x01d04000: index = 4; base = sm_pages; expected = sizeof(sm_pages); break;
     case 0x01d00000: index = 5; base = crm_pages; expected = sizeof(crm_pages); break;
+    case 0x0c300000: index = 6; base = aop_pages; expected = sizeof(aop_pages); break;
     default: assert(!"unexpected physical mapping"); return 0;
     }
     assert(size == expected);
@@ -68,10 +70,10 @@ vm_offset_t ml_io_map_unmappable(vm_offset_t pa, vm_size_t size, unsigned int fl
 }
 void ml_io_unmap(vm_offset_t address, vm_size_t size)
 {
-    void *bases[] = {gcc, gpio, rsc, db, sm_pages, crm_pages};
-    unsigned sizes[] = {sizeof(gcc), sizeof(gpio), sizeof(rsc), sizeof(db), sizeof(sm_pages), sizeof(crm_pages)};
+    void *bases[] = {gcc, gpio, rsc, db, sm_pages, crm_pages, aop_pages};
+    unsigned sizes[] = {sizeof(gcc), sizeof(gpio), sizeof(rsc), sizeof(db), sizeof(sm_pages), sizeof(crm_pages), sizeof(aop_pages)};
     assert(!(address & (PAGE_SIZE - 1u)) && !(size & (PAGE_SIZE - 1u)));
-    for (unsigned i = 0; i < 6; ++i) if ((uintptr_t)bases[i] == address) {
+    for (unsigned i = 0; i < 7; ++i) if ((uintptr_t)bases[i] == address) {
         assert(size == sizes[i] && (mapped & (1u << i)) && !(unmapped & (1u << i)));
         unmapped |= 1u << i; return;
     }
@@ -85,6 +87,7 @@ void loader_log_line(const char *text)
     if (strstr(text, "early CRM +0=")) assert(strstr(text, "=0x10200"));
     if (strstr(text, "read-only probe complete")) saw_complete = 1;
     if (strstr(text, "early CESTA/CRM headers captured")) saw_noc = 1;
+    if (strstr(text, "AOP descriptor captured")) saw_aop = 1;
 }
 int giulia_rpmh_resolve_vrm(const uint8_t *data, uint32_t bytes, uint32_t version,
     const char *name, uint32_t *address)
@@ -95,10 +98,10 @@ int giulia_rpmh_resolve_vrm(const uint8_t *data, uint32_t bytes, uint32_t versio
 }
 static uint64_t fingerprint(void)
 {
-    uint32_t *bases[] = {gcc, gpio, rsc, db, sm_pages, crm_pages};
-    unsigned words[] = {sizeof(gcc)/4, sizeof(gpio)/4, sizeof(rsc)/4, sizeof(db)/4, sizeof(sm_pages)/4, sizeof(crm_pages)/4};
+    uint32_t *bases[] = {gcc, gpio, rsc, db, sm_pages, crm_pages, aop_pages};
+    unsigned words[] = {sizeof(gcc)/4, sizeof(gpio)/4, sizeof(rsc)/4, sizeof(db)/4, sizeof(sm_pages)/4, sizeof(crm_pages)/4, sizeof(aop_pages)/4};
     uint64_t h = 1469598103934665603ull;
-    for (unsigned i = 0; i < 6; ++i)
+    for (unsigned i = 0; i < 7; ++i)
         for (unsigned j = 0; j < words[i]; ++j) h = (h ^ bases[i][j]) * 1099511628211ull;
     return h;
 }
@@ -106,7 +109,7 @@ static void setup(unsigned requested)
 {
     mode = requested; board = HACKIOS_PLATFORM_GIULIA;
     creates = exits = deallocs = lines = mapped = unmapped = failed_pa = 0;
-    thread_error = saw_complete = saw_noc = resolver_calls = 0;
+    thread_error = saw_complete = saw_noc = saw_aop = resolver_calls = 0;
     wifi_probe_started = wifi_probe_mode = 0;
     memset(db, 0, sizeof(db));
     memset(sm_pages, 0, sizeof(sm_pages)); memset(crm_pages, 0, sizeof(crm_pages));
@@ -116,6 +119,9 @@ static void setup(unsigned requested)
     crm[0] = 0x00010200; /* Synthetic layout identity, not measured device. */
     crm[1] = (3u<<24) | (1u<<20) | (2u<<16) | (2u<<12) | (2u<<8) | 0x25;
     crm[2] = 6u<<26; crm[3] = 1;
+    memset(aop_pages, 0, sizeof(aop_pages));
+    aop_pages[0] = 0x4d41494c; aop_pages[1] = 1;
+    aop_pages[0x34/4] = 0x100; aop_pages[0x38/4] = 0x100;
     original = fingerprint();
 }
 static void check(void)
@@ -126,12 +132,16 @@ static void check(void)
 int main(void)
 {
     setup(0); giulia_wifi_init(); assert(!creates && !mapped);
-    setup(3); giulia_wifi_init(); assert(!creates && !mapped);
+    setup(4); giulia_wifi_init(); assert(!creates && !mapped);
     setup(1); board = 1; giulia_wifi_init(); assert(!creates && !mapped);
     setup(1); giulia_wifi_init(); check();
     assert(mapped == 15 && saw_complete && !saw_noc && resolver_calls == 7);
     giulia_wifi_init(); assert(creates == 1);
     setup(2); giulia_wifi_init(); check(); assert(mapped == 63 && saw_noc && saw_complete);
+    setup(3); giulia_wifi_init(); check(); assert(mapped == 127 && saw_noc && saw_aop && saw_complete);
+    setup(3); failed_pa = 0x0c300000; giulia_wifi_init(); check(); assert(!saw_aop && !saw_complete);
+    setup(3); aop_pages[1] = 2; original = fingerprint();
+    giulia_wifi_init(); check(); assert(!saw_aop && !saw_complete);
     static const uint32_t fail[] = {0x100000,0x0f100000,0x17a20000,0x81c60000,0x01d04000,0x01d00000};
     for (unsigned i = 0; i < sizeof(fail)/sizeof(fail[0]); ++i) {
         setup(2); failed_pa = fail[i]; giulia_wifi_init(); check(); assert(!saw_complete);
