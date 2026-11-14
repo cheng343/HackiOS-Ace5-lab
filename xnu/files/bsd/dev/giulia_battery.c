@@ -24,11 +24,26 @@ extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 extern vm_offset_t pe_arm_get_soc_base_phys(void);
 extern kern_return_t thread_terminate(thread_t);
 extern void redwood_battery_gauge_report(const struct redwood_battery_state *);
+extern void loader_log_line(const char *);
 enum { GB_IDLE = 1, GB_READING, GB_STOPPING, GB_OFF };
 static unsigned gb_phase;
 static uintptr_t gb_gpio;
 static uint32_t gb_saved_cfg[2], gb_saved_io[2], gb_input_cfg[2];
 static bool gb_taken;
+
+/* printf's message buffer is appended only when returning to the loader.
+ * Mirror diagnostics into its live ring without changing sampling cadence. */
+static void gb_log(const char *format, ...) __printflike(1, 2);
+static void gb_log(const char *format, ...)
+{
+    char line[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(line, sizeof(line), format, args);
+    va_end(args);
+    loader_log_line(line);
+    printf("%s", line);
+}
 
 static uint32_t gb_mmio_read(uintptr_t address) { return *(volatile uint32_t *)address; }
 static void gb_mmio_write(uintptr_t address, uint32_t value)
@@ -143,7 +158,7 @@ static void gb_thread(__unused void *arg, __unused wait_result_t wait)
             redwood_battery_gauge_report(&report);
         else failures++;
         if (polls++ < 3 || polls % 12 == 0)
-            printf("ace5-battery: poll=%u rc=%d failures=%u%s\n", polls, rc, failures,
+            gb_log("ace5-battery: poll=%u rc=%d failures=%u%s\n", polls, rc, failures,
                 !rc ? "; gauge sample only, charger state unknown" : "; no sample published");
         expected = GB_READING;
         if (!__atomic_compare_exchange_n(&gb_phase, &expected, GB_IDLE, false,
@@ -170,7 +185,7 @@ void giulia_battery_stop(void)
     while (__atomic_load_n(&gb_phase, __ATOMIC_ACQUIRE) != GB_OFF && mach_absolute_time() < deadline)
         delay_for_interval(1, NSEC_PER_MSEC);
     if (__atomic_load_n(&gb_phase, __ATOMIC_ACQUIRE) != GB_OFF)
-        printf("ace5-battery: stop deadline; final quiesce will restore the bus\n");
+        gb_log("ace5-battery: stop deadline; final quiesce will restore the bus\n");
 }
 /* Last return path, including panic: only a single XNU CPU is supported.
  * Normal single-CPU loader_return does not necessarily disable interrupts yet.
@@ -205,7 +220,7 @@ bool giulia_battery_init(void)
     PE_parse_boot_argn("cpus", &cpus, sizeof(cpus));
     PE_parse_boot_argn("bootcpu", &bootcpu, sizeof(bootcpu));
     if (cpus != 1 || bootcpu != 1 || ml_get_topology_info()->num_cpus != 1) {
-        printf("ace5-battery: experimental GPIO transport requires cpus=1 bootcpu=1\n");
+        gb_log("ace5-battery: experimental GPIO transport requires cpus=1 bootcpu=1\n");
         return true;
     }
     __atomic_store_n(&gb_phase, GB_IDLE, __ATOMIC_RELEASE);

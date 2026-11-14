@@ -42,6 +42,23 @@ def extract_validation(root: Path, build: Path) -> None:
         f'#line {line} "{source.as_posix()}"\n' + text[start:end], encoding="utf-8")
 
 
+def extract_probe_admission(root: Path, build: Path) -> None:
+    """Run the real probe prefix, stopping before its first hardware mapping."""
+    source = root / "xnu/files/bsd/dev/giulia_adreno.c"
+    text = source.read_text(encoding="utf-8")
+    start_marker = "static bool a750_probe(void)\n{"
+    end_marker = "    vm_offset_t gcc=ml_io_map(0x100000,0xc0000);"
+    if text.count(start_marker) != 1 or text.count(end_marker) != 1:
+        raise ValueError("probe admission boundaries changed; review test extraction")
+    start, end = text.index(start_marker), text.index(end_marker)
+    if start >= end or "ml_io_map(" in text[start:end]:
+        raise ValueError("probe admission extraction must precede hardware mapping")
+    line = text.count("\n", 0, start) + 1
+    (build / "gpu-probe-admission.inc").write_text(
+        f'#line {line} "{source.as_posix()}"\n' + text[start:end] +
+        "    hardware_admitted = true;\n    return true;\n}\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cc", nargs=argparse.REMAINDER, default=["cc"])
@@ -52,7 +69,8 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="ace5-gpu-lifecycle-", dir=root.parent) as scratch:
         build = Path(scratch)
         extract_validation(root, build)
-        for test in ("owner", "validation"):
+        extract_probe_admission(root, build)
+        for test in ("owner", "validation", "admission"):
             executable = build / (test + (".exe" if sys.platform == "win32" else ""))
             command = args.cc + ["-std=c11", "-O1", "-UNDEBUG", "-Wall", "-Wextra",
                                 "-Wno-unused-function", "-Wno-unused-variable",

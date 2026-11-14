@@ -173,11 +173,14 @@ python3 tools/ace5/phone.py --serial ORIGINAL_SERIAL run --seconds 20
 python3 tools/ace5/phone.py --serial ORIGINAL_SERIAL reboot
 ```
 
-To keep iOS on screen until a physical restart, use `run --seconds 0`. That command
-returns after the loader accepts the launch; it does not claim the desktop has
-finished starting. Touch is disabled unless `--touch --kernel PATH` is supplied.
-USB cannot be serviced while XNU
-owns the boot core.
+The no-timer rendering profile requires `run --seconds 0 --bootcpu 1
+--gpu-probe 20 --gpu-direct --gpu-keep` with zero register trace delay and an
+explicit `--kernel PATH`. Both the host and kernel admit this complete profile;
+partial power probes still require a finite return timer. The host observes GPU
+startup for up to 120 seconds without stopping the kernel on timeout. GPU-ready
+markers do not establish that the desktop has finished starting. Touch is
+disabled unless `--touch` is supplied. USB cannot be serviced while XNU owns
+the boot core.
 
 `--bootcpu 1` now works with the updated loader and kernel: XNU runs on the
 second physical little core, and CPU 0 services USB. Add `--live-log` with a

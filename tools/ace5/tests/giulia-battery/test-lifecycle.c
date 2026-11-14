@@ -1,9 +1,11 @@
 /* Extracted production GPIO/entry/stop code; MMIO and XNU services are mocks. */
 #include <assert.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include "../../../../xnu/files/bsd/dev/giulia_battery_bus.h"
 #define __unused
+#define __printflike(format_index, first_arg) __attribute__((format(printf, format_index, first_arg)))
 #define NSEC_PER_USEC 1
 #define NSEC_PER_MSEC 1000
 #define KERN_SUCCESS 0
@@ -18,6 +20,7 @@ static unsigned finish_on_delay, stop_on_delay;
 static uint64_t clock_us;
 static uint32_t cfg[2] = {4, 4}, io[2] = {1, 1};
 static uint64_t gic[4] = {0x16d00000, 0x10000, 0x16d80000, 0x10000};
+static void loader_log_line(const char *line) { (void)line; assert(!preempt); }
 #include "state.inc"
 static void gb_restore(void);
 static void disable_preemption(void) { preempt++; }

@@ -58,6 +58,16 @@ invalid tables, bounded/non-boost row selection, both DCVS slot modes, no writes
 to unrelated registers, and exact restoration with interrupts disabled.
 These tests do not establish EPSS behavior on a real device.
 
+In a limited PKG110 trial on 2026-11-14 (kernel `6c79fd0`), requesting 1200000
+kHz changed the shared domain-0 vote from row 12 to row 7. Both the selected LUT
+frequency and the domain-state reading were 1132800 kHz. Graceful return
+restored slot `0x320` to row 12 with matching readback, followed by a successful
+Android boot. The user reported worse UI responsiveness in that combined
+trial; the GPU had also refused the no-timer boot profile. This does not
+isolate the contribution of either change or demonstrate a speedup. A lower
+ceiling can lower the firmware's existing vote. Subsequent graphics comparisons
+should leave `ace5_cpu_khz` disabled to preserve that original vote.
+
 Useful loader log prefix: `ace5-cpufreq:`. The successful vote line distinguishes
 the requested cap, selected LUT frequency and hardware domain-state reading.
 The hardware reading may be lower because of hardware limits; it is never used

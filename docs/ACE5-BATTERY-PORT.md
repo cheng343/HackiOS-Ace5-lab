@@ -1,6 +1,6 @@
 # Ace 5 battery telemetry experiment
 
-This is an opt-in source implementation, not hardware-validated battery support.
+This is an opt-in experimental implementation with one limited device trial.
 The normal one-click package does not enable it. `ace5_battery=1` is accepted only
 with strict loader board identity `giulia`, the expected GIC map, `cpus=1`,
 `bootcpu=1`, and a one-CPU XNU topology. All these checks precede MMIO access.
@@ -44,6 +44,20 @@ presence, so `external=-1` and charging status remains unknown. Sysctls retain
 that unknown value; the IOKit service omits charger/charging properties instead
 of asserting an unplugged or charging state. Whether the iOS UI accepts this
 partial power-source report remains untested.
+
+## Device trial, 2026-11-14
+
+On one PKG110 running the single-CPU profile, kernel commit `6c79fd0` returned
+complete gauge samples: logged polls 1, 2, 3, 12 and 24 reported `rc=0` and zero
+accumulated failures. The userland sysctl diagnostic also obtained a battery
+percentage; charger presence and charging status correctly remained unknown.
+The phone returned to Android after a graceful stop. This validates that the
+GPIO transport can read this device, not long-term bus ownership, charging
+control, all Ace 5 variants, or the iOS battery UI.
+
+The first trial's poll messages only used `printf`, so they appeared in the
+final kernel message buffer rather than the live loader ring. An absent live
+poll message alone was not evidence that sampling had failed.
 
 A normal return blocks new register reads and drains the current bounded
 read-word, including STOP, before restoring the pins. Its wait has a 250 ms

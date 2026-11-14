@@ -170,19 +170,22 @@ static bool a750_probe(void)
         a750_log("ace5-gpu: unsupported stage/mode %u; ZAP requires direct CP mode\n",stage); return true;
     }
     if (a750_gpu_keep && (stage!=20 || !a750_gpu_direct)) return true;
-    uint32_t bootcpu=0, seconds=0;
+    uint32_t bootcpu=0, seconds=0, step_delay=0;
     PE_parse_boot_argn("bootcpu",&bootcpu,sizeof(bootcpu));
     PE_parse_boot_argn("loader_return_after",&seconds,sizeof(seconds));
-    if (stage>=3 && (bootcpu!=1 || !seconds)) {
-        a750_log("ace5-gpu: power/memory probes require CPU 1 and a finite return timer\n");
+    PE_parse_boot_argn("ace5_gpu_step_delay",&step_delay,sizeof(step_delay));
+    /* Match phone.py's no-timer profile. The observer core remains available
+     * for oem stop; partial/trace probes still require their return deadline. */
+    bool persistent=seconds==0 && bootcpu==1 && stage==20 &&
+        a750_gpu_direct && a750_gpu_keep && step_delay==0;
+    if (stage>=3 && (bootcpu!=1 || (!seconds && !persistent))) {
+        a750_log("ace5-gpu: power/memory probes require CPU 1 and a finite timer or complete persistent profile\n");
         return true;
     }
-    uint32_t step_delay=0;
-    PE_parse_boot_argn("ace5_gpu_step_delay",&step_delay,sizeof(step_delay));
     if (a750_gpu_keep && step_delay) {
         a750_log("ace5-gpu: persistent mode requires zero register trace delay\n");return true;
     }
-    if (stage>=17 && (step_delay>3000 || seconds<10+(240*step_delay+999)/1000)) {
+    if (stage>=17 && !persistent && (step_delay>3000 || seconds<10+(240*step_delay+999)/1000)) {
         a750_log("ace5-gpu: trace delay exceeds the return timer; no hardware touched\n");
         return true;
     }
