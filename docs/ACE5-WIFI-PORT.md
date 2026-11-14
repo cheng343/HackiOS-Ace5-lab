@@ -91,7 +91,9 @@ Ace 5 要达到真正的驱动接入，至少仍需：
 
 1. SM8650 PCIe0 电源/时钟/PHY/SM/复位时序、链路训练、配置空间与 BAR 管理。
 2. apps-SMMU 的 endpoint DMA 所有权、地址范围、分配/释放及缓存一致性。
-3. GIC ITS/LPI 的 MSI 分配、投递、屏蔽和退出清理，不能套用 sheng 的 SPI141。
+3. 自己拥有的 MSI 路由、分配、投递、屏蔽和退出清理。默认 Android 走 ITS/LPI；
+   SM8650 也描述了 SNPS 内部 MSI 到 SPI 的路线，见下节。不能从另一块板直接
+   复制 IRQ 或沿用 Android 的 MSI 地址。
 4. MHI BHI/BHIe 固件启动、控制/事件/传输环和 IPCR→QRTR→QMI 的真实连接。
 5. 匹配 KIWI 版本和板数据的 ath12k CE/DP/WMI，加上本项目 iOS 16.5 的
    网络接口、认证和事件 ABI；逐项验证扫描、认证、DHCP、收发及停机。
@@ -101,3 +103,47 @@ Linux ath12k 为 BSD-3-Clause-Clear，MHI/mac80211 等具有各自的 GPL 声明
 本次读取的 Ath12kWifi 提交没有顶层 LICENSE/COPYING，原创 shim/接口文件也
 未普遍带许可声明；不能把另一个仓库的许可证自动套到它们。此次仅将其作为
 接口研究参考，没有导入其源码或固件，也没有新增假定底层成功的启动入口。
+
+## 2026-11-14：PCIe MSI 接收层
+
+手机已按用户要求从 iOS 正常退出并回到 Android，ADB 确认
+`sys.boot_completed=1`。后续仅只读采集 PCI/MHI sysfs、配置空间及固件文件名。
+实际 endpoint 为 `0000:01:00.0`，BAR0 覆盖 `0x60400000..0x605fffff`，
+链路为 5.0 GT/s ×1。MSI capability 位于 `0x50`，支持 32 个向量、32 位
+消息地址及逐向量 mask。Android 当前配置的地址为 `0x98000040`、data 为 0；
+这个地址处于 Android 建立的映射中，不能作为 XNU 的现成门铃地址使用。
+原始采集保持本地私有，未导入仓库。
+
+现有 GIC 驱动只管理普通 SPI，还把 `INTID >= 1020` 全部当作无效中断。
+因此它不能处理默认 ITS 路线产生的 LPI。实现 ITS 不只是修改这个判断，还需
+命令队列、设备/collection/translation 表、redistributor 属性和 pending 表，以及
+从 XNU 返回 loader 时仍有效的内存所有权。此次未启用 ITS、复用固件的表或修改
+这个中断判断。
+
+独立核对的另一条硬件路线：
+
+- [Linux v6.12 SM8650 PCIe0 描述](https://github.com/torvalds/linux/blob/v6.12/arch/arm64/boot/dts/qcom/sm8650.dtsi#L2092)
+  列出了 SNPS 的 SPI 141..148，group 0 对应 **GIC INTID 173**，level-high。
+  同一节点仍有 `msi-map`；这些 SPI 的存在不等于 Android 默认使用它们。
+- [DesignWare MSI 实现](https://github.com/torvalds/linux/blob/v6.12/drivers/pci/controller/dwc/pcie-designware-host.c)
+  使用 DBI `0x820/0x824` 保存目标地址，group 0 的 enable/mask/status 位于
+  `0x828/0x82c/0x830`，status 为 write-one-to-clear，data 是向量号。
+  SNPS 内部接收器与 ITS TRANSLATER、独立 QCOM MSI doorbell 是不同路径。
+- OnePlus `pci-msm-msi.c` 区分内部 SNPS 和外部 QGIC 路径；后者还需要
+  `dma_map_resource`。禁用的 `qcom,pcie0_msi` 节点不能当作无需映射的捷径。
+
+第一阶段针对 SNPS group 0 编写独立接收层，而不搬运 Linux `.ko`。板级调用者
+必须先拥有 PCIe/DBI、完成链路和外部 MSI 路由选择、保留合适的目标地址，再接入
+现有 GIC SPI 服务。只有真实 endpoint 发消息、RC status 和 GIC handler 计数变化，
+且停止后不再触发中断，才能算硬件通过。主机 mock 和内核编译不证明这些条件。
+
+本轮新增 `giulia_pcie_msi.c/.h` 处理 32 个 MSI 向量的配置、mask/unmask、
+W1C 分发和关闭；`giulia_pcie_msi_xnu.c/.h` 提供实际 MMIO 操作及 GIC SPI
+注册，限制在 owner CPU 上串行操作。停止失败保留接收器、IRQ 和映射的所有权，
+允许重试，不假装资源已释放。两段源文件加入内核构建；主机回归编译相同的
+驱动逻辑，模拟寄存器行为及 XNU 服务。
+
+**当前没有自动启动入口，也没有新增“Wi-Fi 已连接”的界面或标志。**
+此接收层需要后续 PCIe 板级驱动调用；现有 `--wifi` 保护仍然生效。PCIe 电源、
+PHY、链路训练、SMMU/DMA、MHI 和 ath12k 网络收发尚未接通，不能扫描或联网。
+没有在这轮修改中导入厂商固件，也没有在手机上执行新增寄存器写入。
