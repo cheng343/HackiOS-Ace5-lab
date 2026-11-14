@@ -275,3 +275,17 @@ ccache 命中 1045/1056 次可缓存编译（98.96%），11 次未命中；这�
 不读取消息内容、不触发通道握手或发送电源消息。对应 cloud runner 直接链接
 生产 AOP 核心，覆盖握手失败、全局 owner、超时/迟到 ACK、借用通道保留、payload
 先于 length、布局漂移，以及 XNU 映射回收。新增代码的硬件写入路径尚未真机验证。
+
+提交 `1797b2a1d982229e12683ff21d8d210587dcc160` 的
+[云端构建 43590878053](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43590878053)
+通过新增回归与完整 XNU 构建，七项产物均已核对长度和 SHA-256；ccache 命中
+1052/1057（99.53%）。模式 3 真机只读采集完整结束，静态 init 35 项检查无失败，
+内核正常返回，Android 启动完成。
+
+这次实测 QMP magic/version 正确，host mailbox offset=`0x128`、size=`0x2d8`，
+与声明的 `0x400` 资源边界吻合，mailbox length 为 0，header 前后没有变化。
+AOP link/channel 均 UP；host link/ACK 为 UP，host channel/ACK 为 DOWN。
+因此新增第三种策略 `OPEN_ON_INHERITED_LINK`：仍须真实的独占交接租约，只打开
+主机 channel，停止或部分失败清理时保留 inherited link。测试采用这次实测的
+布局，并检查成功、握手超时、丢写和 doorbell 失败均不写 link control。
+此写入策略仍未真机执行，也未初始化 WLAN PDC 表或无线芯片。

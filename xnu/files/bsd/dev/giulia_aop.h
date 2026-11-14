@@ -31,7 +31,8 @@ enum giulia_aop_condition {
     GIULIA_AOP_INHERITED_CHANNEL_LEASE = 1u << 3
 };
 #define GIULIA_AOP_REQUIRED 7u
-enum giulia_aop_policy { GIULIA_AOP_OPEN_COLD, GIULIA_AOP_BORROW_OPEN };
+enum giulia_aop_policy { GIULIA_AOP_OPEN_COLD, GIULIA_AOP_BORROW_OPEN,
+    GIULIA_AOP_OPEN_ON_INHERITED_LINK };
 struct giulia_aop_io {
     void *cookie;
     uint32_t (*read32)(void *, uint32_t);
@@ -42,7 +43,7 @@ struct giulia_aop_io {
 };
 struct giulia_aop {
     struct giulia_aop_io io;
-    uint32_t state, bytes, offset, size, borrowed, owned, pending, polls;
+    uint32_t state, bytes, offset, size, borrowed, keep_link, owned, pending, polls;
     int error;
 };
 struct giulia_aop_snapshot { uint32_t words[15], message_length, changed; };
@@ -54,6 +55,9 @@ int giulia_aop_inspect(const struct giulia_aop_io *, uint32_t mapped_bytes,
  * QMP client until close succeeds. One process-wide owner serializes objects.
  * Cold opening refuses any inherited local UP/partial state. BORROW_OPEN
  * requires the explicit lease and all eight protocol state/ack words UP.
+ * OPEN_ON_INHERITED_LINK requires that same external lease, stable UP local
+ * link/ACK and remote link/ACK, and a closed local channel/ACK. It opens only
+ * the channel and preserves the original link on every cleanup path.
  * Neither policy adopts a nonempty mailbox. No radio/PDC command is sent.
  * A partial handshake keeps FAULT/ownership; close it before releasing maps.
  */
@@ -72,6 +76,7 @@ int giulia_aop_recover(struct giulia_aop *);
 /* A borrowed channel is left UP and untouched. A channel opened by this
  * object is asked DOWN and its local ACKs are awaited (one second each).
  * A pending message must first be recovered. Failure retains the owner.
+ * An inherited link stays UP when its newly opened local channel is closed.
  * Closing a QMP channel does not reverse messages already consumed by AOP.
  */
 int giulia_aop_close(struct giulia_aop *);

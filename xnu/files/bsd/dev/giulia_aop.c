@@ -104,15 +104,16 @@ int giulia_aop_open(struct giulia_aop *p, const struct giulia_aop_io *io,
     int rc;
     if (!p || !io || !io->read32 || !io->write32 || !io->barrier ||
         !io->delay_us || !io->kick || bytes < 0x40 || bytes > 0x10000 ||
-        (bytes & 3u) || policy > GIULIA_AOP_BORROW_OPEN) return GIULIA_AOP_ARGUMENT;
+        (bytes & 3u) || policy > GIULIA_AOP_OPEN_ON_INHERITED_LINK) return GIULIA_AOP_ARGUMENT;
     if ((flags & GIULIA_AOP_REQUIRED) != GIULIA_AOP_REQUIRED ||
-        (policy == GIULIA_AOP_BORROW_OPEN && !(flags & GIULIA_AOP_INHERITED_CHANNEL_LEASE)))
+        (policy != GIULIA_AOP_OPEN_COLD && !(flags & GIULIA_AOP_INHERITED_CHANNEL_LEASE)))
         return GIULIA_AOP_PREREQUISITE;
     if (p->state != GIULIA_AOP_IDLE && p->state != GIULIA_AOP_STOPPED)
         return GIULIA_AOP_STATE;
     if ((rc = claim(p))) return rc;
     p->io = *io; p->bytes = bytes; p->polls = p->pending = p->error = 0;
     p->borrowed = policy == GIULIA_AOP_BORROW_OPEN; p->owned = 1;
+    p->keep_link = policy == GIULIA_AOP_OPEN_ON_INHERITED_LINK;
     if ((rc = layout(p, 0))) goto rejected;
     if (p->io.read32(p->io.cookie, p->offset) != 0) {
         rc = GIULIA_AOP_BUSY; goto rejected;
@@ -120,6 +121,22 @@ int giulia_aop_open(struct giulia_aop *p, const struct giulia_aop_io *io,
     if (p->borrowed) {
         if ((rc = channel_up(p))) goto rejected;
         p->state = GIULIA_AOP_OPEN; return 0;
+    }
+    if (p->keep_link) {
+        uint32_t uc = p->io.read32(p->io.cookie, UC);
+        uint32_t uca = p->io.read32(p->io.cookie, UCA);
+        if (p->io.read32(p->io.cookie, UL) != GIULIA_AOP_UP ||
+            p->io.read32(p->io.cookie, ULA) != GIULIA_AOP_UP ||
+            p->io.read32(p->io.cookie, ML) != GIULIA_AOP_UP ||
+            p->io.read32(p->io.cookie, MLA) != GIULIA_AOP_UP ||
+            p->io.read32(p->io.cookie, MC) != GIULIA_AOP_DOWN ||
+            p->io.read32(p->io.cookie, MCA) != GIULIA_AOP_DOWN ||
+            (uc != GIULIA_AOP_UP && uc != GIULIA_AOP_DOWN) ||
+            (uca != GIULIA_AOP_UP && uca != GIULIA_AOP_DOWN)) {
+            rc = GIULIA_AOP_BUSY; goto rejected;
+        }
+        p->state = GIULIA_AOP_FAULT;
+        goto open_channel;
     }
     if (p->io.read32(p->io.cookie, UL) != GIULIA_AOP_UP ||
         p->io.read32(p->io.cookie, ML) != GIULIA_AOP_DOWN ||
@@ -132,8 +149,9 @@ int giulia_aop_open(struct giulia_aop *p, const struct giulia_aop_io *io,
     p->state = GIULIA_AOP_FAULT;
     if ((rc = write_word(p, ULA, GIULIA_AOP_UP)) ||
         (rc = write_word(p, ML, GIULIA_AOP_UP)) || (rc = kick(p)) ||
-        (rc = wait_word(p, MLA, GIULIA_AOP_UP)) ||
-        (rc = write_word(p, MC, GIULIA_AOP_UP)) || (rc = kick(p)) ||
+        (rc = wait_word(p, MLA, GIULIA_AOP_UP))) return fail(p, rc);
+open_channel:
+    if ((rc = write_word(p, MC, GIULIA_AOP_UP)) || (rc = kick(p)) ||
         (rc = wait_word(p, UC, GIULIA_AOP_UP)) ||
         (rc = write_word(p, UCA, GIULIA_AOP_UP)) || (rc = kick(p)) ||
         (rc = wait_word(p, MCA, GIULIA_AOP_UP)) || (rc = channel_up(p)))
@@ -198,10 +216,10 @@ int giulia_aop_close(struct giulia_aop *p)
     if ((rc = layout(p, 1))) return fail(p, rc);
     if (p->io.read32(p->io.cookie, p->offset) != 0) return fail(p, GIULIA_AOP_BUSY);
     if (!p->borrowed) {
-        if ((rc = write_word(p, MC, GIULIA_AOP_DOWN)) ||
-            (rc = write_word(p, ML, GIULIA_AOP_DOWN)) || (rc = kick(p)) ||
-            (rc = wait_word(p, MCA, GIULIA_AOP_DOWN)) ||
-            (rc = wait_word(p, MLA, GIULIA_AOP_DOWN))) return fail(p, rc);
+        if ((rc = write_word(p, MC, GIULIA_AOP_DOWN))) return fail(p, rc);
+        if (!p->keep_link && (rc = write_word(p, ML, GIULIA_AOP_DOWN))) return fail(p, rc);
+        if ((rc = kick(p)) || (rc = wait_word(p, MCA, GIULIA_AOP_DOWN))) return fail(p, rc);
+        if (!p->keep_link && (rc = wait_word(p, MLA, GIULIA_AOP_DOWN))) return fail(p, rc);
     }
     p->state = GIULIA_AOP_STOPPED; p->error = 0; release(p);
     return 0;
