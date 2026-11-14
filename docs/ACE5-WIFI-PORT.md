@@ -289,3 +289,9 @@ AOP link/channel 均 UP；host link/ACK 为 UP，host channel/ACK 为 DOWN。
 主机 channel，停止或部分失败清理时保留 inherited link。测试采用这次实测的
 布局，并检查成功、握手超时、丢写和 doorbell 失败均不写 link control。
 此写入策略仍未真机执行，也未初始化 WLAN PDC 表或无线芯片。
+
+第三种策略的提交 `34e5f2f9dcb03fd43348a6dcc767788ad95e20e7` 已通过
+[云端构建 43591408182](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43591408182)，
+包含实际核心的 inherited-link 成功/故障测试和完整 XNU 构建。七项产物长度与
+SHA-256 已核对，ccache 命中 1054/1057（99.72%）。本轮真机实际加载的是前一个
+`1797b2a` 的只读 probe 3；这些构建结果不能算第三种写入策略的硬件通过记录。
