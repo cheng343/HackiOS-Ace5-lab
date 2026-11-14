@@ -60,12 +60,15 @@ def main() -> int:
         run_state = section(text, '\tgamut_p3 = 0;',
                             '\tif (checkpoint == CHECKPOINT_SELFTEST) {\n\t\tkernel_mpidr = this_mpidr;', source)
         (build / "run-state.inc").write_text(run_state, encoding="utf-8")
-        for name in ("download", "run"):
+        watchdog = section(text, 'static int\nobserver_watchdog_within_budget(',
+                           '/*\n * Run the kernel on the core with that MPIDR', source)
+        (build / "watchdog-budget.inc").write_text(watchdog, encoding="utf-8")
+        for name in ("download", "run", "watchdog"):
             exe = build / (name + (".exe" if sys.platform == "win32" else ""))
             run(args.cc + ["-std=c11", "-O1", "-UNDEBUG", "-Wall", "-Wextra",
                            "-I", str(build), str(fixtures / f"test-{name}.c"), "-o", str(exe)])
             run([str(exe)])
-    print("PASS: loader download and per-run storage state (host stubs; no hardware)")
+    print("PASS: loader download, per-run storage state and watchdog budget (host stubs; no hardware)")
     return 0
 
 

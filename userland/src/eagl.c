@@ -232,7 +232,9 @@ struct image {
 	bool wrapped;                   /* the surface is memory of somebody's with a surface made around it */
 	bool alpha_first;               /* its pixels are opacity, blue, green, red in memory: see my_attachImage() */
 	bool painted;                   /* something has been drawn into it (it is a target in fact, not only in name) */
+	bool upload_pending;            /* a failed surface lock must not consume a seedless change */
 	unsigned looked;                /* ... the frame in which that memory was last looked at, */
+	uint32_t looked_seed;           /* ... and its seed then; it can change again in the same frame */
 	uint64_t sum;                   /* ... and what it added up to */
 	GLenum to, internal, format, type;
 	uint32_t plane, seed;
@@ -650,18 +652,28 @@ static bool
 surface_changed(struct eagl *e, struct image *image)
 {
 	IOSurfaceRef surface = image->surface;
-	size_t size = IOSurfaceGetBytesPerRow(surface) * (size_t)(image->height - 1) +
-	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
+	size_t size, at;
 	const uint8_t *base = IOSurfaceGetBaseAddress(surface);
-	uint64_t sum = size, word;
+	uint32_t seed = IOSurfaceGetSeed(surface);
+	uint64_t sum, word;
 
-	if (image->looked == e->frames + 1 || base == NULL || IOSurfaceGetPlaneCount(surface) > 0) {
+	if ((image->looked == e->frames + 1 && image->looked_seed == seed) || base == NULL ||
+	    IOSurfaceGetPlaneCount(surface) > 0 || image->width <= 0 || image->height <= 0) {
 		return false;
 	}
+	size = IOSurfaceGetBytesPerRow(surface) * (size_t)(image->height - 1) +
+	    (size_t)image->width * bytes_a_pixel(image->format, image->type);
+	sum = size;
 	image->looked = e->frames + 1;
-	for (size_t at = 0; at + 8 <= size; at += 8) {
+	image->looked_seed = seed;
+	for (at = 0; at + 8 <= size; at += 8) {
 		memcpy(&word, base + at, 8);
 		sum = (sum ^ word) * 0x9e3779b97f4a7c15ull;
+		sum ^= sum >> 29;
+	}
+	/* The final pixel of an odd-width BGRA row (and short lookup tables) matters too. */
+	for (; at < size; at++) {
+		sum = (sum ^ base[at]) * 0x9e3779b97f4a7c15ull;
 		sum ^= sum >> 29;
 	}
 	if (sum == image->sum) {
@@ -682,15 +694,22 @@ surface_to_texture(struct eagl *e, struct image *image)
 	GLint row_length = 0, alignment = 4;
 	uint8_t *base, *flipped = NULL;
 	bool alpha_first = image->alpha_first && !planar && pixel == 4;
+	uint32_t seed;
 
 	if (image->shared) {
 		return;
 	}
+	image->upload_pending = true;
 	if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != 0) {
 		say("redwood-gl: an IOSurface cannot be locked\n");
 		return;
 	}
+	/* MiniIOSurface locks do not exclude writers. Keep the starting seed so a
+	 * writer that changes it during the copy will cause another upload. */
+	seed = IOSurfaceGetSeed(surface);
 	base = planar ? IOSurfaceGetBaseAddressOfPlane(surface, image->plane) : IOSurfaceGetBaseAddress(surface);
+	/* Refresh the sampled fingerprint for seed-driven updates from frame_begin(). */
+	(void)surface_changed(e, image);
 	if ((image->invert || alpha_first) && (flipped = calloc(row, (size_t)image->height)) != NULL) {
 		for (GLsizei y = 0; y < image->height; y++) {
 			const uint8_t *from = base + row * (size_t)(image->invert ? image->height - 1 - y : y);
@@ -744,9 +763,10 @@ surface_to_texture(struct eagl *e, struct image *image)
 			say("gl-at:     a table; sixteen of its entries, first to last:%s\n", entries);
 		}
 	}
+	image->seed = seed;
+	image->upload_pending = false;
 	IOSurfaceUnlock(surface, kIOSurfaceLockReadOnly, NULL);
 	free(flipped);
-	image->seed = IOSurfaceGetSeed(surface);
 	e->uploads++;
 	e->upload_bytes += row * (size_t)image->height;
 }
@@ -1003,7 +1023,7 @@ frame_begin(struct eagl *e)
 	for (unsigned i = 0; i < e->image_count; i++) {
 		struct image *image = &e->images[i];
 
-		if (image->target || image->shared || IOSurfaceGetSeed(image->surface) == image->seed) {
+		if (image->target || image->shared || (!image->upload_pending && IOSurfaceGetSeed(image->surface) == image->seed)) {
 			continue;
 		}
 		if (!rebound) {
@@ -1201,8 +1221,8 @@ my_glBindTexture(void *context, GLenum target, GLuint texture)
 		e->bound[e->unit] = texture;
 	}
 	if (texture != 0 && e->image_count != 0 && (image = image_of(e, texture)) != NULL && !image->shared &&
-	    (!image->target ? IOSurfaceGetSeed(image->surface) != image->seed || surface_changed(e, image) :
-	    image->wrapped && !image->painted && surface_changed(e, image))) {
+	    (!image->target ? image->upload_pending || IOSurfaceGetSeed(image->surface) != image->seed || surface_changed(e, image) :
+	    image->wrapped && !image->painted && (image->upload_pending || surface_changed(e, image)))) {
 		surface_to_texture(e, image);
 	}
 	EAGL_LEAVE(e, 0x30);

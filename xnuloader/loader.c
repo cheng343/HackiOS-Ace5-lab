@@ -2256,6 +2256,16 @@ psci_call(uint64_t function, uint64_t a1, uint64_t a2, uint64_t a3)
 	return status;
 }
 
+/* Zero matches XNU's loader_return_after=0: there is no timed-return deadline.
+ * Startup and heartbeat-loss limits below still end a failed observation.
+ * Use subtraction only after elapsed >= budget, avoiding budget + 60 overflow.
+ */
+static int
+observer_watchdog_within_budget(uint64_t elapsed, uint64_t budget)
+{
+	return budget == 0 || elapsed < budget || elapsed - budget < 60;
+}
+
 /*
  * Run the kernel on the core with that MPIDR and wait until it is back. Returns 0 when it has
  * been and gone (the caller goes on as after loader_return_stub), a negative number if the
@@ -2343,7 +2353,8 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 		 * the kernel does it too, but whether that counts from another core is not known.
 		 * After that a kernel that neither returns nor hangs visibly meets the watchdog.
 		 */
-		if (wdt_armed && seconds_since(last_pet) >= 5 && seconds_since(started) < budget + 60) {
+		if (status == 0 && wdt_armed && seconds_since(last_pet) >= 5 &&
+		    observer_watchdog_within_budget(seconds_since(started), budget)) {
 			wdt_pet();
 			last_pet = READ_SYSREG(CNTVCT_EL0);
 		}

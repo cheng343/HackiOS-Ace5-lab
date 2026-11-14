@@ -36,6 +36,7 @@ struct redwood_touch {
 };
 
 #ifdef KERNEL
+#include "redwood_battery.h"
 /* For drivers; not from interrupt context. */
 void redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 void redwood_input_init(void);
@@ -53,22 +54,9 @@ void redwood_spmi_unlock(void);
 /*
  * How the battery is, as the audio DSP's battery manager says (bsd/dev/redwood_adsp.c, with adsp=1):
  * handed to bsd/dev/redwood_battery.c, which keeps it for the sysctls kern.redwood.battery_* and
- * passes it on to iokit/Kernel/RedwoodBattery.cpp, the power source that iOS reads. The structure
- * is repeated there (this header is not seen from iokit/), and `size` tells whether the two agree.
+ * passes it on to iokit/Kernel/RedwoodBattery.cpp, the power source that iOS reads.
+ * Both consumers share the report ABI in sys/redwood_battery.h.
  */
-struct redwood_battery_state {
-	uint32_t size;                  /* sizeof(struct redwood_battery_state) */
-	int32_t percent_hundredths;     /* the charge, 0..10000 */
-	int32_t voltage_uv;
-	int32_t current_ua;             /* more than 0 while the battery takes charge */
-	int32_t temperature_hundredths; /* of a degree Celsius */
-	int32_t present;                /* 1 if there is a battery */
-	int32_t external;               /* 1 if a charger or a computer is on the USB port */
-	int32_t status;                 /* Linux's POWER_SUPPLY_STATUS_*: 1 charging, 2 discharging, 3 not charging, 4 full */
-	int32_t charge_uah, full_uah, design_uah, cycles;      /* 0 when not known (yet) */
-	int32_t usb_type;               /* Linux's POWER_SUPPLY_USB_TYPE_*: 1 a computer's port, 2 a charger, ... */
-	int32_t usb_voltage_uv, usb_current_ua;                 /* what the port gives */
-};
 void redwood_battery_report(const struct redwood_battery_state *state);
 void redwood_net_init(void);            /* en0, if there is something to carry its frames: sys/redwood_net.h */
 void redwood_cpufreq_init(void);        /* boot-arg cpufreq=1: the phone's processor at full speed */

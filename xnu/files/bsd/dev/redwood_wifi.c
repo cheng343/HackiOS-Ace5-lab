@@ -2912,7 +2912,9 @@ qrtr_input(const uint8_t *data, uint32_t length)
 		printf("wifi: qrtr: %u bytes that are no datagram (they begin %#x)\n", length, length ? data[0] : 0);
 		return;
 	}
-	if (header.size == 0 || at + header.size > length) {
+	/* The length comes from the peer: addition here can wrap before the bound
+	 * comparison. Validate the options offset first, then the remaining bytes. */
+	if (header.size == 0 || header.size > REDWOOD_QRTR_MAX || at > length || header.size > length - at) {
 		printf("wifi: qrtr: a datagram of %u bytes in a message of %u: dropped\n", header.size, length);
 		return;
 	}

@@ -131,15 +131,18 @@ extern void RedwoodBatteryReport(const void *state, unsigned size);     /* iokit
 void
 redwood_battery_report(const struct redwood_battery_state *b)
 {
-	int percent = (b->percent_hundredths + 50) / 100;
+	if (!redwood_battery_state_valid(b)) {
+		battery_failures++;
+		return; /* Keep the last valid sample, or the initial unknown state. */
+	}
 
-	battery_soc_percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+	battery_soc_percent = redwood_battery_round_hundredths(b->percent_hundredths);
 	battery_voltage_mv = b->voltage_uv / 1000;
 	battery_current_ma = b->current_ua / 1000;
-	battery_temperature_c = (b->temperature_hundredths + 50) / 100;
+	battery_temperature_c = redwood_battery_round_hundredths(b->temperature_hundredths);
 	battery_present = b->present != 0;
 	battery_charger_present = b->external != 0;
-	battery_charging = b->status == 1;      /* POWER_SUPPLY_STATUS_CHARGING */
+	battery_charging = redwood_battery_is_charging(b);
 	battery_soc_estimated = 0;
 	battery_charger_action = b->status;
 	if (b->full_uah > 0) {

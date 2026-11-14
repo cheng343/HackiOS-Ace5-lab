@@ -27,19 +27,8 @@
 #include <libkern/c++/OSDictionary.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSSymbol.h>
-
-/* The same as struct redwood_battery_state in bsd/sys/redwood_input.h, which is not seen from here. */
-struct redwood_battery_state {
-	uint32_t size;
-	int32_t percent_hundredths;
-	int32_t voltage_uv;
-	int32_t current_ua;             /* more than 0 while the battery takes charge */
-	int32_t temperature_hundredths;
-	int32_t present, external, status;
-	int32_t charge_uah, full_uah, design_uah, cycles;
-	int32_t usb_type;
-	int32_t usb_voltage_uv, usb_current_ua;
-};
+/* This private shared header is not part of the exported IOKit headers. */
+#include "../../bsd/sys/redwood_battery.h"
 
 extern "C" void RedwoodBatteryReport(const void * state, unsigned size);
 
@@ -115,10 +104,9 @@ family_code(int usb_type)
 void
 RedwoodBattery::report(const struct redwood_battery_state * b)
 {
-	int percent = (b->percent_hundredths + 50) / 100;
-	bool charging = b->external && b->status == 1;          /* POWER_SUPPLY_STATUS_CHARGING */
+	int percent = redwood_battery_round_hundredths(b->percent_hundredths);
+	bool charging = redwood_battery_is_charging(b);
 
-	percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
 	setBatteryInstalled(b->present != 0);
 	setExternalConnected(b->external != 0);
 	setExternalChargeCapable(b->external != 0);
@@ -192,14 +180,17 @@ RedwoodBatteryReport(const void * state, unsigned size)
 	const struct redwood_battery_state * b = (const struct redwood_battery_state *) state;
 	IOService * platform;
 
-	if (size != sizeof(struct redwood_battery_state) || b->size != sizeof(struct redwood_battery_state)) {
+	if (b == NULL || size != sizeof(struct redwood_battery_state) || b->size != sizeof(struct redwood_battery_state)) {
 		static bool said;
 
 		if (!said) {
 			said = true;
-			IOLog("RedwoodBattery: the battery's state is %u bytes, not %lu: bsd/sys/redwood_input.h and this file disagree\n",
+			IOLog("RedwoodBattery: missing or incompatible battery state (%u bytes, expected %lu)\n",
 			    size, sizeof(struct redwood_battery_state));
 		}
+		return;
+	}
+	if (!redwood_battery_state_valid(b)) {
 		return;
 	}
 	if (battery == NULL) {
@@ -222,8 +213,8 @@ RedwoodBatteryReport(const void * state, unsigned size)
 		}
 		made->registerService();
 		battery = made;
-		IOLog("RedwoodBattery: the battery's power source is up: %d%%, %s\n", (b->percent_hundredths + 50) / 100,
-		    b->external ? (b->status == 1 ? "charging" : "on a charger, not charging") : "not on a charger");
+		IOLog("RedwoodBattery: the battery's power source is up: %d%%, %s\n", redwood_battery_round_hundredths(b->percent_hundredths),
+		    b->external ? (redwood_battery_is_charging(b) ? "charging" : "on a charger, not charging") : "not on a charger");
 		return;
 	}
 	battery->report(b);
