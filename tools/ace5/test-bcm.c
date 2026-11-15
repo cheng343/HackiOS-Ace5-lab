@@ -117,9 +117,33 @@ static void transport(void)
     unsigned writes=m.writes; db[4]^=1;
     assert(giulia_bcm_pcie0_start(&crm,&io,db,sizeof(db),1,0,&p)==GIULIA_BCM_DATABASE && m.writes==writes);
 }
+static void empty_transport_last(void)
+{
+    uint8_t db[1024]; static struct mock m; static struct giulia_crm crm;
+    struct giulia_bcm_pcie0_plan p;
+    struct giulia_crm_io io={&m,read32,write32,barrier,delay,lease};
+    /* Unit/width pairs checked against the observed Ace5 CMD DB. Entry
+     * addresses and the surrounding database remain synthetic fixture data. */
+    const unsigned units[]={4700000,4800000,4800000,530000,1},widths[]={16,64,64,16,1};
+    database(db);
+    for (unsigned i=0;i<5;i++) { le32(db+400+8*i,units[i]); le16(db+404+8*i,widths[i]); }
+    m.reg[0]=0x10000; m.reg[1]=0x1228225; m.reg[2]=0x40108128; m.reg[3]=1;
+    assert(giulia_bcm_pcie0_start(&crm,&io,db,sizeof(db),1,0,&p)==GIULIA_CRM_BUSY && !m.writes);
+    assert(giulia_bcm_pcie0_start_empty_keep(&crm,&io,db,sizeof(db),1,0,&p)==0);
+    for (unsigned i=0;i<5;i++) {
+        assert(p.vote[i].y==1 && p.vote[i].x==(i==2 || i==4 ? 0u : 1u));
+        assert(!p.vote[i].saturated);
+    }
+    assert(m.switches==1 && crm.original==2 && crm.target==0);
+    unsigned writes=m.writes;
+    assert(giulia_crm_stop(&crm)==GIULIA_CRM_RETAINED && crm.owned && crm.state==GIULIA_CRM_HELD);
+    assert(m.writes==writes && m.switches==1 && m.reg[0x1020/4]==1);
+    puts("Ace5 BCM empty: observed aux scaling to real CRM first-channel initialization passed");
+}
 int main(void)
 {
     decoder(); encoding(); plans(); transport();
+    empty_transport_last();
     puts("Ace5 BCM: real CMD DB aux, vendor bandwidth conversion and integrated CRM transfer passed");
     return 0;
 }

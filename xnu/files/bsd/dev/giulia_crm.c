@@ -68,6 +68,12 @@ static int settled(struct giulia_crm *p, unsigned ch)
     if ((rc = header(p,1)) || (rc = rd(p,UPDATE,&update)) || (rc = rd(p,BUSY,&busy))) return rc;
     return update == (1u<<ch) && busy == (1u<<ch) ? 0 : GIULIA_CRM_BUSY;
 }
+static int unselected(struct giulia_crm *p)
+{
+    uint32_t update,busy; int rc;
+    if ((rc = header(p,1)) || (rc = rd(p,UPDATE,&update)) || (rc = rd(p,BUSY,&busy))) return rc;
+    return !update && !busy ? 0 : GIULIA_CRM_BUSY;
+}
 static int table_read(struct giulia_crm *p, unsigned ch, int compare)
 {
     uint32_t v; int rc;
@@ -90,7 +96,8 @@ static int table_write(struct giulia_crm *p, unsigned ch,
     for (unsigned k = 0; k < 2; k++) for (unsigned s = 0; s < 5; s++) {
         unsigned count = k ? p->bw_count : p->perf_count;
         for (unsigned i = 0; i < count; i++) {
-            uint32_t v = *word(&p->saved[restore ? ch : p->original],k,s,i);
+            unsigned baseline = restore || p->empty ? ch : p->original;
+            uint32_t v = *word(&p->saved[baseline],k,s,i);
             for (unsigned j = 0; j < n; j++)
                 if (patch[j].kind == k && patch[j].state == s && patch[j].resource == i)
                     v = (v & ~patch[j].mask) | patch[j].value;
@@ -120,6 +127,7 @@ static int request(struct giulia_crm *p, unsigned ch)
     int rc = lease(p);
     if (rc) return rc;
     p->pending = 1; p->pending_channel = ch;
+    p->published = 1; /* Callback failure may occur after the request issued. */
     p->callback_error = p->io.write32(p->io.cookie,UPDATE,1u<<ch);
     p->io.barrier(p->io.cookie);
     if (p->callback_error) return GIULIA_CRM_IO;
@@ -131,8 +139,22 @@ int giulia_crm_stop(struct giulia_crm *p)
     if (!p) return GIULIA_CRM_ARGUMENT;
     if (p->state == GIULIA_CRM_IDLE || p->state == GIULIA_CRM_STOPPED) return 0;
     if (!p->owned || __atomic_load_n(&owner,__ATOMIC_ACQUIRE) != p) return GIULIA_CRM_STATE;
+    if (p->state == GIULIA_CRM_HELD) return GIULIA_CRM_RETAINED;
     if ((rc = giulia_crm_recover(p))) goto failed;
-    if (p->dirty) {
+    if (p->empty) {
+        if (p->published) {
+            if ((rc = settled(p,p->target)) || (rc = table_read(p,1,1))) goto failed;
+            p->state = GIULIA_CRM_HELD; p->cleanup_error = 0;
+            return GIULIA_CRM_RETAINED;
+        }
+        /* Preparation never selected a channel. Restore only while hardware
+         * still proves neither channel was requested or acknowledged. */
+        if ((rc = unselected(p)) || (rc = table_read(p,1,1))) goto failed;
+        if (p->dirty && ((rc = table_write(p,0,0,0,1)) ||
+            (rc = table_read(p,0,1)) || (rc = unselected(p)))) goto failed;
+        p->dirty = 0;
+    }
+    else if (p->dirty) {
         /* Original table was never ours to edit. Validate before selecting it. */
         if ((rc = header(p,1)) || (rc = table_read(p,p->original,1))) goto failed;
         rc = settled(p,p->original);
@@ -152,8 +174,8 @@ int giulia_crm_stop(struct giulia_crm *p)
 failed:
     p->state = GIULIA_CRM_FAULT; p->cleanup_error = rc; return rc;
 }
-int giulia_crm_start(struct giulia_crm *p, const struct giulia_crm_io *io,
-    const struct giulia_crm_patch *patch, unsigned n)
+static int start(struct giulia_crm *p, const struct giulia_crm_io *io,
+    const struct giulia_crm_patch *patch, unsigned n, unsigned from_empty)
 {
     struct giulia_crm *empty = 0;
     uint32_t update,busy; int rc;
@@ -172,18 +194,30 @@ int giulia_crm_start(struct giulia_crm *p, const struct giulia_crm_io *io,
     if (!__atomic_compare_exchange_n(&owner,&empty,p,0,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED))
         return GIULIA_CRM_BUSY;
     p->io = *io; p->owned = 1; p->dirty = p->pending = p->error = p->cleanup_error = 0;
+    p->empty = from_empty; p->published = 0;
     p->state = GIULIA_CRM_PREPARING;
     if ((rc = header(p,0)) || (rc = rd(p,UPDATE,&update)) || (rc = rd(p,BUSY,&busy))) goto rejected;
-    if ((update != 1 && update != 2) || busy != update) { rc = GIULIA_CRM_BUSY; goto rejected; }
-    p->original = update == 1 ? 0 : 1; p->target = 1-p->original;
+    if (from_empty) {
+        if (update || busy) { rc = GIULIA_CRM_BUSY; goto rejected; }
+        p->original = 2; p->target = 0; /* 2 is a sentinel, NEVER an array index. */
+    } else {
+        if ((update != 1 && update != 2) || busy != update) { rc = GIULIA_CRM_BUSY; goto rejected; }
+        p->original = update == 1 ? 0 : 1; p->target = 1-p->original;
+    }
     for (unsigned i = 0; i < n; i++)
         if (patch[i].resource >= (patch[i].kind == GIULIA_CRM_PERF ? p->perf_count : p->bw_count)) {
             rc = GIULIA_CRM_ARGUMENT; goto rejected;
         }
-    if ((rc = table_read(p,0,0)) || (rc = table_read(p,1,0)) ||
-        (rc = settled(p,p->original)) || (rc = table_read(p,p->original,1))) goto rejected;
+    if ((rc = table_read(p,0,0)) || (rc = table_read(p,1,0))) goto rejected;
+    if (from_empty) {
+        for (unsigned ch=0;ch<2;ch++) for (unsigned k=0;k<2;k++)
+            for (unsigned s=0;s<5;s++) for (unsigned i=0;i<(k?p->bw_count:p->perf_count);i++)
+                if (*word(&p->saved[ch],k,s,i)) { rc = GIULIA_CRM_BUSY; goto rejected; }
+        if ((rc = unselected(p)) || (rc = table_read(p,0,1)) || (rc = table_read(p,1,1))) goto rejected;
+    } else if ((rc = settled(p,p->original)) || (rc = table_read(p,p->original,1))) goto rejected;
     if ((rc = table_write(p,p->target,patch,n,0)) ||
-        (rc = settled(p,p->original)) || (rc = table_read(p,p->original,1)) ||
+        (rc = from_empty ? unselected(p) : settled(p,p->original)) ||
+        (rc = table_read(p,from_empty ? 1 : p->original,1)) ||
         (rc = request(p,p->target))) return fail(p,rc);
     p->state = GIULIA_CRM_ACTIVE; return 0;
 rejected:
@@ -193,3 +227,9 @@ rejected:
     (void)__atomic_compare_exchange_n(&owner,&expected,0,0,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
     p->owned = 0; p->state = GIULIA_CRM_STOPPED; return rc;
 }
+int giulia_crm_start(struct giulia_crm *p, const struct giulia_crm_io *io,
+    const struct giulia_crm_patch *patch, unsigned n)
+{ return start(p,io,patch,n,0); }
+int giulia_crm_start_empty_keep(struct giulia_crm *p, const struct giulia_crm_io *io,
+    const struct giulia_crm_patch *patch, unsigned n)
+{ return start(p,io,patch,n,1); }

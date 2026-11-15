@@ -49,6 +49,9 @@ def main():
                 '-Werror', '-fsanitize=address,undefined', '-I', str(drivers),
                 *map(str, sources), str(test), '-o', str(exe)], check=True, timeout=90)
             subprocess.run([str(exe)], check=True, timeout=30)
+            if test.stem == 'test-crm':
+                for scenario in ('success', 'timeout', 'post-error', 'drift'):
+                    subprocess.run([str(exe), '--empty-' + scenario], check=True, timeout=30)
 
 
 if __name__ == '__main__':

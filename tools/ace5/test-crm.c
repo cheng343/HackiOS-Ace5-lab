@@ -11,6 +11,7 @@ struct mock {
     uint32_t reg[0x3000/4], original[0x3000/4];
     unsigned reads,writes,table_writes,switches,delays,lease_calls;
     unsigned stall,drop_table,post_error,deny_lease,fail_read;
+    unsigned error_table,deny_after_tables;
     unsigned perf,bw;
 };
 static uint32_t address(unsigned kind,unsigned ch,unsigned state,unsigned i,unsigned count)
@@ -49,6 +50,7 @@ static int write32(void *cookie,uint32_t off,uint32_t v)
     assert(m->reg[BUSY/4] != (1u<<ch)); /* Never write an active table. */
     m->table_writes++;
     if (m->table_writes != m->drop_table) m->reg[off/4]=v;
+    if (m->table_writes == m->error_table) return -93; /* May have issued. */
     return 0;
 }
 static void barrier(void *cookie) { (void)cookie; }
@@ -60,7 +62,7 @@ static void delay(void *cookie,unsigned us)
 static int lease(void *cookie)
 {
     struct mock *m=cookie; m->lease_calls++;
-    return m->deny_lease ? -71 : 0;
+    return m->deny_lease || (m->deny_after_tables && m->table_writes>=m->deny_after_tables) ? -71 : 0;
 }
 static struct giulia_crm_io setup(struct mock *m,unsigned active,unsigned perf,unsigned bw)
 {
@@ -204,9 +206,95 @@ static void lease_and_restore_faults(void)
     io=setup(&m,0,2,6); m.fail_read=15;
     assert(start(&p,&io)==GIULIA_CRM_IO && !m.writes && !p.owned);
 }
-int main(void)
+static struct giulia_crm_io setup_empty(struct mock *m,unsigned perf,unsigned bw)
 {
+    struct giulia_crm_io io=setup(m,0,perf,bw);
+    m->reg[BUSY/4]=m->reg[UPDATE/4]=0;
+    for (unsigned k=0;k<2;k++) for (unsigned ch=0;ch<2;ch++)
+        for (unsigned s=0;s<5;s++) for (unsigned i=0;i<(k?bw:perf);i++)
+            m->reg[address(k,ch,s,i,k?bw:perf)/4]=0;
+    memcpy(m->original,m->reg,sizeof(m->reg));
+    return io;
+}
+static void empty_preparation(void)
+{
+    struct mock m; struct giulia_crm p={0};
+    struct giulia_crm_io io=setup_empty(&m,2,16);
+    assert(start(&p,&io)==GIULIA_CRM_BUSY && !m.writes); /* No automatic fallback. */
+    m.reg[BUSY/4]=1;
+    assert(giulia_crm_start_empty_keep(&p,&io,patch,4)==GIULIA_CRM_BUSY && !m.writes);
+    m.reg[UPDATE/4]=1;
+    assert(giulia_crm_start_empty_keep(&p,&io,patch,4)==GIULIA_CRM_BUSY && !m.writes);
+    for (unsigned k=0;k<2;k++) for (unsigned ch=0;ch<2;ch++)
+        for (unsigned s=0;s<5;s++) for (unsigned i=0;i<(k?16u:2u);i++) {
+            io=setup_empty(&m,2,16);
+            m.reg[address(k,ch,s,i,k?16:2)/4]=1;
+            assert(giulia_crm_start_empty_keep(&p,&io,patch,4)==GIULIA_CRM_BUSY && !m.writes && !p.owned);
+        }
+    /* Every preparation write can fail AFTER reaching hardware. Before
+     * publication, restoring the zero table must leave UPDATE/BUSY zero. */
+    for (unsigned n=1;n<=90;n++) {
+        io=setup_empty(&m,2,16); m.error_table=n;
+        assert(giulia_crm_start_empty_keep(&p,&io,patch,4)==GIULIA_CRM_IO);
+        assert(p.owned && p.dirty && !p.published && !m.switches);
+        m.error_table=0;
+        assert(giulia_crm_stop(&p)==0 && !m.switches); restored(&m,&p);
+    }
+    io=setup_empty(&m,2,16); m.deny_after_tables=90;
+    assert(giulia_crm_start_empty_keep(&p,&io,patch,4)==GIULIA_CRM_LEASE);
+    assert(p.owned && !p.published && !m.switches);
+    m.deny_after_tables=0;
+    assert(giulia_crm_stop(&p)==0); restored(&m,&p);
+    puts("Ace5 CRM empty: live zero-table admission and all pre-publication failures restored");
+}
+static void empty_retained(unsigned mode)
+{
+    static struct mock m; static struct giulia_crm p;
+    struct giulia_crm other={0}; struct giulia_crm_io io=setup_empty(&m,2,16);
+    if (mode==1) m.stall=1;
+    if (mode==2) m.post_error=1;
+    int rc=giulia_crm_start_empty_keep(&p,&io,patch,4);
+    if (mode==1) {
+        assert(rc==GIULIA_CRM_TIMEOUT && p.pending && p.published && p.owned);
+        unsigned writes=m.writes;
+        assert(giulia_crm_stop(&p)==GIULIA_CRM_TIMEOUT && m.writes==writes && m.switches==1);
+        m.reg[BUSY/4]=m.reg[UPDATE/4]; m.stall=0;
+        assert(giulia_crm_recover(&p)==0 && m.writes==writes);
+    } else if (mode==2) {
+        assert(rc==GIULIA_CRM_IO && p.pending && p.published);
+        m.post_error=0; assert(giulia_crm_recover(&p)==0);
+    } else assert(rc==0 && p.state==GIULIA_CRM_ACTIVE);
+    if (mode==3) {
+        m.reg[UPDATE/4]=m.reg[BUSY/4]=0;
+        unsigned writes=m.writes;
+        assert(giulia_crm_stop(&p)==GIULIA_CRM_BUSY && p.owned && m.writes==writes);
+        m.reg[UPDATE/4]=m.reg[BUSY/4]=1; /* External test peer repairs state. */
+    }
+    unsigned writes=m.writes;
+    assert(giulia_crm_stop(&p)==GIULIA_CRM_RETAINED && p.state==GIULIA_CRM_HELD);
+    assert(p.owned && p.dirty && p.original==2 && p.target==0 && p.published);
+    assert(m.writes==writes && m.switches==1 && m.reg[UPDATE/4]==1);
+    for (unsigned k=0;k<2;k++) for (unsigned s=0;s<5;s++)
+        for (unsigned i=0;i<(k?16u:2u);i++) assert(!m.reg[address(k,1,s,i,k?16:2)/4]);
+    assert(giulia_crm_stop(&p)==GIULIA_CRM_RETAINED && m.writes==writes);
+    assert(start(&other,&io)==GIULIA_CRM_BUSY);
+    puts("Ace5 CRM empty: single publication, late ACK and retained channel lifetime passed");
+}
+int main(int argc,char **argv)
+{
+    /* A retained lifetime ends only with the simulated machine/process.
+     * Cloud runner uses separate processes, never a production reset hook. */
+    if (argc==2) {
+        if (!strcmp(argv[1],"--empty-success")) empty_retained(0);
+        else if (!strcmp(argv[1],"--empty-timeout")) empty_retained(1);
+        else if (!strcmp(argv[1],"--empty-post-error")) empty_retained(2);
+        else if (!strcmp(argv[1],"--empty-drift")) empty_retained(3);
+        else assert(!"unknown scenario");
+        return 0;
+    }
+    assert(argc==1);
     lifecycle(); admission(); lost_writes(); switch_failures(); lease_and_restore_faults();
+    empty_preparation();
     puts("Ace5 CRM: actual inactive-table writes, channel ACK, preserved resources and timeout rollback passed");
     return 0;
 }

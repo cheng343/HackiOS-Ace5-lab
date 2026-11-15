@@ -44,4 +44,9 @@ int giulia_bcm_pcie0_plan(const uint8_t *, uint32_t bytes, uint32_t version,
 int giulia_bcm_pcie0_start(struct giulia_crm *, const struct giulia_crm_io *,
     const uint8_t *, uint32_t bytes, uint32_t version, unsigned policy,
     struct giulia_bcm_pcie0_plan *);
+/* Explicit empty-channel initialization with retained lifetime. Never auto
+ * selected after the ordinary active-channel API rejects an empty device. */
+int giulia_bcm_pcie0_start_empty_keep(struct giulia_crm *, const struct giulia_crm_io *,
+    const uint8_t *, uint32_t bytes, uint32_t version, unsigned policy,
+    struct giulia_bcm_pcie0_plan *);
 #endif

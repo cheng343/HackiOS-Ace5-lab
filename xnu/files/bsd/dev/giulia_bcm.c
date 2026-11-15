@@ -97,3 +97,9 @@ int giulia_bcm_pcie0_start(struct giulia_crm *p,const struct giulia_crm_io *io,
     int rc=giulia_bcm_pcie0_plan(db,bytes,version,policy,plan);
     return rc ? rc : giulia_crm_start(p,io,plan->patch,GIULIA_BCM_PCIE0_PATCHES);
 }
+int giulia_bcm_pcie0_start_empty_keep(struct giulia_crm *p,const struct giulia_crm_io *io,
+    const uint8_t *db,uint32_t bytes,uint32_t version,unsigned policy,struct giulia_bcm_pcie0_plan *plan)
+{
+    int rc=giulia_bcm_pcie0_plan(db,bytes,version,policy,plan);
+    return rc ? rc : giulia_crm_start_empty_keep(p,io,plan->patch,GIULIA_BCM_PCIE0_PATCHES);
+}
