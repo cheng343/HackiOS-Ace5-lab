@@ -73,7 +73,12 @@ static void check_stop(struct board *b,struct giulia_rpmh *t,struct giulia_gem_p
     assert(p->state==GIULIA_GEM_POWER_STOPPED && !p->owned && !p->dirty && !p->pending);
     assert(!(b->cmd&BIT(1)) && b->cfg==0x100001);
     for (unsigned i=0;i<2;i++) assert(b->rsc.arc_vote[i]==baseline->selector[i]);
-    restored(&b->rsc,t);
+    if (t->state==GIULIA_RPMH_IDLE) {
+        /* Borrowed sufficient requests never acquire or touch the TCS. */
+        assert(!b->rsc.reads && !b->rsc.writes && !b->rsc.triggers);
+        assert(!t->dirty && !giulia_rpmh_bus_owned(t));
+        assert(!memcmp(b->rsc.regs,b->rsc.original,sizeof(b->rsc.regs)));
+    } else restored(&b->rsc,t);
 }
 static void parser(void)
 {
