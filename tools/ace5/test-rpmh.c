@@ -21,6 +21,9 @@ struct mock {
 #ifdef GIULIA_RPMH_CPU_NOC_TEST
     uint32_t cpu_vote[2];
 #endif
+#ifdef GIULIA_RPMH_GEM_TEST
+    uint32_t arc_vote[2], arc_data[32];
+#endif
     uint32_t command[32][3], count[32];
     uint32_t allones, drop, cleanup_block;
     unsigned reads, writes, barriers, elapsed, triggers, pending, hold_at;
@@ -54,6 +57,13 @@ static void execute(struct mock *m, int partial)
         if (!(mask & BIT(i))) continue;
         assert(get(m, MSG + i * 24) == 0x10108);
         addr = get(m, MSG + i * 24 + 4); value = get(m, MSG + i * 24 + 8);
+#ifdef GIULIA_RPMH_GEM_TEST
+        if (addr == 0x31000 || addr == 0x31010) {
+            assert(value < 16 && i == 0);
+            m->arc_vote[(addr - 0x31000) / 16] = value;
+            m->arc_data[m->triggers-1] = value;
+        } else
+#endif
 #ifdef GIULIA_RPMH_CPU_NOC_TEST
         if (addr == 0x51000 || addr == 0x51004) {
             assert(value == 0x60000001u); /* Binary ON only; never zero/disable. */

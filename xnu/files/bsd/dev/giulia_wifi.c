@@ -22,6 +22,7 @@
 #include "giulia_wifi_gpio.h"
 #include "giulia_aop.h"
 #include "giulia_bcm.h"
+#include "giulia_arc.h"
 
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
@@ -87,7 +88,7 @@ static void wifi_probe_thread(__unused void *arg, __unused wait_result_t wait)
         0x6b004, 0x6b008, 0x6c000, 0x6c004, 0x5214c, 0x52000,
         0x52008, 0x6b074, 0x6b078, 0x6b058, 0x6b05c, 0x6b070,
         0x10058, 0x10064, 0x10074, 0x6b01c, 0x6b020, 0x6b02c,
-        0x6b038, 0x6b03c, 0x6b054
+        0x6b038, 0x6b03c, 0x6b054, 0x63004, 0x63008
     };
     static const unsigned gpio_pins[] = {16, 17, 18, 19, 94, 95, 96};
     static const char *const rail_names[] = {
@@ -123,6 +124,21 @@ static void wifi_probe_thread(__unused void *arg, __unused wait_result_t wait)
                 GIULIA_RPMH_DB_MAX, db_version, rail_names[i], &address);
             wifi_log("ace5-wifi: CMD-DB %s rc=%d resource=%#x (prior vote unknown)\n",
                 rail_names[i], error, address);
+        }
+        const char *const arc_names[]={"xo.lvl","cx.lvl"};
+        for (unsigned i=0;i<2;i++) {
+            struct giulia_arc_resource arc={0};
+            uint32_t selector=UINT32_MAX;
+            int error=giulia_arc_resolve((const uint8_t *)m.db.address,
+                GIULIA_RPMH_DB_MAX,db_version,arc_names[i],&arc);
+            if (!error) {
+                if (i) error=giulia_arc_select(&arc,64,&selector);
+                else if (arc.count>3) selector=3; /* Vendor XO ON protocol. */
+                else error=GIULIA_RPMH_DATABASE;
+            }
+            wifi_log("ace5-wifi: ARC %s rc=%d resource=%#x levels=%u selector=%u corner=%u (prior vote unknown)\n",
+                arc_names[i],error,arc.address,arc.count,selector,
+                !error ? arc.level[selector]:0);
         }
     }
     if (wifi_probe_mode >= 2) {

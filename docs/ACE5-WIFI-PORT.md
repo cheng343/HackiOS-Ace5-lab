@@ -4,6 +4,34 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：ARC 电源等级与 GEM 电源/时钟衔接
+
+通过 Android 内核的只读 CMD DB 调试接口确认，CX 的 consumer 等级
+64 对应硬件 selector 2。新增 `giulia_arc` 从当前固件表解析 ARC 的
+LE16 等级数组、末尾零填充和资源地址；不硬编码地址或该 selector，
+也不把 consumer 等级当作 RPMh 命令值。重复、越界或非单调表会被拒绝。
+
+`giulia_gem_power` 连接真实 RPMh transport 与上一节的 GEM 时钟 core：
+先完成 `xo.lvl` 的原厂 ON selector 3 请求，再完成 `cx.lvl` 的最低
+等级请求，最后持有 GEM 时钟。已知较高的原始请求继续保留；相同请求
+不重复发送。停止时，调用方先恢复 QoS，再释放本次时钟改动，最后依次
+恢复 CX、XO 原始请求。任何未完成命令都只等待/恢复，不重新触发。
+
+该 API 必须拿到真实、完整的同一 DRV 原始 ACTIVE_ONLY 请求和资源
+所有权；normal/AO 消费者共享的请求也在其中。Android regulator 显示值、
+CMD DB 的等级表和 TCS 缓冲区都不能证明这个原始请求。当前尚未获得这一
+交接条件，因此未知基线会在写寄存器前被拒绝，没有自动启动电源流程。
+它也不写 sleep/wake 请求，不能据此允许系统进入低功耗状态。
+
+现有 XNU 只读探测增加两项 ARC 等级转换结果及 GEM CMD/CFG 读数，
+用于下一次交接核对，不增加电源写操作。云测试连接实际 ARC/RPMh/
+GEM-power/GEM-clock/QoS 实现，覆盖共享请求、四阶段命令超时、时钟
+超时和部分恢复。编译测试与实际芯片枚举、固件启动、联网结果分开记录。
+
+协议依据原厂固定版本 [rpmh-regulator.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/regulator/rpmh-regulator.c)、
+[clk-rpmh.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/clk/qcom/clk-rpmh.c)
+和 [cmd-db.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/soc/qcom/cmd-db.c)。
+
 ## 2026-11-16：GEM 配置时钟的 XO 保持流程
 
 Android 只读采集确认 `gcc_cpuss_ubwcp_clk_src` 当前为 19.2 MHz，

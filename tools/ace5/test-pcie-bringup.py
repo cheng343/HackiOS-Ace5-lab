@@ -23,6 +23,9 @@ def main():
     cases = [(drivers/f'giulia_pcie_{name}.c', root/f'tools/ace5/test-pcie-{name}.c')
              for name in ('phy', 'link', 'noc', 'qos')]
     cases += [
+        (drivers/'giulia_arc.c', drivers/'giulia_gem_power.c', drivers/'giulia_gem_clock.c',
+         drivers/'giulia_pcie_qos.c', drivers/'giulia_rpmh.c', drivers/'giulia_wlan_rails.c',
+         root/'tools/ace5/test-gem-power.c'),
         (drivers/'giulia_gem_clock.c', drivers/'giulia_pcie_qos.c', root/'tools/ace5/test-gem-clock.c'),
         (drivers/'giulia_pcie_power.c', drivers/'giulia_pcie_qos.c', root/'tools/ace5/test-pcie-power.c'),
         (drivers/'giulia_aop.c', root/'tools/ace5/test-aop.c'),
@@ -39,7 +42,7 @@ def main():
         (drivers/'giulia_wifi_board.c', root/'tools/ace5/test-wifi-board.c'),
         (drivers/'giulia_wifi_supply.c', root/'tools/ace5/test-wifi-supply.c'),
         (drivers/'giulia_mhi_snapshot.c', root/'tools/ace5/test-mhi-snapshot.c'),
-        (drivers/'giulia_aop.c', drivers/'giulia_pcie_noc.c', drivers/'giulia_bcm.c',
+        (drivers/'giulia_aop.c', drivers/'giulia_pcie_noc.c', drivers/'giulia_bcm.c', drivers/'giulia_arc.c',
          drivers/'giulia_crm.c', root/'tools/ace5/test-wifi-probe.c'),
     ]
     for case in cases:

@@ -24,6 +24,7 @@ typedef void *thread_t;
 static unsigned mode, board, creates, exits, deallocs, lines, mapped, unmapped;
 static uint32_t failed_pa;
 static int thread_error, saw_complete, saw_noc, saw_aop, saw_full, resolver_calls;
+static unsigned arc_lines;
 static _Alignas(0x4000) uint32_t gcc[0x70000 / 4], gpio[0x100000 / 4], rsc[0x10000 / 4];
 static _Alignas(0x4000) uint32_t db[0x20000 / 4], sm_pages[0xc000 / 4], crm_pages[0x4000 / 4];
 static _Alignas(0x4000) uint32_t aop_pages[0x4000 / 4];
@@ -89,6 +90,12 @@ void loader_log_line(const char *text)
     if (strstr(text, "early CESTA/CRM headers captured")) saw_noc = 1;
     if (strstr(text, "AOP descriptor captured")) saw_aop = 1;
     if (strstr(text, "full SM/CRM snapshot captured; no table/channel writes")) saw_full = 1;
+    if (strstr(text,"ARC cx.lvl rc=0")) {
+        assert(strstr(text,"selector=2 corner=64 (prior vote unknown)")); arc_lines++;
+    }
+    if (strstr(text,"ARC xo.lvl rc=0")) {
+        assert(strstr(text,"selector=3 corner=128 (prior vote unknown)")); arc_lines++;
+    }
 }
 int giulia_rpmh_resolve_vrm(const uint8_t *data, uint32_t bytes, uint32_t version,
     const char *name, uint32_t *address)
@@ -111,12 +118,25 @@ static void setup(unsigned requested)
     mode = requested; board = HACKIOS_PLATFORM_GIULIA;
     creates = exits = deallocs = lines = mapped = unmapped = failed_pa = 0;
     thread_error = saw_complete = saw_noc = saw_aop = saw_full = resolver_calls = 0;
+    arc_lines=0;
     wifi_probe_started = wifi_probe_mode = 0;
     memset(db, 0, sizeof(db));
     memset(sm_pages, 0, sizeof(sm_pages)); memset(crm_pages, 0, sizeof(crm_pages));
     sm_pages[0] = crm_pages[0] = UINT32_MAX; /* Allocation != resource base. */
     sm[0x1040 / 4] = 0x12345678;
     db[0] = 1; db[1] = 0x0c0330db;
+    /* Synthetic ARC entries exercise the real bounded parser in XNU probe. */
+    uint16_t *header=(uint16_t *)((uint8_t *)db+8);
+    header[0]=3; header[2]=128; header[3]=2;
+    for (unsigned i=0;i<2;i++) {
+        uint8_t *e=(uint8_t *)db+144+i*24;
+        memcpy(e,i ? "cx.lvl":"xo.lvl",6);
+        uint32_t addr=0x31000+i*16; memcpy(e+16,&addr,4);
+        uint16_t len=8,offset=(uint16_t)(i*8);
+        memcpy(e+20,&len,2); memcpy(e+22,&offset,2);
+        const uint16_t levels[2][4]={{0,32,80,128},{0,16,64,128}};
+        memcpy((uint8_t *)db+272+i*8,levels[i],8);
+    }
     crm[0] = 0x00010200; /* Synthetic layout identity, not measured device. */
     crm[1] = (3u<<24) | (1u<<20) | (2u<<16) | (2u<<12) | (2u<<8) | 0x25;
     crm[2] = 6u<<26; crm[3] = 1;
@@ -137,6 +157,7 @@ int main(void)
     setup(1); board = 1; giulia_wifi_init(); assert(!creates && !mapped);
     setup(1); giulia_wifi_init(); check();
     assert(mapped == 15 && saw_complete && !saw_noc && resolver_calls == 7);
+    assert(arc_lines==2);
     giulia_wifi_init(); assert(creates == 1);
     setup(2); giulia_wifi_init(); check(); assert(mapped == 63 && saw_noc && saw_complete);
     setup(3); giulia_wifi_init(); check(); assert(mapped == 127 && saw_noc && saw_aop && saw_complete);
@@ -155,9 +176,10 @@ int main(void)
     setup(2); crm[3] = UINT32_MAX; original = fingerprint();
     giulia_wifi_init(); check(); assert(!saw_noc && !saw_complete);
     setup(1); db[1] = 0; original = fingerprint();
-    giulia_wifi_init(); check(); assert(!resolver_calls && saw_complete);
+    giulia_wifi_init(); check(); assert(!resolver_calls && !arc_lines && saw_complete);
     setup(1); thread_error = 1; giulia_wifi_init(); assert(creates == 1 && !mapped && !exits);
     puts("Ace5 XNU Wi-Fi probe: opt-in, board gate, read-only maps and cleanup passed");
     puts("Ace5 XNU NoC snapshot: actual full capture, read failures and untouched MMIO passed");
+    puts("Ace5 XNU ARC probe: real level parser, selector diagnostics and untouched MMIO passed");
     return 0;
 }
