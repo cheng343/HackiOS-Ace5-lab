@@ -21,7 +21,8 @@ enum giulia_wifi_gpio_condition {
     GIULIA_WGPIO_RAILS_AOP_READY = 1u << 2,
     GIULIA_WGPIO_PHY_READY = 1u << 3,
     GIULIA_WGPIO_MSI_STOPPED = 1u << 4,
-    GIULIA_WGPIO_PHY_POWER_STOPPED = 1u << 5
+    GIULIA_WGPIO_PHY_POWER_STOPPED = 1u << 5,
+    GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE = 1u << 6
 };
 #define GIULIA_WGPIO_BEGIN_REQUIRED (GIULIA_WGPIO_EXCLUSIVE | GIULIA_WGPIO_LINK_DMA_QUIET)
 #define GIULIA_WGPIO_ON_REQUIRED (GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_RAILS_AOP_READY)
@@ -36,7 +37,7 @@ struct giulia_wifi_gpio_io {
 };
 struct giulia_wifi_gpio {
     struct giulia_wifi_gpio_io io;
-    uint32_t state, saved_cfg[4], saved_io[4], dirty;
+    uint32_t state, saved_cfg[5], saved_io[5], dirty, bt_owned;
     uint32_t sw_ctrl, wlan_sw_ctrl;
     int error;
 };
@@ -47,6 +48,12 @@ struct giulia_wifi_gpio {
  * Unknown/failed writes retain snapshots until stop succeeds.
  */
 int giulia_wifi_gpio_begin(struct giulia_wifi_gpio *, uint32_t conditions,
+    const struct giulia_wifi_gpio_io *);
+/* Optional supply-table owner also takes GPIO17 (BT_EN). Needs a real lease
+ * excluding every Bluetooth control client, not just a sampled input low.
+ * Refuses a running BT, snapshots its mux/latch, then actively holds reset
+ * low alongside WLAN_EN for 5 ms. Other BT/SW_CTRL pins are never changed. */
+int giulia_wifi_gpio_begin_with_bt_reset(struct giulia_wifi_gpio *, uint32_t conditions,
     const struct giulia_wifi_gpio_io *);
 /* Requires actual rail/AOP completion, not just a plan or requested votes. */
 int giulia_wifi_gpio_wlan_on(struct giulia_wifi_gpio *, uint32_t conditions);

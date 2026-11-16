@@ -17,8 +17,10 @@ XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属�
 不启用 WLAN，不训练 PCIe 链路。
 
 只在真实 loader firmware-quiet ACK、单 CPU1、有限 10–120 秒、PCIe0
-core/PHY 域已关闭、无线/蓝牙/SW_CTRL 控制脚安静时进入。先用既有 GPIO
-core 将 WLAN_EN/PERST 保持低；每次 AOP 写和门铃前重查条件。无后台
+core/PHY 域已关闭、无线/蓝牙/SW_CTRL 控制脚安静时进入。GPIO core 在
+明确取得蓝牙控制权后将 WLAN_EN/BT_EN/PERST 保持低；输入模式的低电平
+不再被误当作主动保持复位。每次 AOP 写和门铃前重查条件，记录首个不符
+寄存器的地址、掩码、期望值和实读值。无后台
 硬件探针或 live USB 查询。首个错误停止；超时不重发。缺少原固件表的读回
 接口，因此本项是明确的 forward-only 测试，发送后保留 table/GPIO/QMP/
 quiet 所有权至内核返回；loader 的 `power-reset-required=yes` 随后只允许

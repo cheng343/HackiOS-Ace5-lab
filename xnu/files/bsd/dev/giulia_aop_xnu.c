@@ -33,6 +33,7 @@ struct ga_trial {
     struct giulia_wlan_pdc pdc;
     struct giulia_wifi_gpio gpio;
     uint8_t table[508];
+    uint32_t guard_failed, guard_pa, guard_mask, guard_expected, guard_observed;
 };
 static struct ga_trial ga;
 static unsigned ga_started, ga_pdc_mode;
@@ -62,6 +63,15 @@ static uint32_t ga_mmio(struct ga_mapping *m, uint32_t offset)
     uint32_t v = *(volatile uint32_t *)(m->address + offset);
     ga_barrier(0); return v;
 }
+static int ga_check(struct ga_trial *p, uint32_t pa, uint32_t got, uint32_t mask, uint32_t expected)
+{
+    if (got != UINT32_MAX && (got & mask) == expected) return 1;
+    if (!p->guard_failed) {
+        p->guard_failed = 1; p->guard_pa = pa; p->guard_mask = mask;
+        p->guard_expected = expected; p->guard_observed = got;
+    }
+    return 0;
+}
 /* This finite, single-CPU entry is the sole local WLAN/BT/GCC client while
  * the real loader quiet lease is held. Admit only a collapsed PCIe host and
  * inactive controls; a table/channel ACK is not used as a quiescence proof.
@@ -70,25 +80,25 @@ static int ga_pdc_quiet(struct ga_trial *p)
 {
     static const uint32_t offsets[] = {0x6b004, 0x6b008, 0x6c000,
         0x6c004, 0x5214c, 0x52008};
-    uint32_t v[6];
-    if (p->quiet->request != 1 || p->quiet->ack != 1 || p->quiet->active != 1)
-        return 0;
+    static const uint32_t masks[] = {7, 0x18000, 7, 0x18000, 9, 0x3f};
+    static const uint32_t expected[] = {1, 0x8000, 1, 0x8000, 9, 0};
+    uint32_t q = (p->quiet->request == 1) | ((p->quiet->ack == 1) << 1) |
+        ((p->quiet->active == 1) << 2);
+    if (!ga_check(p, 0, q, 7, 7)) return 0;
     for (unsigned i = 0; i < 6; i++) {
-        v[i] = ga_mmio(&p->gcc, offsets[i]);
-        if (v[i] == UINT32_MAX) return 0;
+        if (!ga_check(p, 0x100000u + offsets[i], ga_mmio(&p->gcc, offsets[i]), masks[i], expected[i])) return 0;
     }
-    if ((v[0] & 7u) != 1 || (v[2] & 7u) != 1 ||
-        (v[1] & 0x18000u) != 0x8000u || (v[3] & 0x18000u) != 0x8000u ||
-        (v[4] & 9u) != 9u || (v[5] & 0x3fu)) return 0;
     for (unsigned pin = 16; pin <= 19; pin++) {
+        uint32_t mask = (15u << 2) | (1u << 12), want = 0;
         uint32_t cfg = ga_mmio(&p->tlmm, pin * 0x1000u);
         uint32_t data = ga_mmio(&p->tlmm, pin * 0x1000u + 4);
         uint32_t irq = ga_mmio(&p->tlmm, pin * 0x1000u + 8);
-        if (cfg == UINT32_MAX || data == UINT32_MAX || irq == UINT32_MAX ||
-            (cfg & ((15u << 2) | (1u << 12))) || (data & 3u) || (irq & 1u)) return 0;
-        if (pin == 17 && !(cfg & (1u << 9))) return 0; /* BT_EN must remain driven low. */
+        if (pin <= 17 && p->gpio.bt_owned) { mask |= 1u << 9; want = 1u << 9; }
         /* The radio drives SW_CTRL/WLAN_SW_CTRL; never drive these inputs. */
-        if (pin >= 18 && (cfg & (1u << 9))) return 0;
+        if (pin >= 18) mask |= 1u << 9;
+        uint32_t pa = GIULIA_WIFI_GPIO_PA + pin * 0x1000u;
+        if (!ga_check(p, pa, cfg, mask, want) || !ga_check(p, pa + 4, data, 3, 0) ||
+            !ga_check(p, pa + 8, irq, 1, 0)) return 0;
     }
     return 1;
 }
@@ -168,7 +178,8 @@ static void ga_thread(void *context, __unused wait_result_t wait)
         if (!ga_pdc_quiet(&ga)) {
             ga_log("ace5-pdc: host/BT/control lines are not quiet; no power message sent\n"); goto release;
         }
-        rc = giulia_wifi_gpio_begin(&ga.gpio, GIULIA_WGPIO_BEGIN_REQUIRED, &gpio_io);
+        rc = giulia_wifi_gpio_begin_with_bt_reset(&ga.gpio,
+            GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE, &gpio_io);
         if (rc || !ga_pdc_quiet(&ga)) {
             ga_log("ace5-pdc: GPIO isolation incomplete; no power message sent\n"); goto cleanup;
         }
@@ -215,7 +226,7 @@ cleanup:
         after.words[0x30/4] == before.words[0x30/4] && !after.message_length)
         closed = 1;
     if (ga_pdc_mode && ga.gpio.state != GIULIA_WGPIO_IDLE &&
-        giulia_wifi_gpio_stop(&ga.gpio, GIULIA_WGPIO_STOP_REQUIRED)) {
+        giulia_wifi_gpio_stop(&ga.gpio, GIULIA_WGPIO_STOP_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE)) {
         ga_log("ace5-pdc: GPIO cleanup incomplete; retain until cold reboot\n"); goto retain;
     }
 release:
@@ -228,6 +239,12 @@ done:
     ga_unmap(&ga.tlmm); ga_unmap(&ga.gcc);
     ga_unmap(&ga.ipcc); ga_unmap(&ga.msg); ga_unmap(&ga.shared);
 retain:
+    if (ga.guard_failed) {
+        char status[192];
+        snprintf(status, sizeof(status), "ace5-pdc: first guard failure pa=0x%x mask=0x%x expected=0x%x observed=0x%x\n",
+            ga.guard_pa, ga.guard_mask, ga.guard_expected, ga.guard_observed);
+        ga_log(status);
+    }
     thread_terminate(current_thread());
 }
 void giulia_aop_test_init(void)
@@ -239,6 +256,7 @@ void giulia_aop_test_init(void)
     if (!PE_parse_boot_argn("ace5_aop_channel_test", &enabled, sizeof(enabled)) ||
         (enabled != 1 && enabled != 2)) return;
     if (hackios_platform() != HACKIOS_PLATFORM_GIULIA) return;
+    if (__atomic_load_n(&ga_started, __ATOMIC_ACQUIRE)) return;
     PE_parse_boot_argn("cpus", &cpus, sizeof(cpus));
     PE_parse_boot_argn("bootcpu", &cpu, sizeof(cpu));
     PE_parse_boot_argn("loader_return_after", &seconds, sizeof(seconds));

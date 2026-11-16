@@ -6,7 +6,7 @@
 #define PIN(p,r) ((p) * 0x1000u + (r))
 struct mock {
     uint32_t regs[97][3], original[97][3];
-    unsigned reads, writes, delay_us, delay100ms, ignore_nth;
+    unsigned reads, writes, delay_us, delay100ms, ignore_nth, bt_allowed;
     uint32_t ignore, bad_read;
 };
 static uint32_t rd(void *cookie, uint32_t off)
@@ -21,7 +21,7 @@ static void wr(void *cookie, uint32_t off, uint32_t val)
 {
     struct mock *m = cookie;
     unsigned pin = off / 0x1000u, reg = off % 0x1000u / 4;
-    assert((pin == 16 || pin == 94 || pin == 95 || pin == 96) && reg < 2);
+    assert((pin == 16 || pin == 94 || pin == 95 || pin == 96 || (pin == 17 && m->bt_allowed)) && reg < 2);
     assert(((val ^ m->regs[pin][reg]) & ~(reg ? 2u : 0x3ffu)) == 0);
     ++m->writes;
     if (off == m->ignore || m->writes == m->ignore_nth) return;
@@ -64,11 +64,59 @@ static void stop(struct mock *m, struct giulia_wifi_gpio *g)
     assert(g->state == GIULIA_WGPIO_STOPPED && !g->dirty);
     assert(!memcmp(m->regs, m->original, sizeof(m->regs)));
 }
+static void bluetooth_reset(void)
+{
+    struct mock m;
+    struct giulia_wifi_gpio g;
+    struct giulia_wifi_gpio_io io = {&m, rd, wr, fence, delay};
+    unsigned flags = GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE;
+    unsigned stop_flags = GIULIA_WGPIO_STOP_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE;
+    setup(&m, &g);
+    assert(giulia_wifi_gpio_begin_with_bt_reset(&g, GIULIA_WGPIO_BEGIN_REQUIRED, &io) == GIULIA_WGPIO_PREREQUISITE);
+    assert(!m.reads && !m.writes);
+    for (unsigned bad = 0; bad < 3; bad++) {
+        setup(&m, &g); m.bt_allowed = 1;
+        if (!bad) m.regs[17][1] |= 1;
+        if (bad == 1) m.regs[17][0] |= 1u << 12;
+        if (bad == 2) m.regs[17][2] = 1;
+        assert(giulia_wifi_gpio_begin_with_bt_reset(&g, flags, &io) == GIULIA_WGPIO_BUSY);
+        assert(!m.writes);
+    }
+    setup(&m, &g); m.bt_allowed = 1;
+    assert(!giulia_wifi_gpio_begin_with_bt_reset(&g, flags, &io));
+    assert(g.bt_owned && g.state == GIULIA_WGPIO_HELD && m.delay_us == 5000);
+    assert((m.regs[17][0] & 0x3ff) == 0x201 && !(m.regs[17][1] & 2));
+    unsigned start_writes = m.writes;
+    assert(giulia_wifi_gpio_stop(&g, GIULIA_WGPIO_STOP_REQUIRED) == GIULIA_WGPIO_PREREQUISITE && m.writes == start_writes);
+    assert(!giulia_wifi_gpio_stop(&g, stop_flags));
+    unsigned stop_writes = m.writes - start_writes;
+    assert(!g.bt_owned && !g.dirty && !memcmp(m.regs, m.original, sizeof(m.regs)));
+    for (unsigned nth = 1; nth <= start_writes; nth++) {
+        setup(&m, &g); m.bt_allowed = 1; m.ignore_nth = nth;
+        int rc = giulia_wifi_gpio_begin_with_bt_reset(&g, flags, &io);
+        assert(rc == 0 || rc == GIULIA_WGPIO_READBACK);
+        m.ignore_nth = 0;
+        assert(!giulia_wifi_gpio_stop(&g, stop_flags));
+        assert(!g.dirty && !g.bt_owned && !memcmp(m.regs, m.original, sizeof(m.regs)));
+    }
+    for (unsigned nth = 1; nth <= stop_writes; nth++) {
+        setup(&m, &g); m.bt_allowed = 1;
+        assert(!giulia_wifi_gpio_begin_with_bt_reset(&g, flags, &io));
+        m.ignore_nth = m.writes + nth;
+        int rc = giulia_wifi_gpio_stop(&g, stop_flags);
+        assert(rc == 0 || rc == GIULIA_WGPIO_READBACK);
+        m.ignore_nth = 0;
+        assert(!giulia_wifi_gpio_stop(&g, stop_flags));
+        assert(!g.dirty && !g.bt_owned && !memcmp(m.regs, m.original, sizeof(m.regs)));
+    }
+    puts("Ace5 Wi-Fi GPIO: explicit BT lease, held reset and every partial restore passed");
+}
 int main(void)
 {
     struct mock m;
     struct giulia_wifi_gpio g;
     struct giulia_wifi_gpio_io io = {&m, rd, wr, fence, delay};
+    bluetooth_reset();
     setup(&m, &g);
     assert(giulia_wifi_gpio_begin(&g, 0, &io) == GIULIA_WGPIO_PREREQUISITE);
     assert(!m.reads && !m.writes);

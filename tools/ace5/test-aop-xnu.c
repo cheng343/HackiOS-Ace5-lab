@@ -89,6 +89,7 @@ static void peer_barrier(void)
             assert(enabled == 2 && msg_page[0x128/4] == 64 && pdc_messages < 10);
             assert((tlmm_pages[16*0x1000/4] & 0x3ff) == 0x201);
             assert((tlmm_pages[94*0x1000/4] & 0x3ff) == 0x201);
+            assert((tlmm_pages[17*0x1000/4] & 0x3ff) == 0x201);
             assert(!(tlmm_pages[(16*0x1000+4)/4] & 3));
             memcpy(pdc_payloads[pdc_messages++], (uint8_t *)msg_page+0x12c, 64);
             if (pdc_messages != stall_message) msg_page[0x128/4] = 0;
@@ -129,7 +130,7 @@ static void setup(void)
     gcc_pages[0x6b004/4] = gcc_pages[0x6c000/4] = 1;
     gcc_pages[0x6b008/4] = gcc_pages[0x6c004/4] = 1u << 15;
     gcc_pages[0x5214c/4] = 9;
-    tlmm_pages[16*0x1000/4] = tlmm_pages[17*0x1000/4] = 0x201;
+    tlmm_pages[16*0x1000/4] = tlmm_pages[17*0x1000/4] = 1; /* Observed input/pull-down handoff. */
     memset(pdc_payloads,0xcc,sizeof(pdc_payloads));
     shared->magic = LOADER_QUIET_MAGIC; shared->version = 1; shared->size = sizeof(*shared);
     msg_page[0] = 0x4d41494c; msg_page[1] = 1;
@@ -163,7 +164,7 @@ static void pdc_tests(unsigned stall, unsigned drift)
             if (i == 9) tlmm_pages[17*0x1000/4] |= 4;
             if (i == 10) tlmm_pages[(18*0x1000+8)/4] = 1;
             if (i == 11) tlmm_pages[(16*0x1000+4)/4] = 2;
-            if (i == 12) tlmm_pages[17*0x1000/4] &= ~(1u << 9);
+            if (i == 12) tlmm_pages[(17*0x1000+8)/4] = 1;
             giulia_aop_test_init();
             assert(!pdc_messages && !pdc_complete && !kicks && maps == unmaps && !shared->request);
             assert(ga.gpio.state == GIULIA_WGPIO_IDLE);
@@ -180,9 +181,11 @@ static void pdc_tests(unsigned stall, unsigned drift)
     assert(pdc_complete == (!stall && !drift) && maps == 31 && !unmaps);
     assert(shared->request == 1 && shared->active == 1 && ga.aop.owned);
     assert(ga.gpio.state == GIULIA_WGPIO_HELD);
+    assert(ga.gpio.bt_owned && (tlmm_pages[17*0x1000/4] & 0x3ff) == 0x201);
     assert(ga.pdc.delivered == ((1u << (stall ? stall - 1 : expected))-1));
     assert(ga.pdc.attempted == ((1u << expected)-1));
     assert(!!ga.aop.pending == !!stall);
+    if (drift) assert(ga.guard_failed && ga.guard_pa == 0x152008 && ga.guard_observed == 1);
     unsigned at = 0;
     for (unsigned i = 0; i < pdc_messages; i++) {
         unsigned length = (unsigned)strlen((const char *)dt_table + at);
