@@ -7,7 +7,8 @@ enum giulia_wlan_rail_result {
     GIULIA_WLAN_RAIL_OK = 0,
     /* Deliberately nonzero: votes remain, no restore/power-off was claimed. */
     GIULIA_WLAN_RAIL_RETAINED = 1,
-    GIULIA_WLAN_RAIL_BASELINE_UNKNOWN = -20
+    GIULIA_WLAN_RAIL_BASELINE_UNKNOWN = -20,
+    GIULIA_WLAN_RAIL_VOLTAGE_CONFLICT = -21
 };
 enum giulia_wlan_rail_policy {
     GIULIA_WLAN_RESTORE_BASELINE = 0, GIULIA_WLAN_KEEP_VOTES = 1
@@ -42,6 +43,7 @@ struct giulia_wlan_rails {
     struct giulia_rpmh *transport;
     uint32_t state, policy, attempted_mask, completed_mask;
     uint32_t mode_mask;
+    uint32_t selected_mode[GIULIA_WLAN_RAIL_COUNT];
     uint32_t address[GIULIA_WLAN_RAIL_COUNT];
     struct giulia_wlan_rail_baseline baseline[GIULIA_WLAN_RAIL_COUNT];
     int error, cleanup_error;
@@ -58,6 +60,10 @@ struct giulia_wlan_rails {
  * therefore rejects unknown baselines before MMIO. KEEP_VOTES is an explicit
  * forward-only experiment, never selected automatically or reversible by
  * restoring TCS registers. It retains the rail ownership claim after stop.
+ * Strict start also rejects a prior per-DRV voltage above this WLAN
+ * consumer's exact min=max voltage: lowering it loses a shared request, but
+ * raising the WLAN target violates its supplied limit. Resolve that conflict
+ * in the owning regulator service, never silently replace the prior vote.
  */
 int giulia_wlan_rails_start(struct giulia_wlan_rails *, struct giulia_rpmh *,
     const uint8_t *db, uint32_t bytes, uint32_t expected_version,
@@ -68,6 +74,9 @@ int giulia_wlan_rails_start(struct giulia_wlan_rails *, struct giulia_rpmh *,
  * mode fields are not written; MODE_ALREADY_READY covers these unmanaged
  * modes. MODE_WRITE_SAFE is additionally required. Strict restoration needs
  * known prior mode votes for all three fields; KEEP_VOTES never claims undo.
+ * Strict start max-aggregates each managed mode with its known per-DRV vote,
+ * matching rpmh-regulator.c: a prior S1C HPM=7 is not lowered to DT RET=3.
+ * MODE_WRITE_SAFE must cover the selected, aggregated modes.
  * Enabled sequence is V -> M -> E; withdrawal is E -> V -> M.
  */
 int giulia_wlan_rails_start_with_dt_modes(struct giulia_wlan_rails *, struct giulia_rpmh *,

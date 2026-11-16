@@ -19,7 +19,7 @@ enum giulia_pcie_power_result {
 };
 enum giulia_pcie_power_state {
     GIULIA_POWER_IDLE = 0, GIULIA_POWER_READY, GIULIA_POWER_PIPE_ON,
-    GIULIA_POWER_STOPPED, GIULIA_POWER_FAULT
+    GIULIA_POWER_STOPPED, GIULIA_POWER_FAULT, GIULIA_POWER_HOST_PREPARED
 };
 enum giulia_pcie_power_prerequisite {
     GIULIA_POWER_MMIO_OWNED = 1u << 0,
@@ -35,13 +35,26 @@ enum giulia_pcie_power_prerequisite {
      * every previous clock user. The core independently checks both domains
      * are collapsed/down and every other PCIe leaf is disabled before writes.
      * This flag never follows merely from reading the inherited vote. */
-    GIULIA_POWER_RCHNG_HANDOFF = 1u << 8
+    GIULIA_POWER_RCHNG_HANDOFF = 1u << 8,
+    /* Platform's actual CESTA owner permits this exclusive software GCC vote
+     * sequence and retains coordination through withdrawal. It need NOT halt
+     * CESTA. This is not implied by START=0 or a CRM channel ACK. Mutually
+     * exclusive with DIRECT_VOTES; no current XNU boot path asserts it. */
+    GIULIA_POWER_CESTA_COORDINATED = 1u << 9
 };
 #define GIULIA_POWER_REQUIRED 0xffu
+#define GIULIA_POWER_HOST_REQUIRED (GIULIA_POWER_MMIO_OWNED | \
+    GIULIA_POWER_PCIE0_EXCLUSIVE | GIULIA_POWER_RAILS_READY | \
+    GIULIA_POWER_XO_19M2_GPLL0_EVEN_300M | GIULIA_POWER_ENDPOINT_RESET | \
+    GIULIA_POWER_LINK_DMA_QUIET)
 enum giulia_pcie_power_stop_condition {
     GIULIA_POWER_STOP_ENDPOINT_RESET = 1u << 0,
     GIULIA_POWER_STOP_LINK_DMA_QUIET = 1u << 1,
-    GIULIA_POWER_STOP_PHY_QUIET = 1u << 2
+    GIULIA_POWER_STOP_PHY_QUIET = 1u << 2,
+    /* Coordinated route only: platform has withdrawn/quiesced its managed
+     * CESTA resource operation, or has never submitted it. Keep the GCC host
+     * clocks until that owning service completes; a timeout is not withdrawal. */
+    GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET = 1u << 3
 };
 #define GIULIA_POWER_STOP_REQUIRED 7u
 
@@ -58,7 +71,7 @@ struct giulia_pcie_power_io {
 struct giulia_pcie_power {
     struct giulia_pcie_power_io io;
     uint32_t state, dirty, saved[GIULIA_POWER_SAVED_REGS];
-    uint32_t inherited_rchng;
+    uint32_t inherited_rchng, prerequisites;
     int last_error, cleanup_error;
 };
 
@@ -81,6 +94,24 @@ struct giulia_pcie_power {
  */
 int giulia_pcie_power_start(struct giulia_pcie_power *,
     const struct giulia_pcie_power_io *, uint32_t prerequisites);
+/* Split vendor sequence: GDSCs/host clocks -> external CESTA resource request
+ * -> core/PHY reset. prepare_host touches only GCC/TCSR; it never pulses BCR
+ * or enables PIPE. Requires HOST_REQUIRED and exactly one ownership route.
+ * The direct route also requires NOC_READY at entry, as the old start does.
+ * The coordinated route allows the NoC resource service to run in between,
+ * matching fixed vendor pci-msm.c:msm_pcie_enable. The service itself is NOT
+ * implemented by these APIs; only its real owner may establish these flags.
+ */
+int giulia_pcie_power_prepare_host(struct giulia_pcie_power *,
+    const struct giulia_pcie_power_io *, uint32_t prerequisites);
+/* Requires the SAME original leases plus actual NOC_READY, including CPU
+ * access/data-path/QoS readiness, not just staged votes or a channel ACK.
+ * Missing conditions do no MMIO and leave HOST_PREPARED for cancel/retry.
+ * On a coordinated reset failure, retain clocks/snapshots in FAULT: the
+ * external resource service must finish withdrawal before power_stop.
+ * The legacy direct start retains its automatic rollback behavior.
+ */
+int giulia_pcie_power_finish_reset(struct giulia_pcie_power *, uint32_t prerequisites);
 /* QMP callbacks: enable after table programming, before SW_RESET/start.
  * disable after link/DMA quiescence + endpoint reset, before PHY SW_RESET /
  * START / POWER_DOWN, matching qmp_pcie_power_off. Other clocks stay enabled.

@@ -7,6 +7,8 @@
  * https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/regulator/rpmh-regulator.c
  * VRM indices 0=millivolts, 1=enable, 2=mode, 3=headroom. get_voltage and
  * is_enabled read software cache, not reconstructable remote per-DRV votes.
+ * rpmh_regulator_aggregate_requests max-aggregates each valid request field;
+ * a WLAN request must not overwrite another known per-DRV voltage/mode vote.
  */
 #include "giulia_wlan_rails.h"
 static const char *const resource[GIULIA_WLAN_RAIL_COUNT] = {
@@ -112,6 +114,9 @@ static int start(struct giulia_wlan_rails *p, struct giulia_rpmh *transport,
                  !(i < 2 && baseline[i].mode == 4)))
                 return GIULIA_WLAN_RAIL_BASELINE_UNKNOWN;
         }
+        for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++)
+            if (baseline[i].millivolts > millivolts[i])
+                return GIULIA_WLAN_RAIL_VOLTAGE_CONFLICT;
     }
     for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++) {
         r = giulia_rpmh_resolve_vrm(db, bytes, expected_version, resource[i], &p->address[i]);
@@ -122,13 +127,19 @@ static int start(struct giulia_wlan_rails *p, struct giulia_rpmh *transport,
     if ((r = own(p))) return r;
     p->transport = transport; p->policy = policy;
     p->mode_mask = mode_mask;
+    for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++) {
+        p->selected_mode[i] = dt_mode[i];
+        if (policy == GIULIA_WLAN_RESTORE_BASELINE && (mode_mask & (1u << i)) &&
+            baseline[i].mode > p->selected_mode[i])
+            p->selected_mode[i] = baseline[i].mode;
+    }
     p->attempted_mask = p->completed_mask = 0;
     p->error = p->cleanup_error = 0; p->state = GIULIA_WLAN_RAIL_FAULT;
     if (policy == GIULIA_WLAN_RESTORE_BASELINE)
         for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++) p->baseline[i] = baseline[i];
     for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++) {
         p->attempted_mask |= 1u << i; /* May have issued even if cleanup fails. */
-        r = vote(p, i, millivolts[i], 1, dt_mode[i]);
+        r = vote(p, i, millivolts[i], 1, p->selected_mode[i]);
         if (transport->completed) p->completed_mask |= 1u << i;
         if (r) {
             if (!transport->triggered) p->attempted_mask &= ~(1u << i);

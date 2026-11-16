@@ -425,6 +425,91 @@ static void inaccessible_mmio(void)
     restored(&m, &p);
 }
 
+static void staged_cesta(void)
+{
+    struct mock m;
+    struct giulia_pcie_power p;
+    struct giulia_pcie_power_io v;
+    const uint32_t flags = GIULIA_POWER_HOST_REQUIRED | GIULIA_POWER_CESTA_COORDINATED;
+    const uint32_t finish = flags | GIULIA_POWER_NOC_READY;
+    const uint32_t stop = GIULIA_POWER_STOP_REQUIRED | GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET;
+    unsigned prepared_writes, finish_writes, before;
+    init(&m); memset(&p, 0, sizeof(p)); v = io(&m);
+    assert(giulia_pcie_power_start(&p, &v, finish) == GIULIA_POWER_PREREQUISITE);
+    assert(!m.reads && !m.writes); /* The old API cannot bypass the split. */
+    assert(!giulia_pcie_power_prepare_host(&p, &v, flags));
+    assert(p.state == GIULIA_POWER_HOST_PREPARED && p.dirty);
+    assert((raw(&m,0,0x52008) & 0x7f) == 0x6f);
+    for (unsigned i = 0; i < m.writes; i++)
+        assert(m.events[i].off != 0x6b000 && m.events[i].off != 0x6c01c &&
+               !(m.events[i].off == 0x52008 && (m.events[i].value & BIT(4))));
+    prepared_writes = m.writes; before = m.reads;
+    assert(giulia_pcie_power_pipe_enable(&p) == GIULIA_POWER_STATE);
+    assert(giulia_pcie_power_finish_reset(&p, flags) == GIULIA_POWER_PREREQUISITE);
+    assert(giulia_pcie_power_finish_reset(&p, GIULIA_POWER_REQUIRED) == GIULIA_POWER_PREREQUISITE);
+    assert(giulia_pcie_power_finish_reset(&p, finish | GIULIA_POWER_DIRECT_VOTES) == GIULIA_POWER_PREREQUISITE);
+    for (unsigned i = 0; i < 10; i++) {
+        if (!(finish & BIT(i))) continue;
+        assert(giulia_pcie_power_finish_reset(&p, finish & ~BIT(i)) == GIULIA_POWER_PREREQUISITE);
+    }
+    assert(m.reads == before && m.writes == prepared_writes && p.state == GIULIA_POWER_HOST_PREPARED);
+    /* The platform resource service runs here, with host clocks still on.
+     * This fixture supplies a completed service contract, not hardware proof. */
+    assert(!giulia_pcie_power_finish_reset(&p, finish) && p.state == GIULIA_POWER_READY);
+    assert(event_at(&m,0x6b000,1,1,prepared_writes) >= prepared_writes);
+    finish_writes = m.writes - prepared_writes;
+    before = m.writes;
+    assert(giulia_pcie_power_stop(&p, GIULIA_POWER_STOP_REQUIRED) == GIULIA_POWER_PREREQUISITE);
+    assert(m.writes == before && p.state == GIULIA_POWER_READY);
+    assert(!giulia_pcie_power_pipe_enable(&p));
+    assert(!giulia_pcie_power_pipe_disable(&p));
+    assert(!giulia_pcie_power_stop(&p, stop)); restored(&m, &p);
+
+    /* Cancel before submitting a managed profile: no reset is pulsed. */
+    init(&m); memset(&p,0,sizeof(p)); v = io(&m);
+    assert(!giulia_pcie_power_prepare_host(&p,&v,flags));
+    assert(!giulia_pcie_power_stop(&p,stop)); restored(&m,&p);
+    for (unsigned i = 0; i < m.writes; i++)
+        assert(m.events[i].off != 0x6b000 && m.events[i].off != 0x6c01c);
+
+    /* Direct ownership still requires a ready NoC before host preparation. */
+    init(&m); memset(&p,0,sizeof(p)); v = io(&m);
+    assert(giulia_pcie_power_prepare_host(&p,&v,GIULIA_POWER_HOST_REQUIRED | GIULIA_POWER_DIRECT_VOTES)
+        == GIULIA_POWER_PREREQUISITE && !m.reads);
+    assert(!giulia_pcie_power_prepare_host(&p,&v,GIULIA_POWER_REQUIRED));
+    assert(!giulia_pcie_power_finish_reset(&p,GIULIA_POWER_REQUIRED));
+    assert(!giulia_pcie_power_stop(&p,GIULIA_POWER_STOP_REQUIRED)); restored(&m,&p);
+
+    /* Before the resource phase, ordinary prepare failures can still unwind. */
+    init(&m); memset(&p,0,sizeof(p)); v = io(&m); m.gdsc_stuck = BIT(0);
+    assert(giulia_pcie_power_prepare_host(&p,&v,flags) == GIULIA_POWER_TIMEOUT);
+    restored(&m,&p);
+
+    /* After that phase, reset failures must keep its GCC foundation alive. */
+    init(&m); memset(&p,0,sizeof(p)); v = io(&m);
+    assert(!giulia_pcie_power_prepare_host(&p,&v,flags));
+    m.blocked = 1; m.block_off = 0x6b000; m.block_mask = 1;
+    assert(giulia_pcie_power_finish_reset(&p,finish) == GIULIA_POWER_READBACK);
+    assert(p.state == GIULIA_POWER_FAULT && p.dirty && !p.cleanup_error);
+    assert((raw(&m,0,0x52008) & 0x7f) == 0x6f && !(raw(&m,0,0x5214c) & 9));
+    before = m.writes;
+    assert(giulia_pcie_power_stop(&p,GIULIA_POWER_STOP_REQUIRED) == GIULIA_POWER_PREREQUISITE);
+    assert(m.writes == before);
+    m.blocked = 0; assert(!giulia_pcie_power_stop(&p,stop)); restored(&m,&p);
+
+    for (unsigned nth = 1; nth <= finish_writes; nth++) {
+        init(&m); memset(&p,0,sizeof(p)); v = io(&m);
+        assert(!giulia_pcie_power_prepare_host(&p,&v,flags));
+        m.drop_at = m.writes + nth;
+        int rc = giulia_pcie_power_finish_reset(&p,finish);
+        assert(rc == 0 || rc == GIULIA_POWER_READBACK || rc == GIULIA_POWER_TIMEOUT);
+        if (rc) assert(p.state == GIULIA_POWER_FAULT && p.dirty);
+        m.drop_at = 0;
+        assert(!giulia_pcie_power_stop(&p,stop)); restored(&m,&p);
+    }
+    puts("SM8650 PCIe staged power: host clocks precede managed resources/reset; failure retains foundation");
+}
+
 int main(void)
 {
     lifecycle();
@@ -433,6 +518,7 @@ int main(void)
     timeouts();
     readback_and_retry();
     inaccessible_mmio();
+    staged_cesta();
     puts("SM8650 PCIe0 power/clock/reset tests passed");
     return 0;
 }

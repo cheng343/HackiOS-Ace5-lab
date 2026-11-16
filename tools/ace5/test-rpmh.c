@@ -18,6 +18,9 @@
 struct mock {
     uint32_t regs[0x2000 / 4], original[0x2000 / 4];
     uint32_t vote[7][3];
+#ifdef GIULIA_RPMH_CPU_NOC_TEST
+    uint32_t cpu_vote[2];
+#endif
     uint32_t command[32][3], count[32];
     uint32_t allones, drop, cleanup_block;
     unsigned reads, writes, barriers, elapsed, triggers, pending, hold_at;
@@ -51,9 +54,17 @@ static void execute(struct mock *m, int partial)
         if (!(mask & BIT(i))) continue;
         assert(get(m, MSG + i * 24) == 0x10108);
         addr = get(m, MSG + i * 24 + 4); value = get(m, MSG + i * 24 + 8);
-        assert(addr >= 0x40000 && addr <= 0x40068 && !(addr & 3u));
-        assert((addr & 15u) <= 8);
-        m->vote[(addr - 0x40000) / 16][(addr & 15u) / 4] = value;
+#ifdef GIULIA_RPMH_CPU_NOC_TEST
+        if (addr == 0x51000 || addr == 0x51004) {
+            assert(value == 0x60000001u); /* Binary ON only; never zero/disable. */
+            m->cpu_vote[(addr - 0x51000) / 4] = value;
+        } else
+#endif
+        {
+            assert(addr >= 0x40000 && addr <= 0x40068 && !(addr & 3u));
+            assert((addr & 15u) <= 8);
+            m->vote[(addr - 0x40000) / 16][(addr & 15u) / 4] = value;
+        }
         set(m, CSTATUS + i * 24, BIT(8) | (m->incomplete ? 0 : BIT(16)));
         if (partial && i + 1 == m->partial_words) return;
     }
@@ -312,7 +323,7 @@ static void mode_tests(void)
         assert(m.command[i][managed ? 2 : 1] == base+4);
         if (managed) {
             assert(m.command[i][1] == base+8);
-            assert(m.vote[i][2] == (i < 2 ? 7u : 3u));
+            assert(m.vote[i][2] == 7u); /* Preserve inherited S1C HPM, DT RET is only a lower request. */
         } else assert(m.vote[i][2] == 99);
     }
     assert(giulia_wlan_rails_stop(&p,1) == 0);
@@ -339,9 +350,47 @@ static void mode_tests(void)
     votes_restored(&m); restored(&m,&t);
     puts("Ace5 WLAN rails: DT modes, V-M-E ordering and partial mode compensation passed");
 }
+static void shared_votes(void)
+{
+    static const uint32_t wanted[7] = {1800,1200,940,976,916,1864,1316};
+    struct mock m; struct giulia_rpmh t; struct giulia_wlan_rails p;
+    struct giulia_wlan_rail_baseline b[7]; uint8_t db[1024];
+    unsigned flags = GIULIA_WLAN_RAIL_REQUIRED | GIULIA_WLAN_RAIL_MODE_WRITE_SAFE;
+    database(db);
+    for (unsigned i = 0; i < 7; i++) {
+        for (unsigned enabled = 0; enabled < 2; enabled++) {
+            baselines(b); setup(&m,&t); memset(&p,0,sizeof(p));
+            b[i].millivolts = wanted[i] + 1; b[i].enable = enabled;
+            assert(giulia_wlan_rails_start(&p,&t,db,sizeof(db),1,b,
+                GIULIA_WLAN_RAIL_REQUIRED,GIULIA_WLAN_RESTORE_BASELINE) == GIULIA_WLAN_RAIL_VOLTAGE_CONFLICT);
+            assert(!m.reads && !m.writes && !m.triggers && p.state == GIULIA_WLAN_RAIL_IDLE);
+        }
+    }
+    const uint32_t ldo_modes[] = {3,4,7}, smps_modes[] = {3,7};
+    for (unsigned ldo = 0; ldo < 3; ldo++) {
+        for (unsigned smps = 0; smps < 2; smps++) {
+            baselines(b); setup(&m,&t); memset(&p,0,sizeof(p));
+            for (unsigned i = 0; i < 7; i++) {
+                b[i].millivolts = wanted[i]; m.vote[i][0] = wanted[i];
+            }
+            b[0].known = b[1].known = b[6].known = 7;
+            b[0].mode = b[1].mode = ldo_modes[ldo]; b[6].mode = smps_modes[smps];
+            m.vote[0][2] = m.vote[1][2] = ldo_modes[ldo]; m.vote[6][2] = smps_modes[smps];
+            assert(!giulia_wlan_rails_start_with_dt_modes(&p,&t,db,sizeof(db),1,b,flags,GIULIA_WLAN_RESTORE_BASELINE));
+            assert(m.vote[0][2] == 7 && m.vote[1][2] == 7);
+            assert(m.vote[6][2] == smps_modes[smps] && p.selected_mode[6] == smps_modes[smps]);
+            for (unsigned i = 0; i < 7; i++) assert(m.vote[i][0] == wanted[i]);
+            assert(!giulia_wlan_rails_stop(&p,1));
+            for (unsigned i = 0; i < 7; i++) assert(m.vote[i][0] == wanted[i] && m.vote[i][1] == (i & 1u));
+            assert(m.vote[0][2] == ldo_modes[ldo] && m.vote[1][2] == ldo_modes[ldo] && m.vote[6][2] == smps_modes[smps]);
+            restored(&m,&t);
+        }
+    }
+    puts("Ace5 WLAN shared votes: voltage conflicts rejected before MMIO and prior HPM preserved");
+}
 int main(void)
 {
-    transport_tests(); db_tests(); rail_tests(); mode_tests(); forward_only_last();
+    transport_tests(); db_tests(); rail_tests(); mode_tests(); shared_votes(); forward_only_last();
     puts("SM8650 RPMh transport and WLAN rail vote tests passed");
     return 0;
 }

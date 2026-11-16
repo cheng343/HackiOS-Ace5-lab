@@ -30,6 +30,8 @@ def main():
         (drivers/'giulia_crm.c', root/'tools/ace5/test-crm.c'),
         (drivers/'giulia_crm.c', drivers/'giulia_bcm.c', root/'tools/ace5/test-crm-xnu.c'),
         (drivers/'giulia_crm.c', drivers/'giulia_bcm.c', root/'tools/ace5/test-bcm.c'),
+        (drivers/'giulia_crm.c', drivers/'giulia_bcm.c', drivers/'giulia_rpmh.c',
+         drivers/'giulia_wlan_rails.c', drivers/'giulia_pcie_cpu_noc.c', root/'tools/ace5/test-pcie-cpu-noc.c'),
         (drivers/'giulia_wifi_gpio.c', root/'tools/ace5/test-wifi-gpio.c'),
         (drivers/'giulia_rpmh.c', drivers/'giulia_wlan_rails.c', root/'tools/ace5/test-rpmh.c'),
         (drivers/'giulia_wifi_board.c', root/'tools/ace5/test-wifi-board.c'),
@@ -57,6 +59,9 @@ def main():
                     subprocess.run([str(exe), '--pdc-timeout', str(index)], check=True, timeout=30)
                 for index in (1, 9):
                     subprocess.run([str(exe), '--pdc-drift', str(index)], check=True, timeout=30)
+            if test.stem == 'test-pcie-cpu-noc':
+                for scenario in ('--timeout', '--cleanup', '--pretrigger'):
+                    subprocess.run([str(exe), scenario], check=True, timeout=30)
             if test.stem == 'test-crm':
                 for scenario in ('success', 'timeout', 'post-error', 'drift'):
                     subprocess.run([str(exe), '--empty-' + scenario], check=True, timeout=30)

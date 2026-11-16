@@ -20,6 +20,9 @@
  *   qcom_pcie_init_2_7_0 (host clocks before CORE BCR, 1 ms on both edges).
  * https://github.com/torvalds/linux/blob/v6.12/drivers/phy/qualcomm/phy-qcom-qmp-pcie.c
  *   qmp_pcie_init/power_on/power_off (200 us PHY BCR, separate PIPE phase).
+ * The split host/resource/reset ordering additionally follows fixed vendor:
+ * https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/pci/controller/pci-msm.c
+ *   msm_pcie_enable: vreg -> GDSC -> clocks -> CESTA -> core/PHY reset.
  * This is not a copy of Linux's clock framework. Restoration, ownership,
  * failure states and callback API are local implementation decisions. No
  * CESTA, sheng/SM8750, shared PLL, AOP, rail, NoC QoS or GPIO writes occur.
@@ -305,8 +308,19 @@ rchng_handoff_admit(struct giulia_pcie_power *p)
     return GIULIA_POWER_OK;
 }
 
+static int
+start_failed(struct giulia_pcie_power *p, int r, int restore_now)
+{
+    p->state = GIULIA_POWER_FAULT;
+    p->last_error = r;
+    p->cleanup_error = restore_now ? restore(p) : 0;
+    if (restore_now && !p->cleanup_error)
+        p->state = GIULIA_POWER_STOPPED;
+    return r;
+}
+
 int
-giulia_pcie_power_start(struct giulia_pcie_power *p,
+giulia_pcie_power_prepare_host(struct giulia_pcie_power *p,
     const struct giulia_pcie_power_io *io, uint32_t prerequisites)
 {
     unsigned i;
@@ -314,13 +328,18 @@ giulia_pcie_power_start(struct giulia_pcie_power *p,
     uint32_t value, aux_cmd, rch_cmd;
     if (!p || !io || !io->read32 || !io->write32 || !io->barrier || !io->delay_us)
         return GIULIA_POWER_ARGUMENT;
-    if ((prerequisites & GIULIA_POWER_REQUIRED) != GIULIA_POWER_REQUIRED)
+    uint32_t route = prerequisites & (GIULIA_POWER_DIRECT_VOTES | GIULIA_POWER_CESTA_COORDINATED);
+    if ((prerequisites & GIULIA_POWER_HOST_REQUIRED) != GIULIA_POWER_HOST_REQUIRED ||
+        (route != GIULIA_POWER_DIRECT_VOTES && route != GIULIA_POWER_CESTA_COORDINATED) ||
+        (route == GIULIA_POWER_DIRECT_VOTES && !(prerequisites & GIULIA_POWER_NOC_READY)))
         return GIULIA_POWER_PREREQUISITE;
     if (p->state != GIULIA_POWER_IDLE && p->state != GIULIA_POWER_STOPPED)
         return GIULIA_POWER_STATE;
     p->io = *io;
     p->dirty = 0;
     p->inherited_rchng = 0;
+    p->prerequisites = GIULIA_POWER_HOST_REQUIRED | route |
+        (prerequisites & GIULIA_POWER_RCHNG_HANDOFF);
     p->last_error = p->cleanup_error = 0;
     for (i = 0; i < GIULIA_POWER_SAVED_REGS; i++) {
         value = read_reg(p, i);
@@ -361,6 +380,25 @@ giulia_pcie_power_start(struct giulia_pcie_power *p,
     for (i = 0; i < 8; i++)
         if ((r = branch_on(p, &branches[i])))
             goto fail;
+    p->state = GIULIA_POWER_HOST_PREPARED;
+    return GIULIA_POWER_OK;
+fail:
+    /* No external managed profile has been submitted by this API. */
+    return start_failed(p, r, 1);
+}
+
+int
+giulia_pcie_power_finish_reset(struct giulia_pcie_power *p, uint32_t prerequisites)
+{
+    int r;
+    if (!p) return GIULIA_POWER_ARGUMENT;
+    if (p->state != GIULIA_POWER_HOST_PREPARED) return GIULIA_POWER_STATE;
+    uint32_t route = prerequisites & (GIULIA_POWER_DIRECT_VOTES | GIULIA_POWER_CESTA_COORDINATED);
+    uint32_t required = p->prerequisites | GIULIA_POWER_NOC_READY;
+    if ((prerequisites & required) != required ||
+        route != (p->prerequisites & (GIULIA_POWER_DIRECT_VOTES | GIULIA_POWER_CESTA_COORDINATED)))
+        return GIULIA_POWER_PREREQUISITE;
+    p->state = GIULIA_POWER_FAULT;
     if ((r = reset_pulse(p, CORE_RESET, 1000, 1000)) ||
         (r = reset_pulse(p, PHY_RESET, 200, 0)) ||
         (r = change(p, REF, B(0), B(0))))
@@ -371,11 +409,22 @@ giulia_pcie_power_start(struct giulia_pcie_power *p,
     p->state = GIULIA_POWER_READY;
     return GIULIA_POWER_OK;
 fail:
-    p->last_error = r;
-    p->cleanup_error = restore(p);
-    if (!p->cleanup_error)
-        p->state = GIULIA_POWER_STOPPED;
-    return r;
+    /* A managed profile may need host clocks to complete withdrawal. Never
+     * tear its foundation away just because a reset/ref write failed. */
+    return start_failed(p, r, !(p->prerequisites & GIULIA_POWER_CESTA_COORDINATED));
+}
+
+int
+giulia_pcie_power_start(struct giulia_pcie_power *p,
+    const struct giulia_pcie_power_io *io, uint32_t prerequisites)
+{
+    int r;
+    if (!p || !io || !io->read32 || !io->write32 || !io->barrier || !io->delay_us)
+        return GIULIA_POWER_ARGUMENT;
+    if ((prerequisites & GIULIA_POWER_REQUIRED) != GIULIA_POWER_REQUIRED ||
+        (prerequisites & GIULIA_POWER_CESTA_COORDINATED)) return GIULIA_POWER_PREREQUISITE;
+    r = giulia_pcie_power_prepare_host(p, io, prerequisites);
+    return r ? r : giulia_pcie_power_finish_reset(p, prerequisites);
 }
 
 int
@@ -425,8 +474,11 @@ giulia_pcie_power_stop(struct giulia_pcie_power *p, uint32_t conditions)
         return GIULIA_POWER_OK;
     if ((conditions & GIULIA_POWER_STOP_REQUIRED) != GIULIA_POWER_STOP_REQUIRED)
         return GIULIA_POWER_PREREQUISITE;
+    if ((p->prerequisites & GIULIA_POWER_CESTA_COORDINATED) &&
+        !(conditions & GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET))
+        return GIULIA_POWER_PREREQUISITE;
     if (p->state != GIULIA_POWER_READY && p->state != GIULIA_POWER_PIPE_ON &&
-        p->state != GIULIA_POWER_FAULT)
+        p->state != GIULIA_POWER_FAULT && p->state != GIULIA_POWER_HOST_PREPARED)
         return GIULIA_POWER_STATE;
     r = restore(p);
     p->cleanup_error = r;

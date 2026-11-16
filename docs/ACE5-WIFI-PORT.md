@@ -4,6 +4,29 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：共享电源与分阶段 PCIe 启动源码
+
+本轮保持手机在 Android，仅修改源码并在 GitHub 构建，不运行新硬件探针。
+
+- 七路 rail 的严格恢复策略会在任何 MMIO 前拒绝高于 WLAN 精确 min=max
+  请求的已知旧电压，避免覆盖共享请求；受管理模式按原厂 max 聚合规则
+  选取，已知的 S1C HPM=7 不再被 DT 初始 RET=3 降级。旧值必须是真实
+  per-DRV 请求基线，Android sysfs/PMIC 聚合电压仍不能替代它。
+- GCC 电源 core 新增 `prepare_host` / `finish_reset`，让调用者在
+  GDSC/主机时钟与 core/PHY 复位之间完成 CESTA 资源阶段。旧 direct
+  入口仍要求完整 NoC 已就绪；协调模式要求真正的 CESTA 所有者，结束复位
+  前还要有物理 NoC/QoS 就绪证明。协调模式复位失败时保留时钟基础，等
+  资源操作退出后才能恢复，不能因 CRM ACK 就强行继续。
+- 新增 `giulia_pcie_cpu_noc`，依据当前 CMD DB 解析 HLOS SH1/CN0，生成
+  X=0/Y=1 的二进制请求，按 VCD 排序，通过真实 RPMh core 等待两条
+  VALID+COMMIT 命令完成。它只提升 ACTIVE_ONLY 的 CPU 访问下限，显式
+  禁止进入低功耗，不写零撤票；部分超时保留 TCS，迟到 ACK 只观察不重发。
+  完成后保持共享下限至冷重启，不伪造原有 BCM 请求的恢复。
+
+这三项尚未做新的 XNU 真机验证；协调模式和 CPU-NoC core 均没有自动
+启动 hook。它们不代表完整 CESTA/七路供电服务已经绑定，也没有证明
+PCIe 链路、MHI 固件或扫描联网成功。
+
 ## 2026-11-16：实际 AOP WLAN PDC 下发入口
 
 带宽表的真机确认见本文后续记录；它尚未证明物理 NoC 就绪。本次将既有
