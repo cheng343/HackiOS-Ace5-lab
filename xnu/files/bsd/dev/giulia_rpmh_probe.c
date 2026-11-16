@@ -173,7 +173,7 @@ static void gr_dump_slots(void)
             uint32_t data = gr_mmio(&gr.rsc, off + 8u);
             uint32_t sts = gr_mmio(&gr.rsc, off + 12u);
             uint32_t resp = gr_mmio(&gr.rsc, off + 16u);
-            if (s == 0 && c == 0 && addr && !(addr & 3u)) gr_slot0_addr = addr;
+            if (s == 0 && c == 0 && (addr & 0xf0000u) == 0x50000u && !(addr & 3u)) gr_slot0_addr = addr;
             snprintf(line, sizeof(line),
                 "ace5-rpmh-read: pre-cmd slot=%u cmd=%u msgid=%#x addr=%#x data=%#x sts=%#x resp=%#x\n",
                 s, c, msgid, addr, data, sts, resp);
