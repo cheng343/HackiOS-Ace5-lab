@@ -4,6 +4,35 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：初始 PCIe 速率与资源配置一致
+
+发现此前 CRM 初始计划按 Gen1 性能级别（2）准备，而 link core 仍配置
+x2 宽度、保留复位后的最大速率和 Target Link Speed，没有限制 Gen2/3。
+这会让未来真实链路启动与已准备的资源配置不一致；此前尚未执行这一链路
+入口，所以这是源码缺陷，不能把它当作已观测到的真机故障根因。
+
+新增共享 `giulia_pcie_profile.h`，初始流程固定 Gen1 x1。link core 在
+LTSSM 开启前设置最大速率、Target Link Speed 和三处宽度控制；冷启动不
+再触发 Directed Speed Change。Link Control 2 用 16 位访问，保留相邻
+状态寄存器，并加入快照和失败后恢复。PCIe v1 或越界能力结构在 core 写入
+前拒绝。PHY 仍使用既有 Gen3x2 硬件初始化表，链路限制不等于修改 PHY 表。
+
+DLLLA 出现后先核对实际速率和宽度，再配置 CFG0/iATU；不接受零值、Gen2/3
+或 x2。每次 endpoint config 访问及 CPU MEM 启用也检查当前协商状态。
+异步链路变化仍可能发生在检查与访问之间，这不是对外部直接 BAR 访问的
+自动保护。高性能档后续需要独立的资源/时钟完成流程，目前不自动升速。
+
+另核对固定原厂 `pineapple-pcie.dtsi` 和上次保存的本机 DT：
+`qcom,pcie-clkreq-offset = <0x2c48>` 属于 PCIe1（`1c08000`），Wi-Fi
+PCIe0（`1c00000`）没有此属性。原厂仅在属性存在时调用 PARF CESTA 路由
+配置，故不能把 PCIe1 的写法复制到 PCIe0，也不能据属性缺失认定 CESTA
+未参与。先前关于“必须给 PCIe0 补该路由”的推测在此更正。
+
+依据：[Linux v6.12 DesignWare 速率/宽度配置](https://github.com/torvalds/linux/blob/v6.12/drivers/pci/controller/dwc/pcie-designware.c)，
+[固定 OnePlus 设备树](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8650/blob/453d8875f815bf9dfad9035982861226a4823a6c/kernel_platform/qcom/proprietary/devicetree/qcom/pineapple-pcie.dtsi)。
+本轮只有源码与云端验证，不操作手机。真实七路基线、NoC/CESTA 就绪服务
+和后续供电/链路组合绑定仍未完成；Wi-Fi 尚不能扫描或联网。
+
 ## 2026-11-16：供电到主机时钟的组合流程
 
 新增 `giulia_wifi_supply`，将已有生产 core 按单一所有者接成：

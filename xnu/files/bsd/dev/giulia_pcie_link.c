@@ -7,6 +7,8 @@
  *   qcom_pcie_link_up; SM8650 -> SM8550 -> ops_1_9_0.
  * pcie-designware.c: dw_pcie_setup, dw_pcie_link_set_max_link_width,
  *   dw_pcie_prog_outbound_atu; pcie-designware-host.c: dw_pcie_setup_rc.
+ *   dw_pcie_link_set_max_speed/max_link_width and uapi/linux/pci_regs.h:
+ *   link capability, target speed and negotiated status fields.
  * arch/arm64/boot/dts/qcom/sm8650.dtsi: PCIe0 PA/ranges, x2 controller.
  * https://github.com/torvalds/linux/tree/v6.12/drivers/pci/controller/dwc
  * This independently implemented probe deliberately omits Linux's DMA,
@@ -57,6 +59,7 @@
 #define LNKCTL 0x10u
 #define LNKSTA 0x12u
 #define SLTCAP 0x14u
+#define LNKCTL2 0x30u
 #define DLLLA BIT(13)
 
 static uint32_t r32(struct giulia_pcie_link *s, unsigned r, uint32_t o)
@@ -104,11 +107,17 @@ static int link_up(struct giulia_pcie_link *s)
     return v != 0xffffu && (v & DLLLA) != 0;
 }
 
+static int profile_matches(struct giulia_pcie_link *s)
+{
+    return (s->link_status & 0x0fu) == GIULIA_PCIE_BOOT_SPEED &&
+        ((s->link_status >> 4) & 0x3fu) == GIULIA_PCIE_BOOT_LANES;
+}
+
 /* Each endpoint transaction is guarded. Like Linux's map_bus check this
  * cannot prevent an asynchronous link-down SError between check and access.
  */
 static int cfg_ok(struct giulia_pcie_link *s)
-{ return s->config_atu_enabled && link_up(s); }
+{ return s->config_atu_enabled && link_up(s) && profile_matches(s); }
 static int cr32(struct giulia_pcie_link *s, uint32_t o, uint32_t *v)
 {
     if (!cfg_ok(s)) return 0;
@@ -226,7 +235,8 @@ static int snapshot_core(struct giulia_pcie_link *s)
         !save(s, GIULIA_LINK_DBI, PCI_CLASS, 2) ||
         !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCAP, 4) ||
         !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + SLTCAP, 4) ||
-        !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCTL, 2)) return 0;
+        !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCTL, 2) ||
+        !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCTL2, 2)) return 0;
     for (unsigned n = 0; n < 2; n++)
         for (unsigned i = 0; i < sizeof(atu) / sizeof(atu[0]); i++)
             if (!save(s, GIULIA_LINK_ATU, n * 0x200u + atu[i], 4)) return 0;
@@ -360,6 +370,13 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags,
         return reject_after_parf(s, GIULIA_LINK_ENDPOINT);
     if (!capabilities(s, GIULIA_LINK_DBI, &s->root_pcie_cap,
         &unused_msi, &unused_msix)) return reject_after_parf(s, GIULIA_LINK_CAPABILITY);
+    /* Link Control 2 exists in v2+ and must fit conventional config space.
+     * Reject before any core write; do not reinterpret a v1/short capability. */
+    if (s->root_pcie_cap > 0xccu)
+        return reject_after_parf(s, GIULIA_LINK_CAPABILITY);
+    v = r16(s, GIULIA_LINK_DBI, s->root_pcie_cap + 2u);
+    if (v == 0xffffu) return reject_after_parf(s, GIULIA_LINK_READBACK);
+    if ((v & 0xfu) < 2u) return reject_after_parf(s, GIULIA_LINK_CAPABILITY);
     if (link_up(s)) return reject_after_parf(s, GIULIA_LINK_BUSY);
     if (s->link_status == 0xffffu) return reject_after_parf(s, GIULIA_LINK_READBACK);
     v = r16(s, GIULIA_LINK_DBI, PCI_COMMAND);
@@ -397,9 +414,14 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags,
     if (!change16(s, GIULIA_LINK_DBI, PCI_COMMAND, 7u, BIT(10)) ||
         !put16(s, GIULIA_LINK_DBI, PCI_CLASS, 0x0604u))
         return fail(s, GIULIA_LINK_READBACK);
-    DCHANGE(DBI_LINK, (0x3fu << 16) | BIT(7), (3u << 16) | BIT(5), 0xffffffffu);
-    DCHANGE(DBI_WIDTH, 0x1fu << 8, (2u << 8) | BIT(17), ~BIT(17));
-    DCHANGE(s->root_pcie_cap + LNKCAP, 0x3fu << 4, 2u << 4, 0xffffffffu);
+    /* A fixed Gen1 x1 budget must not inherit a Gen2/3 target or x2 width.
+     * Program cold controls only; bit17 is an action, not saved configuration. */
+    DCHANGE(DBI_LINK, (0x3fu << 16) | BIT(7), (1u << 16) | BIT(5), 0xffffffffu);
+    DCHANGE(DBI_WIDTH, (0x1fu << 8) | BIT(17), GIULIA_PCIE_BOOT_LANES << 8, ~BIT(17));
+    DCHANGE(s->root_pcie_cap + LNKCAP, 0x3ffu,
+        (GIULIA_PCIE_BOOT_LANES << 4) | GIULIA_PCIE_BOOT_SPEED, 0xffffffffu);
+    if (!change16(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCTL2,
+            0x0fu, GIULIA_PCIE_BOOT_SPEED)) return fail(s, GIULIA_LINK_READBACK);
     DCHANGE(s->root_pcie_cap + SLTCAP, BIT(6), 0, 0xffffffffu);
     if (!change16(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCTL, 3u, 0))
         return fail(s, GIULIA_LINK_READBACK);
@@ -500,6 +522,7 @@ int giulia_pcie_link_train(struct giulia_pcie_link *s, uint32_t flags)
     s->debug0 = r32(s, GIULIA_LINK_DBI, DBI_DEBUG0);
     s->debug1 = r32(s, GIULIA_LINK_DBI, DBI_DEBUG1);
     if (s->polls > 1000u) return fail(s, GIULIA_LINK_TIMEOUT);
+    if (!profile_matches(s)) return fail(s, GIULIA_LINK_PROFILE);
     s->stage = GIULIA_LINK_STAGE_CONFIG_ATU;
     s->atu_touched = 1;
     if (!program_atu(s, 0, GIULIA_PCIE_LINK_CFG_PA, 0x01000000u,
@@ -570,6 +593,7 @@ static int memory_guard(struct giulia_pcie_link *s, int enabling,
     if (!config_window_matches(s)) return GIULIA_LINK_READBACK;
     if (!link_up(s)) return s->link_status == 0xffffu ?
         GIULIA_LINK_READBACK : GIULIA_LINK_DOWN;
+    if (!profile_matches(s)) return GIULIA_LINK_PROFILE;
     *root_command = r16(s, GIULIA_LINK_DBI, PCI_COMMAND);
     if (*root_command == 0xffffu || !cr16(s, PCI_COMMAND, endpoint_command))
         return GIULIA_LINK_READBACK;

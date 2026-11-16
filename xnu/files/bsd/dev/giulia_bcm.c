@@ -6,6 +6,7 @@
  * Raw firmware/DT/SDK data is not embedded here. No Linux source copied.
  */
 #include "giulia_bcm.h"
+#include "giulia_pcie_profile.h"
 static uint32_t le16(const uint8_t *p) { return p[0]|(uint32_t)p[1]<<8; }
 static uint32_t le32(const uint8_t *p) { return le16(p)|le16(p+2)<<16; }
 int giulia_bcm_resolve(const uint8_t *db,uint32_t bytes,uint32_t version,
@@ -78,8 +79,8 @@ int giulia_bcm_pcie0_plan(const uint8_t *db,uint32_t bytes,uint32_t version,
     *out=plan;
     uint64_t avg=policy==GIULIA_BCM_PCIE0_FIXED_500_800 ? 500 : 250000;
     uint64_t peak=policy==GIULIA_BCM_PCIE0_FIXED_500_800 ? 800 : 0;
-    plan.patch[0]=(struct giulia_crm_patch){0,0,0,7,2};
-    plan.patch[1]=(struct giulia_crm_patch){0,1,0,7,2};
+    plan.patch[0]=(struct giulia_crm_patch){0,0,0,7,GIULIA_PCIE_BOOT_PERF};
+    plan.patch[1]=(struct giulia_crm_patch){0,1,0,7,GIULIA_PCIE_BOOT_PERF};
     for (unsigned i=0;i<5;i++) {
         if ((rc=giulia_bcm_resolve(db,bytes,version,names[i],&plan.resource[i])) ||
             (rc=giulia_bcm_encode(&plan.resource[i],avg,peak,width[i],channels[i],i==2 || i==4,&plan.vote[i])))

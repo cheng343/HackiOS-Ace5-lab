@@ -3,6 +3,7 @@
 #define GIULIA_PCIE_LINK_H
 
 #include <stdint.h>
+#include "giulia_pcie_profile.h"
 
 /* SM8650 PCIe0, one directly attached WCN7850 at 01:00.0. The caller owns
  * mapping, power, NoC votes, PHY and PERST#. This core never enables DMA,
@@ -26,7 +27,7 @@ enum giulia_pcie_link_result {
     GIULIA_LINK_BUSY = -4, GIULIA_LINK_CAPABILITY = -5,
     GIULIA_LINK_READBACK = -6, GIULIA_LINK_TIMEOUT = -7,
     GIULIA_LINK_ENDPOINT = -8, GIULIA_LINK_BAR = -9,
-    GIULIA_LINK_DOWN = -10
+    GIULIA_LINK_DOWN = -10, GIULIA_LINK_PROFILE = -11
 };
 enum giulia_pcie_link_state {
     GIULIA_LINK_IDLE, GIULIA_LINK_PREPARED, GIULIA_LINK_READY,
@@ -110,10 +111,17 @@ struct giulia_pcie_link {
  */
 int giulia_pcie_link_prepare(struct giulia_pcie_link *, uint32_t prerequisites,
     const struct giulia_pcie_link_io *);
-/* After PHY init and the documented PERST# timing, train for at most 1 second
+/* prepare fixes both target/max speed and all RC width controls to Gen1 x1,
+ * matching the initial CRM resource profile. It requires a PCIe v2 root
+ * capability with Link Control 2 in bounds. The x2 PHY can remain initialized;
+ * the RC negotiates one lane. It does not request a later speed transition.
+ * After PHY init and the documented PERST# timing, train for at most 1 second
  * and map CFG0. Endpoint ID, capability list, MSI disable, BAR size and assigned
  * address are read back. MEM iATU region 1 is prepared, but endpoint IO/MEM/BME
  * and root IO/BME remain disabled. READY therefore does not mean Wi-Fi works.
+ * A negotiated speed/width outside this profile (including zero) is rejected
+ * before opening CFG0. Each later endpoint transaction checks the profile too;
+ * this does not remove the asynchronous-change race or guard raw caller BARs.
  * A failed operation keeps mappings/resources owned in FAULT; reset endpoint
  * then call stop. Configuration accesses can still SError on a physical link
  * loss between the link check and transaction; software cannot eliminate it.
