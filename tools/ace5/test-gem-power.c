@@ -67,11 +67,11 @@ static struct giulia_gem_clock_io prepare(struct board *b,struct giulia_rpmh *t,
         .delay_us=gd,.validate_lease=platform,.gcc_phys=0x100000,.gcc_size=0x1f4200};
 }
 static void check_stop(struct board *b,struct giulia_rpmh *t,struct giulia_gem_power *p,
-    const struct giulia_gem_power_baseline *baseline)
+    const struct giulia_gem_power_baseline *baseline,uint32_t expected_cfg)
 {
     assert(!giulia_gem_power_stop(p));
     assert(p->state==GIULIA_GEM_POWER_STOPPED && !p->owned && !p->dirty && !p->pending);
-    assert(!(b->cmd&BIT(1)) && b->cfg==0x100001);
+    assert(!(b->cmd&BIT(1)) && b->cfg==expected_cfg);
     for (unsigned i=0;i<2;i++) assert(b->rsc.arc_vote[i]==baseline->selector[i]);
     if (t->state==GIULIA_RPMH_IDLE) {
         /* Borrowed sufficient requests never acquire or touch the TCS. */
@@ -116,8 +116,9 @@ static void flow(void)
 {
     struct board b; struct giulia_rpmh t; struct giulia_gem_power p;
     uint8_t db[1024]; arc_database(db);
-    for (unsigned prior=0;prior<3;prior++) {
+    for (unsigned hid=0;hid<2;hid++) for (unsigned prior=0;prior<3;prior++) {
         struct giulia_gem_clock_io io=prepare(&b,&t,&p);
+        b.cfg=0x100000u|hid;
         struct giulia_gem_power_lease l={&b,platform};
         struct giulia_gem_power_baseline base={{prior ? 3u:0u,prior==2 ? 4u:0u},3};
         memcpy(b.rsc.arc_vote,base.selector,sizeof(base.selector));
@@ -131,7 +132,7 @@ static void flow(void)
             .phys={0x100000,0x16c0000,0x24100000},.size={0x1f4200,0x12200,0xc5080}};
         assert(!giulia_pcie_qos_start(&q,&qi,GIULIA_QOS_REQUIRED));
         assert(!giulia_pcie_qos_stop(&q)); assert(!b.qos[0] && !b.qos[1] && !b.qos[2]);
-        check_stop(&b,&t,&p,&base);
+        check_stop(&b,&t,&p,&base,0x100000u|hid);
         if (!prior) {
             assert(b.rsc.triggers==4);
             const uint32_t addresses[]={0x31000,0x31010,0x31010,0x31000};
@@ -159,7 +160,7 @@ static void failures(void)
         assert(p.pending && p.owned && p.state==GIULIA_GEM_POWER_FAULT);
         unsigned triggers=b.rsc.triggers;
         assert(giulia_gem_power_stop(&p)==GIULIA_RPMH_TIMEOUT && b.rsc.triggers==triggers);
-        b.rsc.hold_at=0; check_stop(&b,&t,&p,&base);
+        b.rsc.hold_at=0; check_stop(&b,&t,&p,&base,0x100001);
         assert(b.rsc.triggers==(stage==1 ? 2u:4u));
     }
     for (unsigned mode=0;mode<5;mode++) {
@@ -173,7 +174,7 @@ static void failures(void)
         assert(giulia_gem_power_start(&p,&t,&l,&io,db,sizeof(db),9,&base)<0);
         if (mode==0 || mode==4) assert(!b.rsc.writes && !b.gcc_writes);
         b.rsc.drop=b.rsc.cleanup_block=b.fail_lease=0; base.known=3;
-        if (p.state!=GIULIA_GEM_POWER_IDLE) check_stop(&b,&t,&p,&base);
+        if (p.state!=GIULIA_GEM_POWER_IDLE) check_stop(&b,&t,&p,&base,0x100001);
     }
     puts("Ace5 GEM power: four transaction timeouts never resend; failed clock/cleanup retains dependencies passed");
 }

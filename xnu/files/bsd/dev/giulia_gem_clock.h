@@ -4,7 +4,8 @@
 #include <stdint.h>
 
 /* The GEM QoS provider consumes GCC_CPUSS_UBWCP_CLK_SRC, not its branch.
- * This narrow lease supports only an inherited, committed XO/div1 config.
+ * This narrow lease supports only an inherited, committed XO/div1 config
+ * (HID=0 bypass or HID=1 divide-by-one), preserving the exact encoding.
  * No PLL, CFG, UPDATE, branch, RPMh or firmware writes are made here. */
 #define GIULIA_GEM_GCC_PHYS 0x100000u
 #define GIULIA_GEM_GCC_SIZE 0x1f4200u

@@ -12,8 +12,8 @@
 #define FORCE BIT(1)
 #define OFF BIT(31)
 #define PENDING (BIT(0)|BIT(4)|BIT(5)|BIT(6)|BIT(7))
-#define CFG_FIELDS (0x1fu|0x700u|0x3000u|BIT(20))
-#define XO_CFG (BIT(20)|1u)
+#define HID_MASK 0x1fu
+#define CFG_FIELDS (HID_MASK|0x700u|0x3000u|BIT(20))
 static uintptr_t gem_owner;
 
 static int owner(const struct giulia_gem_clock *p)
@@ -40,7 +40,14 @@ static int stable(struct giulia_gem_clock *p,uint32_t *cmd)
     if (rc) return rc;
     if (*cmd&PENDING) return GIULIA_GEM_BUSY;
     if ((rc=read_reg(p,CFG,&cfg))) return rc;
-    if ((cfg&CFG_FIELDS)!=XO_CFG) return GIULIA_GEM_CONFIG;
+    /* The bootloader leaves HID=0 (bypass), while Android programs HID=1.
+     * Vendor clk-rcg2.c:calc_rate leaves parent_rate unchanged for HID=0;
+     * HID=1 also gives parent_rate * 2 / (1+1). Both are XO/div1.
+     * Accept either inherited encoding without writing/normalizing CFG.
+     * Parent, M/N mode and HW control must still match; full saved-CFG
+     * comparison below detects even a later switch between these encodings. */
+    if ((cfg&(CFG_FIELDS&~HID_MASK))!=BIT(20) || (cfg&HID_MASK)>1u)
+        return GIULIA_GEM_CONFIG;
     if (p->valid && cfg!=p->saved_cfg) return GIULIA_GEM_CONFIG;
     return 0;
 }

@@ -4,6 +4,30 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：真机交接发现 GEM XO 旁路编码不匹配
+
+对代码 `6a7e203` 进行了 60 秒 XNU 只读探测，随后确认 Android 启动完成。
+本轮没有启动无线电、投电源请求或执行 QoS/PCIe 写入。XNU 成功读取当前
+CMD DB，XO ON 为 selector 3，CX 等级 64 为 selector 2，与先前 Android
+解析一致；这些值仍不代表原始 per-DRV 请求。
+
+发现 GEM SRC 的交接状态 CMD=`0`、CFG=`0x00100000`，与 Android 采集到
+的 CFG=`0x00100001` 不同。旧 clock core 仅接受后一种，因而会拒绝这台
+手机实际继承的配置。原厂 `clk-rcg2.c:calc_rate()` 明确将 HID=0 视为
+旁路，HID=1 则为 `parent_rate * 2 / (1+1)`；两者都保持 XO 父频率。
+
+修正为接受这两种已提交的 XO/HW-control 配置，并原样保留 CFG，不为
+统一编码写 CFG 或触发 UPDATE。其他父时钟、M/N 模式、HID>=2、缺失
+HW-control 或未完成 UPDATE 仍被拒绝。持有期间即使从 HID=0 变为
+等频率的 HID=1，也按外部配置漂移处理，不能静默接管。
+
+新增云端回归覆盖 HID 全部 32 种编码、继承 ROOT_EN、等频率配置漂移，
+以及两种合法编码下真实 ARC/RPMh/clock/QoS core 的组合。此次真机结果
+验证的是只读探测与输入条件；修复后的时钟写入和 Wi-Fi 联网尚未实测。
+原始电源请求、共享资源所有权和完整供电/PCIe 启动接线仍待完成。
+
+依据：[固定原厂 RCG2 频率计算](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/clk/qcom/clk-rcg2.c#L289)。
+
 ## 2026-11-16：ARC 电源等级与 GEM 电源/时钟衔接
 
 通过 Android 内核的只读 CMD DB 调试接口确认，CX 的 consumer 等级

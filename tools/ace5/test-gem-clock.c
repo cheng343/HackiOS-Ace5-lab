@@ -10,7 +10,7 @@
 #define FORCE BIT(1)
 #define OFF BIT(31)
 struct fake {
-    uint32_t cmd,cfg,q[3];
+    uint32_t cmd,cfg,initial_cfg,q[3];
     unsigned reads,writes,leases,delays,barriers,fail_read,fail_write,fail_lease;
     unsigned ones_read,drop_write,committed_error,persistent,stuck_off;
     unsigned ready_after,q_reads,q_writes,q_fail_write;
@@ -50,7 +50,8 @@ static int lease(void *cookie)
 static struct giulia_gem_clock_io init(struct fake *f,struct giulia_gem_clock *p)
 {
     memset(f,0,sizeof(*f)); memset(p,0,sizeof(*p));
-    f->cmd=OFF|BIT(12); f->cfg=0x00100001; f->parent_voltage_ok=1; f->clock=p;
+    f->cmd=OFF|BIT(12); f->cfg=f->initial_cfg=0x00100001;
+    f->parent_voltage_ok=1; f->clock=p;
     return (struct giulia_gem_clock_io){.cookie=f,.read32=rd,.write32=wr,.barrier=barrier,
         .delay_us=delay,.validate_lease=lease,.gcc_phys=0x100000,.gcc_size=0x1f4200};
 }
@@ -62,7 +63,7 @@ static void clear_failures(struct fake *f)
 static void stopped(struct fake *f,struct giulia_gem_clock *p,uint32_t force)
 {
     assert(p->state==GIULIA_GEM_STOPPED && !p->owned && !p->dirty);
-    assert((f->cmd&FORCE)==force && (f->cmd&BIT(12)) && f->cfg==0x00100001);
+    assert((f->cmd&FORCE)==force && (f->cmd&BIT(12)) && f->cfg==f->initial_cfg);
     assert(f->barriers==f->writes);
 }
 static void admission(void)
@@ -80,7 +81,8 @@ static void admission(void)
         f.cmd|=BIT(b); assert(giulia_gem_clock_start(&p,&io)==GIULIA_GEM_BUSY);
         assert(!f.writes); f.cmd&=~BIT(b);
     }
-    const uint32_t badcfg[]={0x00100601,0x00100003,0x00101001,0x00000001,UINT32_MAX};
+    const uint32_t badcfg[]={0x00100601,0x00100003,0x00101001,0x00000001,
+        0x00100600,0x00101000,0x00000000,UINT32_MAX};
     for (unsigned i=0;i<sizeof(badcfg)/sizeof(badcfg[0]);i++) {
         f.cfg=badcfg[i]; assert(giulia_gem_clock_start(&p,&io)<0); assert(!f.writes);
     }
@@ -110,6 +112,38 @@ static void success(void)
     assert(giulia_gem_clock_start(&p,&io)==GIULIA_GEM_TIMEOUT);
     assert(f.delays==500); stopped(&f,&p,0);
     puts("GEM XO force lease/borrowed vote/bounded hardware timeout: PASS");
+}
+static void inherited_xo(void)
+{
+    struct fake f; struct giulia_gem_clock p;
+    for (unsigned hid=0;hid<32;hid++) for (unsigned inherited=0;inherited<2;inherited++) {
+        struct giulia_gem_clock_io io=init(&f,&p);
+        f.cfg=f.initial_cfg=0x100000u|hid;
+        f.cmd|=inherited ? FORCE:0;
+        int rc=giulia_gem_clock_start(&p,&io);
+        if (hid>1) {
+            assert(rc==GIULIA_GEM_CONFIG && !f.writes);
+            assert(p.state==GIULIA_GEM_STOPPED && !p.owned);
+            continue;
+        }
+        assert(!rc && p.saved_cfg==f.initial_cfg);
+        assert(!giulia_gem_clock_check(&p));
+        unsigned writes=f.writes;
+        /* Equal rates do not grant permission to ignore a foreign writer. */
+        f.cfg^=1u;
+        assert(giulia_gem_clock_check(&p)==GIULIA_GEM_CONFIG);
+        assert(p.state==GIULIA_GEM_FAULT && p.owned && f.writes==writes);
+        if (!inherited) {
+            assert(giulia_gem_clock_stop(&p)==GIULIA_GEM_CONFIG);
+            assert(p.owned && p.dirty && f.writes==writes);
+        }
+        f.cfg=f.initial_cfg; /* External owner restores the exact baseline. */
+        assert(!giulia_gem_clock_check(&p));
+        assert(!giulia_gem_clock_stop(&p));
+        stopped(&f,&p,inherited ? FORCE:0);
+        assert(f.writes==(inherited ? 0u:2u));
+    }
+    puts("GEM inherited XO HID0/HID1 preserved; divided rates and equivalent-rate drift rejected: PASS");
 }
 static void fault_matrix(void)
 {
@@ -165,8 +199,9 @@ static int qwrite(void *cookie,unsigned b,uint32_t off,uint32_t v)
 static void composition(void)
 {
     struct fake f; struct giulia_gem_clock p; struct giulia_pcie_qos q;
-    for (unsigned fail=0;fail<3;fail++) {
+    for (unsigned hid=0;hid<2;hid++) for (unsigned fail=0;fail<3;fail++) {
         struct giulia_gem_clock_io io=init(&f,&p); memset(&q,0,sizeof(q));
+        f.cfg=f.initial_cfg=0x100000u|hid;
         struct giulia_pcie_qos_io qi={.cookie=&f,.read32=qread,.write32=qwrite,
             .barrier=barrier,.validate_lease=qlease,.phys={0x100000,0x16c0000,0x24100000},
             .size={0x1f4200,0x12200,0xc5080}};
@@ -196,4 +231,4 @@ static void composition(void)
     puts("GEM clock + QoS actual-core ordering/dependency-loss: PASS");
 }
 int main(void)
-{ admission(); success(); fault_matrix(); composition(); return 0; }
+{ admission(); success(); inherited_xo(); fault_matrix(); composition(); return 0; }
