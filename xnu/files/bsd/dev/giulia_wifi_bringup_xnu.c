@@ -248,8 +248,13 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     cfg.supply.db_version = wb.db_version;
     cfg.supply.pdc_table = wb.pdc_table;
     cfg.supply.pdc_bytes = sizeof(wb.pdc_table);
+    uint32_t votes0 = wb_pwr_r(0, GIULIA_POWER_GCC, 0x52000);
+    uint32_t votes1 = wb_pwr_r(0, GIULIA_POWER_GCC, 0x52008);
+    uint32_t core_gdsc = wb_pwr_r(0, GIULIA_POWER_GCC, 0x6b004);
+    uint32_t phy_gdsc = wb_pwr_r(0, GIULIA_POWER_GCC, 0x6c000);
     cfg.supply.rail_baseline = unk_rails;
-    cfg.supply.conditions = GIULIA_SUPPLY_REQUIRED;
+    cfg.supply.conditions = GIULIA_SUPPLY_REQUIRED |
+        ((votes0 & (1u << 22)) ? GIULIA_SUPPLY_RCHNG_HANDOFF : 0);
     cfg.supply.aop_policy = GIULIA_AOP_OPEN_ON_INHERITED_LINK;
     cfg.supply.pdc_policy = GIULIA_WLAN_PDC_KEEP_TABLE;
     cfg.supply.rail_policy = GIULIA_WLAN_KEEP_VOTES;
@@ -271,6 +276,8 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         wb.bringup.supply.retained,
         wb.bringup.supply.pdc.state, wb.bringup.supply.pdc.delivered,
         wb.bringup.supply.rails.state, wb.bringup.supply.rails.completed_mask);
+    wb_log("ace5-wifi-bringup: gcc votes0=%#x votes1=%#x core_gdsc=%#x phy_gdsc=%#x\n",
+        votes0, votes1, core_gdsc, phy_gdsc);
     wb_log("ace5-wifi-bringup: root=%#x ep=%#x link_sts=%#x bar0=%#x/%#x\n",
         wb.bringup.link.root_id, wb.bringup.link.endpoint_id,
         wb.bringup.link.link_status, wb.bringup.link.bar0_mask, wb.bringup.link.bar0_mask_hi);
