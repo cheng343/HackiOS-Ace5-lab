@@ -439,6 +439,7 @@ static void staged_cesta(void)
     assert(!m.reads && !m.writes); /* The old API cannot bypass the split. */
     assert(!giulia_pcie_power_prepare_host(&p, &v, flags));
     assert(p.state == GIULIA_POWER_HOST_PREPARED && p.dirty);
+    assert(!p.reset_attempted);
     assert((raw(&m,0,0x52008) & 0x7f) == 0x6f);
     for (unsigned i = 0; i < m.writes; i++)
         assert(m.events[i].off != 0x6b000 && m.events[i].off != 0x6c01c &&
@@ -453,9 +454,11 @@ static void staged_cesta(void)
         assert(giulia_pcie_power_finish_reset(&p, finish & ~BIT(i)) == GIULIA_POWER_PREREQUISITE);
     }
     assert(m.reads == before && m.writes == prepared_writes && p.state == GIULIA_POWER_HOST_PREPARED);
+    assert(!p.reset_attempted);
     /* The platform resource service runs here, with host clocks still on.
      * This fixture supplies a completed service contract, not hardware proof. */
     assert(!giulia_pcie_power_finish_reset(&p, finish) && p.state == GIULIA_POWER_READY);
+    assert(p.reset_attempted);
     assert(event_at(&m,0x6b000,1,1,prepared_writes) >= prepared_writes);
     finish_writes = m.writes - prepared_writes;
     before = m.writes;
@@ -491,6 +494,7 @@ static void staged_cesta(void)
     m.blocked = 1; m.block_off = 0x6b000; m.block_mask = 1;
     assert(giulia_pcie_power_finish_reset(&p,finish) == GIULIA_POWER_READBACK);
     assert(p.state == GIULIA_POWER_FAULT && p.dirty && !p.cleanup_error);
+    assert(p.reset_attempted);
     assert((raw(&m,0,0x52008) & 0x7f) == 0x6f && !(raw(&m,0,0x5214c) & 9));
     before = m.writes;
     assert(giulia_pcie_power_stop(&p,GIULIA_POWER_STOP_REQUIRED) == GIULIA_POWER_PREREQUISITE);

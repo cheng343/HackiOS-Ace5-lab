@@ -314,6 +314,9 @@ static void mode_tests(void)
     assert(giulia_wlan_rails_start_with_dt_modes(&p,&t,db,sizeof(db),1,b,flags,0)
         == GIULIA_WLAN_RAIL_BASELINE_UNKNOWN);
     assert(!m.reads && !m.writes); b[6].mode = 7;
+    assert(!giulia_wlan_rails_check(db,sizeof(db),1,b,flags,GIULIA_WLAN_RESTORE_BASELINE,1));
+    assert(giulia_wlan_rails_check(db,sizeof(db),1,b,flags,GIULIA_WLAN_RESTORE_BASELINE,2)==GIULIA_RPMH_ARGUMENT);
+    assert(!m.reads && !m.writes);
     assert(giulia_wlan_rails_start_with_dt_modes(&p,&t,db,sizeof(db),1,b,flags,0) == 0);
     for (unsigned i = 0; i < 7; i++) {
         uint32_t base = 0x40000 + 16*i;

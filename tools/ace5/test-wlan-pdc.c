@@ -191,6 +191,10 @@ static void forward_only_last(void)
 }
 int main(void)
 {
+    assert(!giulia_wlan_pdc_check(table,sizeof(table),NULL,GIULIA_WLAN_PDC_KEEP_TABLE));
+    assert(giulia_wlan_pdc_check(table,sizeof(table),NULL,GIULIA_WLAN_PDC_RESTORE_KNOWN)==GIULIA_WLAN_PDC_BASELINE_UNKNOWN);
+    for(unsigned n=0;n<sizeof(table);n++)
+        assert(giulia_wlan_pdc_check(table,n,NULL,GIULIA_WLAN_PDC_KEEP_TABLE)==GIULIA_WLAN_PDC_TABLE_MISMATCH);
     admission(); lifecycle(); partial_delivery(); partial_restore();
     prepublish_failure(); forward_only_last();
     puts("Ace5 WLAN PDC: actual ordered messages, strict baseline, late ACK and partial restore passed");

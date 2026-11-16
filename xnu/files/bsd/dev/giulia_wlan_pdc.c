@@ -47,6 +47,19 @@ static int matches(const uint8_t *dt, uint32_t bytes)
 }
 static int owns(const struct giulia_wlan_pdc *p)
 { return __atomic_load_n(&table_owner, __ATOMIC_ACQUIRE) == p; }
+int giulia_wlan_pdc_check(const uint8_t *dt, uint32_t bytes,
+    const struct giulia_wlan_pdc_baseline *baseline, unsigned policy)
+{
+    if (policy > GIULIA_WLAN_PDC_KEEP_TABLE) return GIULIA_AOP_ARGUMENT;
+    if (!matches(dt, bytes)) return GIULIA_WLAN_PDC_TABLE_MISMATCH;
+    if (policy == GIULIA_WLAN_PDC_RESTORE_KNOWN) {
+        if (!baseline || baseline->known_mask != GIULIA_WLAN_PDC_ALL)
+            return GIULIA_WLAN_PDC_BASELINE_UNKNOWN;
+        for (unsigned i = 0; i < 10; i++)
+            if (baseline->millivolts[i] > 8191u) return GIULIA_AOP_ARGUMENT;
+    }
+    return 0;
+}
 int giulia_wlan_pdc_recover(struct giulia_wlan_pdc *p)
 {
     int rc;
@@ -106,13 +119,7 @@ int giulia_wlan_pdc_start(struct giulia_wlan_pdc *p, struct giulia_aop *aop,
         return GIULIA_AOP_STATE;
     if ((conditions & GIULIA_WLAN_PDC_REQUIRED) != GIULIA_WLAN_PDC_REQUIRED)
         return GIULIA_AOP_PREREQUISITE;
-    if (!matches(dt, bytes)) return GIULIA_WLAN_PDC_TABLE_MISMATCH;
-    if (policy == GIULIA_WLAN_PDC_RESTORE_KNOWN) {
-        if (!baseline || baseline->known_mask != GIULIA_WLAN_PDC_ALL)
-            return GIULIA_WLAN_PDC_BASELINE_UNKNOWN;
-        for (unsigned i = 0; i < 10; i++)
-            if (baseline->millivolts[i] > 8191u) return GIULIA_AOP_ARGUMENT;
-    }
+    if ((rc = giulia_wlan_pdc_check(dt, bytes, baseline, policy))) return rc;
     if (aop->state != GIULIA_AOP_OPEN || !aop->owned || aop->pending) return GIULIA_AOP_STATE;
     if (!__atomic_compare_exchange_n(&table_owner, &empty, p, 0,
         __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return GIULIA_AOP_BUSY;

@@ -81,25 +81,18 @@ failed:
     p->state = GIULIA_WLAN_RAIL_FAULT; p->cleanup_error = r;
     return r;
 }
-static int start(struct giulia_wlan_rails *p, struct giulia_rpmh *transport,
-    const uint8_t *db, uint32_t bytes, uint32_t expected_version,
+static int plan(const uint8_t *db, uint32_t bytes, uint32_t expected_version,
     const struct giulia_wlan_rail_baseline *baseline, uint32_t prerequisites,
-    enum giulia_wlan_rail_policy policy, uint32_t mode_mask)
+    enum giulia_wlan_rail_policy policy, uint32_t mode_mask, uint32_t address[7])
 {
     unsigned i, j;
     int r;
-    if (!p || !transport || (policy != GIULIA_WLAN_RESTORE_BASELINE &&
-        policy != GIULIA_WLAN_KEEP_VOTES)) return GIULIA_RPMH_ARGUMENT;
-    if (p->state != GIULIA_WLAN_RAIL_IDLE && p->state != GIULIA_WLAN_RAIL_STOPPED)
-        return GIULIA_RPMH_STATE;
+    if (policy != GIULIA_WLAN_RESTORE_BASELINE &&
+        policy != GIULIA_WLAN_KEEP_VOTES) return GIULIA_RPMH_ARGUMENT;
     if ((prerequisites & GIULIA_WLAN_RAIL_REQUIRED) != GIULIA_WLAN_RAIL_REQUIRED)
         return GIULIA_RPMH_PREREQUISITE;
     if (mode_mask && !(prerequisites & GIULIA_WLAN_RAIL_MODE_WRITE_SAFE))
         return GIULIA_RPMH_PREREQUISITE;
-    if ((transport->prerequisites & GIULIA_RPMH_REQUIRED) != GIULIA_RPMH_REQUIRED)
-        return GIULIA_RPMH_PREREQUISITE;
-    if (transport->state != GIULIA_RPMH_IDLE && transport->state != GIULIA_RPMH_DONE)
-        return GIULIA_RPMH_STATE;
     if (policy == GIULIA_WLAN_RESTORE_BASELINE) {
         if (!baseline) return GIULIA_WLAN_RAIL_BASELINE_UNKNOWN;
         for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++)
@@ -119,11 +112,36 @@ static int start(struct giulia_wlan_rails *p, struct giulia_rpmh *transport,
                 return GIULIA_WLAN_RAIL_VOLTAGE_CONFLICT;
     }
     for (i = 0; i < GIULIA_WLAN_RAIL_COUNT; i++) {
-        r = giulia_rpmh_resolve_vrm(db, bytes, expected_version, resource[i], &p->address[i]);
+        r = giulia_rpmh_resolve_vrm(db, bytes, expected_version, resource[i], &address[i]);
         if (r) return r;
         for (j = 0; j < i; j++)
-            if (p->address[j] == p->address[i]) return GIULIA_RPMH_DATABASE;
+            if (address[j] == address[i]) return GIULIA_RPMH_DATABASE;
     }
+    return 0;
+}
+int giulia_wlan_rails_check(const uint8_t *db, uint32_t bytes, uint32_t version,
+    const struct giulia_wlan_rail_baseline *baseline, uint32_t flags,
+    enum giulia_wlan_rail_policy policy, unsigned dt_modes)
+{
+    uint32_t address[7];
+    if (dt_modes > 1) return GIULIA_RPMH_ARGUMENT;
+    return plan(db, bytes, version, baseline, flags, policy, dt_modes ? DT_MODE_MASK : 0, address);
+}
+static int start(struct giulia_wlan_rails *p, struct giulia_rpmh *transport,
+    const uint8_t *db, uint32_t bytes, uint32_t expected_version,
+    const struct giulia_wlan_rail_baseline *baseline, uint32_t prerequisites,
+    enum giulia_wlan_rail_policy policy, uint32_t mode_mask)
+{
+    unsigned i;
+    int r;
+    if (!p || !transport) return GIULIA_RPMH_ARGUMENT;
+    if (p->state != GIULIA_WLAN_RAIL_IDLE && p->state != GIULIA_WLAN_RAIL_STOPPED)
+        return GIULIA_RPMH_STATE;
+    if ((transport->prerequisites & GIULIA_RPMH_REQUIRED) != GIULIA_RPMH_REQUIRED)
+        return GIULIA_RPMH_PREREQUISITE;
+    if (transport->state != GIULIA_RPMH_IDLE && transport->state != GIULIA_RPMH_DONE)
+        return GIULIA_RPMH_STATE;
+    if ((r = plan(db, bytes, expected_version, baseline, prerequisites, policy, mode_mask, p->address))) return r;
     if ((r = own(p))) return r;
     p->transport = transport; p->policy = policy;
     p->mode_mask = mode_mask;

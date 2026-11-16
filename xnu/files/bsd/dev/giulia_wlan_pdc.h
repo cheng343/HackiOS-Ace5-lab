@@ -25,6 +25,9 @@ struct giulia_wlan_pdc {
     uint32_t state, policy, attempted, delivered, restoring, pending_index;
     int error, cleanup_error;
 };
+/* Pure input validation; no channel acquisition, ownership or device write. */
+int giulia_wlan_pdc_check(const uint8_t *, uint32_t bytes,
+    const struct giulia_wlan_pdc_baseline *, unsigned policy);
 /* Target messages are fixed Ace5 stock-DT protocol strings, with zero padding
  * to 64 bytes. dt_table must exactly match the current device's NUL-separated
  * qcom,pdc_init_table, including its last NUL. This checks data, not ownership.

@@ -35,6 +35,7 @@ def main():
         (drivers/'giulia_wifi_gpio.c', root/'tools/ace5/test-wifi-gpio.c'),
         (drivers/'giulia_rpmh.c', drivers/'giulia_wlan_rails.c', root/'tools/ace5/test-rpmh.c'),
         (drivers/'giulia_wifi_board.c', root/'tools/ace5/test-wifi-board.c'),
+        (drivers/'giulia_wifi_supply.c', root/'tools/ace5/test-wifi-supply.c'),
         (drivers/'giulia_mhi_snapshot.c', root/'tools/ace5/test-mhi-snapshot.c'),
         (drivers/'giulia_aop.c', drivers/'giulia_pcie_noc.c', drivers/'giulia_bcm.c',
          drivers/'giulia_crm.c', root/'tools/ace5/test-wifi-probe.c'),
@@ -62,6 +63,15 @@ def main():
             if test.stem == 'test-pcie-cpu-noc':
                 for scenario in ('--timeout', '--cleanup', '--pretrigger'):
                     subprocess.run([str(exe), scenario], check=True, timeout=30)
+            if test.stem == 'test-wifi-supply':
+                for stage in 'GIADVCWP':
+                    subprocess.run([str(exe), '--start-fail', stage], check=True, timeout=30)
+                for stage in 'rpwcvda':
+                    subprocess.run([str(exe), '--stop-fail', stage], check=True, timeout=30)
+                for scenario in ('--modes','--keep-pdc','--external','--contract','--handoff','--reset-attempted','--early-stop-fail'):
+                    subprocess.run([str(exe), scenario], check=True, timeout=30)
+                for check in (1,2):
+                    subprocess.run([str(exe), '--guard', str(check)], check=True, timeout=30)
             if test.stem == 'test-crm':
                 for scenario in ('success', 'timeout', 'post-error', 'drift'):
                     subprocess.run([str(exe), '--empty-' + scenario], check=True, timeout=30)

@@ -127,16 +127,43 @@ int giulia_wifi_gpio_perst_assert(struct giulia_wifi_gpio *g, uint32_t flags)
     if (g->state == GIULIA_WGPIO_RELEASED) g->state = GIULIA_WGPIO_ON;
     return 0;
 }
-int giulia_wifi_gpio_stop(struct giulia_wifi_gpio *g, uint32_t flags)
+int giulia_wifi_gpio_wlan_off_hold(struct giulia_wifi_gpio *g, uint32_t flags)
 {
     if (!g) return GIULIA_WGPIO_ARGUMENT;
-    if (g->state == GIULIA_WGPIO_IDLE || g->state == GIULIA_WGPIO_STOPPED) return 0;
     if (!owned_state(g->state)) return GIULIA_WGPIO_STATE;
     if (!conditions(flags, GIULIA_WGPIO_STOP_REQUIRED)) return GIULIA_WGPIO_PREREQUISITE;
     if (g->bt_owned && !(flags & GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE)) return GIULIA_WGPIO_PREREQUISITE;
     if (giulia_wifi_gpio_perst_assert(g, flags) ||
         change(g, 0, 4, OUT, 0) || change(g, 0, 0, CFG_MASK, OE | 1u)) return failed(g);
+    /* begin may have failed before acquiring the BT output fields. The
+     * exclusive lease and saved snapshot still belong to this object. */
+    if (g->bt_owned && (change(g, 4, 4, OUT, 0) || change(g, 4, 0, CFG_MASK, OE | 1u))) return failed(g);
     delay(g, 5000);
+    g->state = GIULIA_WGPIO_HELD;
+    return 0;
+}
+int giulia_wifi_gpio_check_held(struct giulia_wifi_gpio *g, uint32_t flags)
+{
+    static const unsigned check[] = {16,17,94,18,19};
+    if (!g) return GIULIA_WGPIO_ARGUMENT;
+    if (g->state != GIULIA_WGPIO_HELD || !g->bt_owned) return GIULIA_WGPIO_STATE;
+    if (!conditions(flags, GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE))
+        return GIULIA_WGPIO_PREREQUISITE;
+    for (unsigned i = 0; i < 5; i++) {
+        uint32_t cfg = read_pin(g,check[i],0), data = read_pin(g,check[i],4);
+        uint32_t irq = read_pin(g,check[i],8);
+        if (cfg == UINT32_MAX || data == UINT32_MAX || irq == UINT32_MAX) return GIULIA_WGPIO_READBACK;
+        uint32_t mask = (15u << 2) | OE | (1u << 12), expected = i < 3 ? OE : 0;
+        if ((cfg & mask) != expected || (data & 3u) || (irq & 1u)) return GIULIA_WGPIO_BUSY;
+    }
+    return 0;
+}
+int giulia_wifi_gpio_stop(struct giulia_wifi_gpio *g, uint32_t flags)
+{
+    if (!g) return GIULIA_WGPIO_ARGUMENT;
+    if (g->state == GIULIA_WGPIO_IDLE || g->state == GIULIA_WGPIO_STOPPED) return 0;
+    int rc = giulia_wifi_gpio_wlan_off_hold(g, flags);
+    if (rc) return rc;
     for (unsigned n = g->bt_owned ? 5 : 4; n > 0; --n) {
         unsigned i = n - 1;
         if (!(g->dirty & (1u << i))) continue;

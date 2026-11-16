@@ -338,6 +338,7 @@ giulia_pcie_power_prepare_host(struct giulia_pcie_power *p,
     p->io = *io;
     p->dirty = 0;
     p->inherited_rchng = 0;
+    p->reset_attempted = 0;
     p->prerequisites = GIULIA_POWER_HOST_REQUIRED | route |
         (prerequisites & GIULIA_POWER_RCHNG_HANDOFF);
     p->last_error = p->cleanup_error = 0;
@@ -398,6 +399,7 @@ giulia_pcie_power_finish_reset(struct giulia_pcie_power *p, uint32_t prerequisit
     if ((prerequisites & required) != required ||
         route != (p->prerequisites & (GIULIA_POWER_DIRECT_VOTES | GIULIA_POWER_CESTA_COORDINATED)))
         return GIULIA_POWER_PREREQUISITE;
+    p->reset_attempted = 1;
     p->state = GIULIA_POWER_FAULT;
     if ((r = reset_pulse(p, CORE_RESET, 1000, 1000)) ||
         (r = reset_pulse(p, PHY_RESET, 200, 0)) ||

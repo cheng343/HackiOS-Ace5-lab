@@ -72,6 +72,10 @@ struct giulia_pcie_power {
     struct giulia_pcie_power_io io;
     uint32_t state, dirty, saved[GIULIA_POWER_SAVED_REGS];
     uint32_t inherited_rchng, prerequisites;
+    /* Set before the first BCR write; remains set on a failed finish/stop.
+     * Only a new admitted prepare clears it. Phase-one cancel may not treat
+     * a failed later reset as an untouched HOST_PREPARED operation. */
+    uint32_t reset_attempted;
     int last_error, cleanup_error;
 };
 

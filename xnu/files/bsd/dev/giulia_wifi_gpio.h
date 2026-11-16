@@ -61,5 +61,14 @@ int giulia_wifi_gpio_wlan_on(struct giulia_wifi_gpio *, uint32_t conditions);
 int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *, uint32_t conditions);
 /* Reset first on error/teardown, before link stop. Does not remove WLAN power. */
 int giulia_wifi_gpio_perst_assert(struct giulia_wifi_gpio *, uint32_t conditions);
+/* After all PCIe/DMA/MSI/PHY users have stopped, keep PERST# asserted and
+ * drive WLAN_EN low for5ms, retaining mux/latch snapshots and optional BT
+ * reset ownership. This permits supply withdrawal BEFORE GPIO restoration.
+ * It never restores an inherited latch or releases BT/SW_CTRL controls. */
+int giulia_wifi_gpio_wlan_off_hold(struct giulia_wifi_gpio *, uint32_t conditions);
+/* Read-only confirmation before PDC/rail changes: owned WLAN/BT/PERST
+ * outputs are held low, SW_CTRL18/19 are GPIO inputs low, IRQ/eGPIO controls
+ * inactive. Low input sampling alone never grants the required pin lease. */
+int giulia_wifi_gpio_check_held(struct giulia_wifi_gpio *, uint32_t conditions);
 int giulia_wifi_gpio_stop(struct giulia_wifi_gpio *, uint32_t conditions);
 #endif

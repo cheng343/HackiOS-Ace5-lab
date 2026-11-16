@@ -65,7 +65,7 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 44274016a4cf..09871102847f 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,60 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,61 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -93,6 +93,7 @@ index 44274016a4cf..09871102847f 100644
 +bsd/dev/giulia_bcm.c	standard
 +bsd/dev/giulia_wifi_gpio.c	standard
 +bsd/dev/giulia_wifi_board.c	standard
++bsd/dev/giulia_wifi_supply.c	standard
 +bsd/dev/giulia_mhi_snapshot.c	standard
 +bsd/dev/giulia_wifi.c	standard
 +bsd/dev/giulia_aop.c	standard

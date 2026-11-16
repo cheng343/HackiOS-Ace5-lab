@@ -111,12 +111,41 @@ static void bluetooth_reset(void)
     }
     puts("Ace5 Wi-Fi GPIO: explicit BT lease, held reset and every partial restore passed");
 }
+static void off_hold(void)
+{
+    struct mock m;struct giulia_wifi_gpio g;
+    struct giulia_wifi_gpio_io io={&m,rd,wr,fence,delay};
+    unsigned begin_flags=GIULIA_WGPIO_BEGIN_REQUIRED|GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE;
+    unsigned stop_flags=GIULIA_WGPIO_STOP_REQUIRED|GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE;
+    setup(&m,&g);m.bt_allowed=1;
+    assert(!giulia_wifi_gpio_begin_with_bt_reset(&g,begin_flags,&io));
+    unsigned before=m.writes;
+    assert(!giulia_wifi_gpio_check_held(&g,begin_flags)&&m.writes==before);
+    m.regs[18][1]|=1;
+    assert(giulia_wifi_gpio_check_held(&g,begin_flags)==GIULIA_WGPIO_BUSY&&m.writes==before);
+    m.regs[18][1]&=~1u;m.regs[19][0]|=1u<<9;
+    assert(giulia_wifi_gpio_check_held(&g,begin_flags)==GIULIA_WGPIO_BUSY&&m.writes==before);
+    m.regs[19][0]&=~(1u<<9);m.bad_read=PIN(94,0);
+    assert(giulia_wifi_gpio_check_held(&g,begin_flags)==GIULIA_WGPIO_READBACK&&m.writes==before);
+    m.bad_read=UINT32_MAX;
+    assert(!giulia_wifi_gpio_wlan_on(&g,GIULIA_WGPIO_ON_REQUIRED|GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
+    before=m.writes;
+    assert(giulia_wifi_gpio_wlan_off_hold(&g,begin_flags)==GIULIA_WGPIO_PREREQUISITE&&m.writes==before);
+    assert(!giulia_wifi_gpio_wlan_off_hold(&g,stop_flags));
+    assert(g.state==GIULIA_WGPIO_HELD&&g.bt_owned&&g.dirty==31);
+    assert(!(m.regs[16][1]&2)&&!(m.regs[94][1]&2));
+    assert(!giulia_wifi_gpio_check_held(&g,begin_flags));
+    assert(!giulia_wifi_gpio_stop(&g,stop_flags));
+    assert(!memcmp(m.regs,m.original,sizeof(m.regs)));
+    puts("Ace5 Wi-Fi GPIO: WLAN off retains reset snapshots; live controls checked without writes");
+}
 int main(void)
 {
     struct mock m;
     struct giulia_wifi_gpio g;
     struct giulia_wifi_gpio_io io = {&m, rd, wr, fence, delay};
     bluetooth_reset();
+    off_hold();
     setup(&m, &g);
     assert(giulia_wifi_gpio_begin(&g, 0, &io) == GIULIA_WGPIO_PREREQUISITE);
     assert(!m.reads && !m.writes);

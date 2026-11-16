@@ -4,6 +4,36 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：供电到主机时钟的组合流程
+
+新增 `giulia_wifi_supply`，将已有生产 core 按单一所有者接成：
+
+`WLAN/BT/PERST 保持低 → AOP 通道 → 原厂 PDC 表 → 七路严格 rail 请求
+→ HLOS CPU 互连下限 → WLAN_EN → GCC 主机时钟准备`
+
+开始前复用 PDC/rail/CPU 规划器检查完整输入；模式或 per-DRV 基线不明、
+电压冲突、DB/DT 不匹配会在 GPIO/AOP 写入前退出。七路请求始终采用已知
+基线恢复策略，不能把 Android 的缓存值或聚合电压当成旧请求。真实外部
+所有者必须保持 firmware quiet、GPIO/BT、RSC/IRQ、父时钟和 CESTA 协调
+条件；不提供默认成功的占位实现。每个阶段复核外部条件，PDC/rail 修改前
+还直接检查已取得控制权的 GPIO16/17/94 输出低、18/19 输入低和 IRQ/eGPIO。
+
+本入口只到 `HOST_PREPARED`，不提交 CRM 数据表、不脉冲 core/PHY BCR，
+不初始化 PHY/链路、MSI/DMA 或固件。下一阶段先执行显式 host handoff，
+再由真实 NoC/CESTA 服务建立物理就绪证明；普通 phase-one cancel 随即被
+禁止。power core 的 `reset_attempted` 标记同时防止把失败的后续复位当成
+“尚未复位”而提前拆掉电源。
+
+正常取消时先恢复 GCC，再保持 WLAN/reset 低，回收 CPU TCS，恢复七路
+请求，恢复/保留 PDC 表，关闭 QMP。CPU 下限或显式 KEEP_TABLE 仍被保留
+时返回 `HELD/RETAINED`，保留 GPIO 复位和平台所有权至冷重启，不声称
+物理电源全关。任一待完成操作/清理错误都会停止更低层退出并保留重试状态。
+尚未实现后续 NoC/CESTA 操作的完整启动/撤回，不能拿本入口代替该证明。
+
+本轮保持 Android，不重启或刷写手机；新流程没有自动启动 hook。组合
+fixture 用 leaf 合约模型检查顺序与失败生命周期，各 leaf 的真实 MMIO/
+协议 core 仍分别运行现有回归。云端构建结果待核验，尚无新真机结果。
+
 ## 2026-11-16：共享电源与分阶段 PCIe 启动源码
 
 本轮保持手机在 Android，仅修改源码并在 GitHub 构建，不运行新硬件探针。

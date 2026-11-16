@@ -48,6 +48,12 @@ struct giulia_wlan_rails {
     struct giulia_wlan_rail_baseline baseline[GIULIA_WLAN_RAIL_COUNT];
     int error, cleanup_error;
 };
+/* Pure validation for a composed startup before it sends any AOP message or
+ * changes GPIO: current CMD DB, strict baseline, modes and voltage conflicts.
+ * dt_modes is exactly0/1. No RSC lease, resource claim or MMIO is acquired. */
+int giulia_wlan_rails_check(const uint8_t *, uint32_t bytes, uint32_t version,
+    const struct giulia_wlan_rail_baseline *, uint32_t prerequisites,
+    enum giulia_wlan_rail_policy, unsigned dt_modes);
 /* Order is CNSS power.c optional-regulator order filtered to this board:
  * ldob15, ldoc3, smpi4, smpc2, smpc3, smpc6, smpc1.
  * Real V/E writes at CMD DB base+0/base+4, in mV, one completed TCS per rail.
