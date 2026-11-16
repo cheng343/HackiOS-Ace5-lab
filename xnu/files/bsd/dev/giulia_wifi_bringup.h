@@ -55,6 +55,8 @@ struct giulia_wifi_bringup_config {
      * before finishing PCIe BCR reset. Zero means NoC/QoS is ready. */
     int (*prepare_noc)(void *cookie, struct giulia_wifi_supply *supply);
     int (*release_noc)(void *cookie);
+    /* Optional diagnostic stop ceiling (enum giulia_wifi_bringup_stage, 0 = full). */
+    unsigned max_stage;
 };
 
 struct giulia_wifi_bringup {

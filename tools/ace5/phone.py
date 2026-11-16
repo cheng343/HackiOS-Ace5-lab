@@ -293,14 +293,16 @@ def ace5_pdc_test_arguments(enabled, table, bootcpu, kernel, seconds, other_hard
     return ' ace5_aop_channel_test=2'
 
 
-def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log):
+def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log, stage=0):
     if not enabled:
+        if stage:
+            raise RuntimeError('--wifi-bringup-stage requires --wifi-bringup-test')
         return ''
     if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
         raise RuntimeError('--wifi-bringup-test requires current DT table, --kernel, CPU1, 10..120 seconds, no live-log and no other hardware probes')
     if not table.is_file() or table.stat().st_size != 508:
         raise RuntimeError('Missing or invalid current-DT PDC table (508 bytes); no upload attempted')
-    return ' ace5_wifi_bringup=1'
+    return ' ace5_wifi_bringup=1' + (f' ace5_wifi_bringup_stage={stage}' if stage else '')
 
 
 ap = argparse.ArgumentParser(description=__doc__)
@@ -331,6 +333,8 @@ run.add_argument('--wlan-pdc-table', type=Path,
                  help='508-byte qcom,pdc_init_table property extracted from this phone current DT; kernel compares every byte against the supported board table')
 run.add_argument('--wifi-bringup-test', action='store_true',
                  help='Run finite supply->PCIe->BAR0->SoC-ID->MHI Wi-Fi bringup diagnostic; requires --wlan-pdc-table, CPU1, 10..120s, no live-log; cold reboot afterwards')
+run.add_argument('--wifi-bringup-stage', type=int, choices=range(0, 11), default=0,
+                 help='Optional stage stop cap for --wifi-bringup-test (0 = full, 1..10 = stop cleanly after stage N)')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -499,7 +503,7 @@ try:
             commandline += ace5_wifi_bringup_arguments(args.wifi_bringup_test, args.wlan_pdc_table,
                 args.bootcpu, args.kernel, seconds,
                 args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test or args.wlan_pdc_test,
-                args.live_log)
+                args.live_log, args.wifi_bringup_stage)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')

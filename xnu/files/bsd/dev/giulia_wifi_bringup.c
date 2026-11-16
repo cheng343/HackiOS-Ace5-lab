@@ -55,16 +55,19 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     b->stage = GIULIA_BRINGUP_SUPPLY_STAGE;
     rc = giulia_wifi_supply_prepare(&b->supply, &b->cfg.supply);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_SUPPLY_STAGE, GIULIA_BRINGUP_SUPPLY, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     if (b->cfg.prepare_noc) {
         b->stage = GIULIA_BRINGUP_NOC_STAGE;
         rc = b->cfg.prepare_noc(b->cfg.noc_cookie, &b->supply);
         if (rc) return fail_stop(b, GIULIA_BRINGUP_NOC_STAGE, GIULIA_BRINGUP_PREREQUISITE, rc);
+        if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
     }
 
     b->stage = GIULIA_BRINGUP_POWER_RESET;
     rc = giulia_pcie_power_finish_reset(&b->supply.power, power_finish_flags(b));
     if (rc) return fail_stop(b, GIULIA_BRINGUP_POWER_RESET, GIULIA_BRINGUP_POWER, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     /* Mask PARF global interrupts after BCR reset; SM8650 resets PARF_INT_MASK non-zero. */
     if (b->cfg.link.write32)
@@ -74,6 +77,7 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     rc = giulia_pcie_link_prepare(&b->link, link_base | GIULIA_LINK_PERST_ASSERTED,
         &b->cfg.link);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_LINK_PREPARE, GIULIA_BRINGUP_LINK, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_PHY_START;
     phy_io = b->cfg.phy;
@@ -82,26 +86,31 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     phy_io.pipe_disable = pipe_off;
     rc = giulia_pcie_phy_start(&b->phy, phy_req, &phy_io);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_PHY, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_PERST_RELEASE;
     rc = giulia_wifi_gpio_perst_release(&b->supply.gpio,
         GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_PERST_RELEASE, GIULIA_BRINGUP_GPIO, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_LINK_TRAIN;
     rc = giulia_pcie_link_train(&b->link,
         link_base | GIULIA_LINK_PHY_READY | GIULIA_LINK_PERST_RELEASED_SETTLED);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_LINK_TRAIN, GIULIA_BRINGUP_LINK, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_MEM_ENABLE;
     rc = giulia_pcie_link_mem_enable(&b->link,
         link_base | GIULIA_LINK_PHY_READY | GIULIA_LINK_PERST_RELEASED_SETTLED |
         GIULIA_LINK_USERS_QUIESCED);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_MEM_ENABLE, GIULIA_BRINGUP_LINK, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_SOC_INFO;
     rc = giulia_kiwi_read_soc_info(&b->cfg.bar, &b->soc);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_SOC_INFO, GIULIA_BRINGUP_BAR, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_MHI_SNAP;
     rc = giulia_mhi_snapshot(&b->cfg.mhi, GIULIA_MHI_SNAPSHOT_REQUIRED, &b->mhi);
