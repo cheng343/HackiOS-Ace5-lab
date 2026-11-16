@@ -184,10 +184,23 @@ static struct wb_map *link_reg(unsigned reg)
     if (reg == GIULIA_LINK_ATU) return &wb.atu;
     return &wb.cfg;
 }
-static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off) { (void)c; return wb_mmio(link_reg(r), off); }
+static uint32_t wb_dbg_r32[3], wb_dbg_r16[3];
+static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
+{
+    uint32_t v = wb_mmio(link_reg(r), off);
+    (void)c;
+    wb_dbg_r32[0] = r; wb_dbg_r32[1] = off; wb_dbg_r32[2] = v;
+    return v;
+}
 static void wb_link_w32(void *c, unsigned r, uint32_t off, uint32_t v) { (void)c; wb_store(link_reg(r), off, v); }
 static uint16_t wb_link_r16(void *c, unsigned r, uint32_t off)
-{ (void)c; uint16_t v = *(volatile uint16_t *)(link_reg(r)->address + off); wb_barrier(0); return v; }
+{
+    uint16_t v = *(volatile uint16_t *)(link_reg(r)->address + off);
+    (void)c;
+    wb_barrier(0);
+    wb_dbg_r16[0] = r; wb_dbg_r16[1] = off; wb_dbg_r16[2] = v;
+    return v;
+}
 static void wb_link_w16(void *c, unsigned r, uint32_t off, uint16_t v)
 { (void)c; *(volatile uint16_t *)(link_reg(r)->address + off) = v; wb_barrier(0); }
 
@@ -278,6 +291,10 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         wb.bringup.supply.rails.state, wb.bringup.supply.rails.completed_mask);
     wb_log("ace5-wifi-bringup: gcc votes0=%#x votes1=%#x core_gdsc=%#x phy_gdsc=%#x\n",
         votes0, votes1, core_gdsc, phy_gdsc);
+    wb_log("ace5-wifi-bringup: link stage=%u err=%d clean=%d r32=(%u,%#x,%#x) r16=(%u,%#x,%#x)\n",
+        wb.bringup.link.stage, wb.bringup.link.last_error, wb.bringup.link.cleanup_error,
+        wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2],
+        wb_dbg_r16[0], wb_dbg_r16[1], wb_dbg_r16[2]);
     wb_log("ace5-wifi-bringup: root=%#x ep=%#x link_sts=%#x bar0=%#x/%#x\n",
         wb.bringup.link.root_id, wb.bringup.link.endpoint_id,
         wb.bringup.link.link_status, wb.bringup.link.bar0_mask, wb.bringup.link.bar0_mask_hi);
