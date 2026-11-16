@@ -32,6 +32,13 @@ GEM-power/GEM-clock/QoS 实现，覆盖共享请求、四阶段命令超时、�
 [clk-rpmh.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/clk/qcom/clk-rpmh.c)
 和 [cmd-db.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/soc/qcom/cmd-db.c)。
 
+代码 `6a7e20343c93f8b352726d441a7099e81b20a341` 的
+[云构建 43809042898](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43809042898)
+已通过全部回归、两种 loader 与完整 XNU 编译。下载后核对 7 项文件
+长度/哈希、ZIP CRC、源码版本及全部新旧测试记录。缓存命中 1064/1068
+（99.63%），4 次重新编译。真机只完成 Android 的 CMD DB 读取；尚未
+执行本版 XNU 电源/时钟写入，也未验证芯片枚举或联网。
+
 ## 2026-11-16：GEM 配置时钟的 XO 保持流程
 
 Android 只读采集确认 `gcc_cpuss_ubwcp_clk_src` 当前为 19.2 MHz，
