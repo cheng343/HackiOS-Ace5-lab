@@ -181,6 +181,10 @@ static void gc_thread(void *context,__unused wait_result_t wait)
         char line[160];
         snprintf(line,sizeof(line),"ace5-crm: channel test rc=%d published=%u pending=%u state=%u\n",
             rc,gc.transport.published,gc.transport.pending,gc.transport.state); gc_log(line);
+        if (gc.transport.fault_has_observed) {
+            snprintf(line,sizeof(line),"ace5-crm: readback mismatch offset=%#x expected=%#x observed=%#x\n",
+                gc.transport.fault_offset,gc.transport.fault_expected,gc.transport.fault_observed); gc_log(line);
+        }
     }
     if (gc.transport.owned) {
         /* Once any request may have issued, keep mappings, objects and quiet

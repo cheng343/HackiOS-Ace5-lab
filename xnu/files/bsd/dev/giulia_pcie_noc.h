@@ -24,6 +24,7 @@
 #define GIULIA_NOC_CHANNEL_MASK 3u
 #define GIULIA_NOC_PERF_VALUE_MASK 7u
 #define GIULIA_NOC_BW_VALID (1u << 29)
+/* Generic protocol definition, SW DRV only; not a HW DRV0 table field. */
 #define GIULIA_NOC_BW_COMMIT (1u << 30)
 #define GIULIA_NOC_BW_FIELD_MASK 0x3fffu
 

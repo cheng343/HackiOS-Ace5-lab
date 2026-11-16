@@ -87,7 +87,10 @@ int giulia_bcm_pcie0_plan(const uint8_t *db,uint32_t bytes,uint32_t version,
         for (unsigned j=0;j<i;j++)
             if (plan.resource[i].address==plan.resource[j].address) return GIULIA_BCM_DATABASE;
         for (unsigned st=0;st<2;st++)
-            plan.patch[2+2*i+st]=(struct giulia_crm_patch){1,st,node[i],GIULIA_CRM_BW_FIELDS,plan.vote[i].command};
+            /* Generic BCM TCS encoding has COMMIT. CRM HW DRV tables expose
+             * only X/Y+VALID; fixed vendor crm.c marks bit30 SW-only. */
+            plan.patch[2+2*i+st]=(struct giulia_crm_patch){1,st,node[i],GIULIA_CRM_BW_FIELDS,
+                plan.vote[i].command & GIULIA_CRM_BW_FIELDS};
     }
     *out=plan; return 0;
 }

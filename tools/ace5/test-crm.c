@@ -49,6 +49,11 @@ static int write32(void *cookie,uint32_t off,uint32_t v)
     assert(ch>=0 && m->reg[BUSY/4]==m->reg[UPDATE/4]);
     assert(m->reg[BUSY/4] != (1u<<ch)); /* Never write an active table. */
     m->table_writes++;
+    /* HW DRV BW registers do not store the SW-only COMMIT bit. */
+    static const uint32_t bw[]={0xc0,0x140,0x680,0x700,0x780};
+    for (unsigned c=0;c<2;c++) for (unsigned s=0;s<5;s++)
+        for (unsigned i=0;i<m->bw;i++)
+            if (off==0x200+bw[s]+4*(c*m->bw+i)) v&=~(1u<<30);
     if (m->table_writes != m->drop_table) m->reg[off/4]=v;
     if (m->table_writes == m->error_table) return -93; /* May have issued. */
     return 0;
@@ -80,8 +85,8 @@ static struct giulia_crm_io setup(struct mock *m,unsigned active,unsigned perf,u
 }
 static const struct giulia_crm_patch patch[] = {
     {GIULIA_CRM_PERF,0,0,7,2}, {GIULIA_CRM_PERF,1,0,7,2},
-    {GIULIA_CRM_BW,0,3,GIULIA_CRM_BW_FIELDS,0x60004002u},
-    {GIULIA_CRM_BW,1,3,GIULIA_CRM_BW_FIELDS,0x60008001u}
+    {GIULIA_CRM_BW,0,3,GIULIA_CRM_BW_FIELDS,0x20004002u},
+    {GIULIA_CRM_BW,1,3,GIULIA_CRM_BW_FIELDS,0x20008001u}
 };
 static int start(struct giulia_crm *p,struct giulia_crm_io *io)
 { return giulia_crm_start(p,io,patch,4); }
@@ -131,6 +136,8 @@ static void admission(void)
     assert(giulia_crm_start(&p,&io,bad,4)==GIULIA_CRM_ARGUMENT && !m.reads);
     memcpy(bad,patch,sizeof(bad)); bad[0].value=8;
     assert(giulia_crm_start(&p,&io,bad,4)==GIULIA_CRM_ARGUMENT && !m.reads);
+    memcpy(bad,patch,sizeof(bad)); bad[0]=(struct giulia_crm_patch){GIULIA_CRM_BW,0,0,1u<<30,1u<<30};
+    assert(giulia_crm_start(&p,&io,bad,4)==GIULIA_CRM_ARGUMENT && !m.reads);
     m.deny_lease=1; assert(start(&p,&io)==GIULIA_CRM_LEASE && !m.reads && !m.writes);
     m.deny_lease=0;
     const uint32_t update[]={0,3,4,UINT32_MAX};
@@ -158,6 +165,8 @@ static void lost_writes(void)
         struct giulia_crm_io io=setup(&m,0,2,6); m.drop_table=n;
         assert(start(&p,&io)==GIULIA_CRM_DRIFT);
         assert(p.dirty && p.owned && !m.switches);
+        assert(p.fault_has_observed && p.fault_expected!=p.fault_observed);
+        assert(m.reg[p.fault_offset/4]==p.fault_observed);
         m.drop_table=0;
         assert(giulia_crm_stop(&p)==0); restored(&m,&p);
     }
@@ -296,5 +305,6 @@ int main(int argc,char **argv)
     lifecycle(); admission(); lost_writes(); switch_failures(); lease_and_restore_faults();
     empty_preparation();
     puts("Ace5 CRM: actual inactive-table writes, channel ACK, preserved resources and timeout rollback passed");
+    puts("Ace5 CRM HW BW: SW-only COMMIT rejected; mismatch diagnostics preserved");
     return 0;
 }

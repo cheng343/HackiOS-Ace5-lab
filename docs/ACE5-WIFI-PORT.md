@@ -544,3 +544,23 @@ XNU adapter 仅允许写 0 或该字段计算出的目标值；请求前再逐�
 1060/1062（99.81%），两次未命中。带宽测试小镜像已用留存私有 DT 离线准备，
 仍要求接机后重新采集当前 DT 并复核政策，尚未启动。用户拔机后没有再次进行
 设备操作；这轮源码结果没有新增无线功能的真机通过结论。
+
+## 2026-11-16：带宽方案首次实测与 HW/SW 字段修正
+
+随后用 `deedb79` 在 Ace 5 运行 60 秒带宽试验。内核正常返回，35 项静态检查
+无失败，但 CRM 返回 readback drift（rc=-7），BUSY=UPDATE=0、published=0、
+pending=0；通道请求未发出，所以本轮不记为方案被硬件接受。日志已私下保留，
+冷重启后确认 Android 启动完成。该版本的日志缺少具体失配偏移／数值，不能
+仅凭 rc=-7 断言唯一硬件原因。
+
+排查发现方案把通用 BCM TCS 的 COMMIT30 一起写入 HW DRV 表。固定官方
+[`crm.c`](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/soc/qcom/crm.c)
+将 VALID29 标为 HW/SW 共用，而 COMMIT30 与 RESP_REQ31 仅用于 SW DRV。
+因此修正 HW 方案与允许字段为 X/Y bits0..27 + VALID29，不再把 SW-only 位当作
+必须可写／可读回的 HW 字段。通用 TCS 编码器保留其原协议格式，由 HW 方案
+生成器显式转换；不影响 GPU／直接 RPMh 等其他通用 BCM 命令用户。
+
+同时增加 sticky mismatch 诊断，报告具体寄存器偏移、期望值与观察值，覆盖
+表读回、header 漂移和 channel UPDATE 不符；不靠忽略真正的读回错误来通过。
+云端外设模型加入 HW BW 不保存 SW-only COMMIT 的行为，集成测试检查 HW 方案
+没有 bits30/31、SW-only 更新被拒绝、失配信息被保留。该修正需重新真机验证。

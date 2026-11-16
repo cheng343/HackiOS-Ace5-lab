@@ -62,6 +62,10 @@ static int quiet_printf(const char *format,...) { (void)format; return 0; }
 #undef __sync_synchronize
 static void peer_barrier(void)
 {
+    /* Peripheral model: COMMIT30 exists only for SW DRVs, not this HW table. */
+    static const uint32_t bw[]={0xc0,0x140,0x680,0x700,0x780};
+    for (unsigned ch=0;ch<2;ch++) for (unsigned st=0;st<5;st++) for (unsigned i=0;i<16;i++)
+        crm[(0x200+bw[st]+4*(ch*16+i))/4]&=~(1u<<30);
     if (!no_quiet_ack) { shared->ack=shared->request; shared->active=!!shared->request; }
     if (crm[0x1020/4]) {
         assert(crm[0x1020/4]==1 && shared->request==1 && shared->ack==1 && shared->active==1);
@@ -178,7 +182,7 @@ static void retained(unsigned timeout,unsigned bandwidth)
         for (unsigned i=0;i<16;i++) {
             uint32_t expected=0;
             if (bandwidth && ch==0 && st<2 && (i<4 || i==5))
-                expected=i==2 || i==5 ? 0x60000001u : 0x60004001u;
+                expected=i==2 || i==5 ? 0x20000001u : 0x20004001u;
             assert(crm[(0x200+bo[st]+4*(ch*16+i))/4]==expected);
         }
     }

@@ -12,7 +12,8 @@ int giulia_bcm_resolve(const uint8_t *, uint32_t bytes, uint32_t expected_versio
  * divisions truncate with nonzero-minimum1, NOT round-up. Scale=1000.
  * enable_mask is 0 (numeric) or 1 (board's SH1/ACV on/off encoding).
  * Overflow is rejected; representable votes saturate at14bits and report it.
- * command always has valid+commit, as the vendor CRM path does, even at0.
+ * command is generic BCM TCS encoding with valid+commit, even at0. The
+ * dedicated CRM HW DRV plan strips SW-only COMMIT/RESP bits before staging.
  */
 int giulia_bcm_encode(const struct giulia_bcm_resource *, uint64_t avg_kbps,
     uint64_t peak_kbps, uint32_t buswidth, uint32_t channels,

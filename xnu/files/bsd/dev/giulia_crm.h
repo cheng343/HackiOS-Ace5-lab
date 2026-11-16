@@ -7,7 +7,8 @@
 #define GIULIA_CRM_MAX_BW 16u
 #define GIULIA_CRM_PERF 0u
 #define GIULIA_CRM_BW 1u
-#define GIULIA_CRM_BW_FIELDS 0x6fffffffu
+/* HW DRV: X/Y bits0..27 + VALID29. COMMIT30 and RESP_REQ31 are SW-only. */
+#define GIULIA_CRM_BW_FIELDS 0x2fffffffu
 
 enum giulia_crm_result {
     /* Channel remains selected; no return-to-uninitialized state claimed. */
@@ -47,6 +48,7 @@ struct giulia_crm {
     uint32_t header[4], perf_count, bw_count;
     uint32_t state, original, target, dirty, pending, pending_channel, owned;
     uint32_t empty, published;
+    uint32_t fault_offset,fault_expected,fault_observed,fault_has_observed;
     int error, cleanup_error, callback_error;
 };
 /* Original implementation of the fixed OnePlus SM8650 CRM dual-channel

@@ -70,7 +70,8 @@ static void plans(void)
         for (unsigned st=0;st<2;st++) {
             struct giulia_crm_patch *q=&p.patch[2+2*i+st];
             assert(q->kind==1 && q->state==st && q->resource==nodes[i]);
-            assert(q->mask==GIULIA_CRM_BW_FIELDS && q->value==p.vote[i].command);
+            assert(q->mask==GIULIA_CRM_BW_FIELDS && q->value==(p.vote[i].command&GIULIA_CRM_BW_FIELDS));
+            assert(!(q->value&(3u<<30)));
         }
     }
     for (unsigned i=0;i<2;i++) assert(p.patch[i].kind==0 && p.patch[i].state==i && p.patch[i].value==2);
@@ -80,6 +81,7 @@ static void plans(void)
     le32(db+184,0x50000); /* Distinct BCM names cannot alias one address. */
     assert(giulia_bcm_pcie0_plan(db,sizeof(db),1,0,&p)==GIULIA_BCM_DATABASE);
     assert(!p.patch[0].value && !p.resource[0].address);
+    puts("Ace5 BCM HW BW: generic TCS command converted to HW-only table fields");
 }
 struct mock { uint32_t reg[0x3000/4],saved[0x3000/4]; unsigned writes,switches; };
 static int read32(void *cookie,uint32_t off,uint32_t *v)
@@ -87,6 +89,9 @@ static int read32(void *cookie,uint32_t off,uint32_t *v)
 static int write32(void *cookie,uint32_t off,uint32_t v)
 {
     struct mock *m=cookie; assert(!(off&3) && off<sizeof(m->reg)); m->writes++;
+    static const uint32_t bw[]={0xc0,0x140,0x680,0x700,0x780};
+    for (unsigned ch=0;ch<2;ch++) for (unsigned st=0;st<5;st++) for (unsigned i=0;i<16;i++)
+        if (off==0x200+bw[st]+4*(ch*16+i)) v&=~(1u<<30);
     m->reg[off/4]=v;
     if (off==0x1020) { m->reg[0x1000/4]=v; m->switches++; }
     return 0;
@@ -108,7 +113,7 @@ static void transport(void)
     for (unsigned i=0;i<5;i++) {
         unsigned node=i==4?5:i;
         assert(m.reg[(0x200+0xc0+16*4+node*4)/4]==
-            ((0x90000005u&~GIULIA_CRM_BW_FIELDS)|p.vote[i].command));
+            ((0x90000005u&~GIULIA_CRM_BW_FIELDS)|(p.vote[i].command&GIULIA_CRM_BW_FIELDS)));
     }
     assert(m.reg[(0x200+0xc0+16*4+4*4)/4]==0x90000005u); /* IP0 preserved. */
     assert(m.reg[(0x200+0x680+16*4)/4]==0x90000005u); /* state2 preserved. */

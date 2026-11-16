@@ -12,6 +12,11 @@ static const uint32_t perf_off[5] = {0,0x40,0x80,0x600,0x640};
 static const uint32_t bw_off[5] = {0xc0,0x140,0x680,0x700,0x780};
 static int fail(struct giulia_crm *p, int rc)
 { p->state = GIULIA_CRM_FAULT; p->error = rc; return rc; }
+static int mismatch(struct giulia_crm *p,uint32_t off,uint32_t expected,uint32_t observed)
+{
+    p->fault_offset=off; p->fault_expected=expected; p->fault_observed=observed;
+    p->fault_has_observed=1; return GIULIA_CRM_DRIFT;
+}
 static int lease(struct giulia_crm *p)
 {
     p->callback_error = p->io.validate_lease(p->io.cookie);
@@ -31,7 +36,7 @@ static int wr(struct giulia_crm *p, uint32_t off, uint32_t v)
     p->io.barrier(p->io.cookie);
     if (p->callback_error) return GIULIA_CRM_IO;
     if ((rc = rd(p,off,&readback))) return rc;
-    return readback == v ? 0 : GIULIA_CRM_DRIFT;
+    return readback == v ? 0 : mismatch(p,off,v,readback);
 }
 static uint32_t offset(struct giulia_crm *p, unsigned kind,
     unsigned ch, unsigned state, unsigned resource)
@@ -49,7 +54,7 @@ static int header(struct giulia_crm *p, int compare)
     for (unsigned i = 0; i < 4; i++) {
         if ((rc = rd(p,i*4,&h[i]))) return rc;
         if (h[i] == UINT32_MAX) return GIULIA_CRM_LAYOUT;
-        if (compare && h[i] != p->header[i]) return GIULIA_CRM_DRIFT;
+        if (compare && h[i] != p->header[i]) return mismatch(p,i*4,p->header[i],h[i]);
     }
     if (!compare) {
         unsigned perf = (h[1]>>8)&15u, bw = (h[2]>>26)&31u;
@@ -83,7 +88,7 @@ static int table_read(struct giulia_crm *p, unsigned ch, int compare)
             if ((rc = rd(p,offset(p,k,ch,s,i),&v))) return rc;
             if (v == UINT32_MAX) return GIULIA_CRM_IO;
             uint32_t *saved = word(&p->saved[ch],k,s,i);
-            if (compare && v != *saved) return GIULIA_CRM_DRIFT;
+            if (compare && v != *saved) return mismatch(p,offset(p,k,ch,s,i),*saved,v);
             if (!compare) *saved = v;
         }
     }
@@ -115,7 +120,7 @@ int giulia_crm_recover(struct giulia_crm *p)
     if (!p->pending) return 0;
     for (unsigned i = 0; i < 100; i++) {
         if ((rc = header(p,1)) || (rc = rd(p,UPDATE,&update)) || (rc = rd(p,BUSY,&busy))) return rc;
-        if (update != (1u<<p->pending_channel)) return GIULIA_CRM_DRIFT;
+        if (update != (1u<<p->pending_channel)) return mismatch(p,UPDATE,1u<<p->pending_channel,update);
         if (busy == (1u<<p->pending_channel)) { p->pending = 0; return 0; }
         if (busy & ~3u) return GIULIA_CRM_DRIFT;
         p->io.delay_us(p->io.cookie,100);
@@ -195,6 +200,7 @@ static int start(struct giulia_crm *p, const struct giulia_crm_io *io,
         return GIULIA_CRM_BUSY;
     p->io = *io; p->owned = 1; p->dirty = p->pending = p->error = p->cleanup_error = 0;
     p->empty = from_empty; p->published = 0;
+    p->fault_offset=p->fault_expected=p->fault_observed=p->fault_has_observed=0;
     p->state = GIULIA_CRM_PREPARING;
     if ((rc = header(p,0)) || (rc = rd(p,UPDATE,&update)) || (rc = rd(p,BUSY,&busy))) goto rejected;
     if (from_empty) {
