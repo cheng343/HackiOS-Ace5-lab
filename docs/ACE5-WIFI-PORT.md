@@ -7,6 +7,11 @@ XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属�
 ## 2026-11-16：共享电源与分阶段 PCIe 启动源码
 
 本轮保持手机在 Android，仅修改源码并在 GitHub 构建，不运行新硬件探针。
+源码 [`90fec6e`](https://github.com/cheng343/HackiOS-Ace5-lab/commit/90fec6e25e5902517332259dab167e35aaa2ffca)
+已通过[云构建 43799663038](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43799663038)：
+新增 C fixture、既有回归、两种 loader 和完整 XNU 均成功，七项产物的
+长度与 SHA-256 已核验。可缓存编译调用命中 1058/1063（99.53%）。
+这些是云端构建/模拟 MMIO 结果；本轮没有在手机执行这三项新代码。
 
 - 七路 rail 的严格恢复策略会在任何 MMIO 前拒绝高于 WLAN 精确 min=max
   请求的已知旧电压，避免覆盖共享请求；受管理模式按原厂 max 聚合规则
@@ -19,8 +24,8 @@ XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属�
   资源操作退出后才能恢复，不能因 CRM ACK 就强行继续。
 - 新增 `giulia_pcie_cpu_noc`，依据当前 CMD DB 解析 HLOS SH1/CN0，生成
   X=0/Y=1 的二进制请求，按 VCD 排序，通过真实 RPMh core 等待两条
-  VALID+COMMIT 命令完成。它只提升 ACTIVE_ONLY 的 CPU 访问下限，显式
-  禁止进入低功耗，不写零撤票；部分超时保留 TCS，迟到 ACK 只观察不重发。
+  VALID+COMMIT 命令完成。它只在外部所有者已阻止低功耗切换时请求
+  ACTIVE_ONLY 的 CPU 访问下限，不写零撤票；部分超时保留 TCS，迟到 ACK 只观察不重发。
   完成后保持共享下限至冷重启，不伪造原有 BCM 请求的恢复。
 
 这三项尚未做新的 XNU 真机验证；协调模式和 CPU-NoC core 均没有自动
