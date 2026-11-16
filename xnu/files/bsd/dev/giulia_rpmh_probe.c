@@ -28,7 +28,7 @@ static struct {
     struct gr_mapping shared, rsc, db, gic;
     volatile struct loader_firmware_quiet *quiet;
     struct giulia_rpmh rpmh;
-    uint32_t address[GR_COUNT], raw[2][GR_COUNT];
+    uint32_t address[GR_COUNT], raw[2][GR_COUNT], observed[2];
     uint32_t irq_dirty, irq_prior, guard_failed, reads, version;
 } gr;
 static const char *const gr_names[9]={"xo.lvl","cx.lvl","ldob15","ldoc3",
@@ -155,7 +155,7 @@ static void gr_thread(void *arg,__unused wait_result_t wait)
 {
     uint64_t pa=(uint64_t)(uintptr_t)arg;
     struct giulia_rpmh_io io={0,gr_read,gr_write,gr_barrier,gr_delay};
-    uint32_t again[GR_COUNT]; int valid=0,rc=0,quiet=0;
+    uint32_t again[GR_COUNT]; int valid=0,rc=0,quiet=0,clean=0;
     char line[192];
     gr_map(&gr.shared,pa,sizeof(struct loader_firmware_quiet),VM_WIMG_WCOMB);
     if (!gr.shared.address) goto done;
@@ -180,6 +180,7 @@ static void gr_thread(void *arg,__unused wait_result_t wait)
         if (!gr_guard()) { rc=GIULIA_RPMH_PREREQUISITE; goto report; }
         rc=giulia_rpmh_read(&gr.rpmh,gr.address[i]);
         if (rc || (rc=giulia_rpmh_read_result(&gr.rpmh,&gr.raw[pass][i]))) goto report;
+        gr.observed[pass]|=1u<<i;
         gr.reads++;
     }
     valid=gr_plan(again) && !memcmp(again,gr.address,sizeof(again)) &&
@@ -188,17 +189,21 @@ report:
     snprintf(line,sizeof(line),"ace5-rpmh-read: rc=%d stable=%u reads=%u pending=%u guard=%u irq=%#x tcs=%#x cmd=%#x\n",
         rc,valid,gr.reads,gr.rpmh.triggered&&!gr.rpmh.completed,gr.guard_failed,
         gr.rpmh.last_irq,gr.rpmh.last_tcs,gr.rpmh.last_command); gr_log(line);
+    snprintf(line,sizeof(line),"ace5-rpmh-read: busy_reason=%u irq=%#x slot=%u status=%#x enable=%#x control=%#x triggered=%u\n",
+        gr.rpmh.busy_reason,gr.rpmh.busy_irq,gr.rpmh.busy_slot,gr.rpmh.busy_status,
+        gr.rpmh.busy_enable,gr.rpmh.busy_control,gr.rpmh.triggered); gr_log(line);
     for (unsigned i=0;i<GR_COUNT;i++) {
-        snprintf(line,sizeof(line),"ace5-rpmh-read: item=%u addr=%#x first=%#x second=%#x\n",
-            i,gr.address[i],gr.raw[0][i],gr.raw[1][i]); gr_log(line);
+        snprintf(line,sizeof(line),"ace5-rpmh-read: item=%u addr=%#x first=%#x second=%#x observed=%u/%u\n",
+            i,gr.address[i],gr.raw[0][i],gr.raw[1][i],(gr.observed[0]>>i)&1u,(gr.observed[1]>>i)&1u); gr_log(line);
     }
 release:
     if (giulia_rpmh_bus_owned(&gr.rpmh) || !gr_irq_release()) goto retain;
     if (quiet && !gr_request(0)) goto retain;
+    clean=quiet;
     if (valid) gr_log("ace5-rpmh-read: capture complete; 46 READ replies stable; resource ownership NOT assumed\n");
 done:
     gr_unmap(&gr.gic); gr_unmap(&gr.db); gr_unmap(&gr.rsc); gr_unmap(&gr.shared);
-    if (valid) gr_log("ace5-rpmh-read: cleanup complete; IRQ restored and firmware resumed\n");
+    if (clean) gr_log("ace5-rpmh-read: cleanup complete; IRQ restored and firmware resumed\n");
     thread_terminate(current_thread()); return;
 retain:
     gr_log("ace5-rpmh-read: incomplete; IRQ/mappings/firmware lease retained; cold reboot required\n");

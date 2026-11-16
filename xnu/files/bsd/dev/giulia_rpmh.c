@@ -194,7 +194,11 @@ static int transfer(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd
      */
     p->triggered = p->completed = 0;
     p->response = p->response_valid = 0; p->read_request = is_read;
-    if ((r = giulia_rpmh_bus_claim(p))) return r;
+    p->busy_reason = p->busy_irq = p->busy_slot = 0;
+    p->busy_status = p->busy_enable = p->busy_control = 0;
+    if ((r = giulia_rpmh_bus_claim(p))) {
+        p->busy_reason = GIULIA_RPMH_BUSY_OWNER; return r;
+    }
     p->state = GIULIA_RPMH_OWNED; p->count = count;
     p->dirty = p->triggered = p->completed = p->polls = 0;
     p->error = p->cleanup_error = 0;
@@ -204,7 +208,10 @@ static int transfer(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd
         ((config >> 27) & 31u) < count) { r = GIULIA_RPMH_PREREQUISITE; goto failed; }
     v = rd(p, IRQ_STATUS);
     if (v == 0xffffffffu) { r = GIULIA_RPMH_READBACK; goto failed; }
-    if (v & 7u) { r = GIULIA_RPMH_BUSY; goto failed; }
+    if (v & 7u) {
+        p->busy_reason = GIULIA_RPMH_BUSY_IRQ; p->busy_irq = v;
+        r = GIULIA_RPMH_BUSY; goto failed;
+    }
     /* Refuse another active-slot transaction, including overlapping VRM
      * resources. Global lease serializes all cooperative clients thereafter.
      */
@@ -214,7 +221,11 @@ static int transfer(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd
         uint32_t control = rd(p, CONTROL + i * STRIDE);
         if (status == 0xffffffffu || enable == 0xffffffffu || control == 0xffffffffu)
             { r = GIULIA_RPMH_READBACK; goto failed; }
-        if (!status || enable || (control & TRIGGER)) { r = GIULIA_RPMH_BUSY; goto failed; }
+        if (!status || enable || (control & TRIGGER)) {
+            p->busy_reason = GIULIA_RPMH_BUSY_SLOT; p->busy_slot = i;
+            p->busy_status = status; p->busy_enable = enable; p->busy_control = control;
+            r = GIULIA_RPMH_BUSY; goto failed;
+        }
     }
     p->saved_control = rd(p, CONTROL); p->saved_wait = rd(p, WAIT);
     v = rd(p, IRQ_ENABLE);

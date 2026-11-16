@@ -20,6 +20,10 @@ enum giulia_rpmh_state {
     GIULIA_RPMH_IDLE = 0, GIULIA_RPMH_OWNED,
     GIULIA_RPMH_FAULT, GIULIA_RPMH_DONE
 };
+enum giulia_rpmh_busy_reason {
+    GIULIA_RPMH_BUSY_NONE, GIULIA_RPMH_BUSY_OWNER,
+    GIULIA_RPMH_BUSY_IRQ, GIULIA_RPMH_BUSY_SLOT
+};
 enum giulia_rpmh_prerequisite {
     GIULIA_RPMH_DRV2_MAPPED = 1u << 0,
     GIULIA_RPMH_V3_NONCHANNEL_LAYOUT = 1u << 1,
@@ -43,6 +47,9 @@ struct giulia_rpmh {
     uint32_t saved_cmd[GIULIA_RPMH_MAX_COMMANDS][3];
     uint32_t last_irq, last_tcs, last_command, polls;
     uint32_t read_request, response, response_valid;
+    /* First admission failure from existing reads, before any RSC write.
+     * Diagnostic only; these fields never relax idle/IRQ/ownership checks. */
+    uint32_t busy_reason, busy_irq, busy_slot, busy_status, busy_enable, busy_control;
     int error, cleanup_error;
 };
 

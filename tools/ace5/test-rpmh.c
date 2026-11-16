@@ -165,17 +165,22 @@ static void transport_tests(void)
     assert(giulia_rpmh_bus_claim(&peer) == 0);
     assert(giulia_rpmh_bus_claim(&peer) == GIULIA_RPMH_BUSY);
     assert(giulia_rpmh_write(&p, cmd, 2) == GIULIA_RPMH_BUSY && m.reads == 0);
+    assert(p.busy_reason==GIULIA_RPMH_BUSY_OWNER && !p.triggered);
     assert(giulia_rpmh_bus_release(&wrong) == GIULIA_RPMH_STATE);
     assert(giulia_rpmh_bus_release(&peer) == 0);
     assert(giulia_rpmh_write(&p, cmd, 2) == 0);
+    assert(p.busy_reason==GIULIA_RPMH_BUSY_NONE);
     assert(p.completed && m.triggers == 1 && m.vote[0][0] == 1800 && m.vote[0][1] == 1);
     restored(&m, &p); /* Restored TCS buffers did NOT restore remote votes. */
 
     setup(&m, &p); set(&m, ENABLE + 672, 1);
     assert(giulia_rpmh_write(&p, cmd, 2) == GIULIA_RPMH_BUSY && m.writes == 0);
+    assert(p.busy_reason==GIULIA_RPMH_BUSY_SLOT && p.busy_slot==1 &&
+        p.busy_status==1 && p.busy_enable==1 && p.busy_control==0 && !p.triggered);
     assert(!giulia_rpmh_bus_owned(&p));
     setup(&m, &p); set(&m, TCS + 4, 2);
     assert(giulia_rpmh_write(&p, cmd, 2) == GIULIA_RPMH_BUSY && m.writes == 0);
+    assert(p.busy_reason==GIULIA_RPMH_BUSY_IRQ && p.busy_irq==2 && !p.triggered);
     setup(&m, &p); set(&m, 0, 2u << 16);
     assert(giulia_rpmh_write(&p, cmd, 2) == GIULIA_RPMH_PREREQUISITE && m.writes == 0);
     setup(&m, &p); set(&m, 0x0c, (8u << 12) | (1u << 27));

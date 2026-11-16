@@ -141,7 +141,12 @@ int main(void)
     setup();gic[0x304/4]=GR_IRQ;run();assert(!triggers && !mask_writes && maps==unmaps);
     setup();gic[0x204/4]=GR_IRQ;run();assert(!triggers && !mask_writes && maps==unmaps);
     setup();drop_mask=1;run();assert(!triggers && maps==unmaps && !shared->request);
-    setup();drift_at=24;run();assert(gr.reads==46 && !complete && !cleaned && maps==unmaps);
+    setup();drift_at=24;run();assert(gr.reads==46 && !complete && cleaned && maps==unmaps);
+    setup();rsc[(0xd2c+672)/4]=3;run();
+    assert(!triggers && !gr.reads && !gr.observed[0] && !gr.observed[1] && !complete && cleaned);
+    assert(gr.rpmh.busy_reason==GIULIA_RPMH_BUSY_SLOT && gr.rpmh.busy_slot==1 && gr.rpmh.busy_enable==3);
+    assert(maps==unmaps && !shared->request && gic_enabled==(GR_IRQ|1));
+    puts("Ace5 RPMh busy admission: exact blocker and unobserved fields preserved; cleanup independent of capture");
     setup();hold_at=1;run();assert(triggers==1 && !complete && !unmaps && shared->request);
     assert(giulia_rpmh_bus_owned(&gr.rpmh) && gr.irq_dirty && !(gic_enabled&GR_IRQ));
     rsc[0xd28/4]=1;rsc[0xd04/4]=1;rsc[0xd40/4]=0x10100;rsc[0xd44/4]=2;hold_at=0;
