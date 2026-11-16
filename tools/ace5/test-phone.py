@@ -146,25 +146,26 @@ class PhoneTests(unittest.TestCase):
     def test_wifi_probe_rejects_unobserved_or_persistent_runs(self):
         arguments = self.namespace['ace5_wifi_probe_arguments']
         self.assertEqual(arguments(None, 0, None, 0), '')
-        for mode, cpu, kernel, seconds in ((5, 1, 'kernel', 30), (1, 0, 'kernel', 30),
+        for mode, cpu, kernel, seconds in ((6, 1, 'kernel', 30), (1, 0, 'kernel', 30),
                                            (2, 1, None, 30), (1, 1, 'kernel', 0),
                                            (2, 1, 'kernel', -1)):
             with self.subTest(mode=mode, cpu=cpu, seconds=seconds), self.assertRaises(RuntimeError):
                 arguments(mode, cpu, kernel, seconds)
-        for mode in (1, 2, 3, 4):
+        for mode in (1, 2, 3, 4, 5):
             self.assertEqual(arguments(mode, 1, 'kernel', 30), f' ace5_wifi_probe={mode}')
         self.assertEqual(self.commands, [])
 
     def test_wifi_probe_requires_its_actual_completion(self):
         check = self.namespace['check_wifi_probe_log']
         check(None, '', self.log)
-        for mode in (1, 2, 3, 4):
+        for mode in (1, 2, 3, 4, 5):
             start = f'ace5-wifi: probe={mode} read-only begin'
             end = 'ace5-wifi: read-only probe complete'
             header = 'ace5-wifi: early CESTA/CRM headers captured'
             aop = 'ace5-wifi: AOP descriptor captured'
             full = 'ace5-wifi: full SM/CRM snapshot captured; no table/channel writes'
-            markers = [start, end] + ([header] if mode >= 2 else []) + ([aop] if mode >= 3 else []) + ([full] if mode == 4 else [])
+            arc = 'ace5-wifi: HLOS ARC snapshot captured; resource ownership NOT assumed'
+            markers = [start, end] + ([header] if 2 <= mode <= 4 else []) + ([aop] if 3 <= mode <= 4 else []) + ([full] if mode == 4 else []) + ([arc] if mode == 5 else [])
             text = '\n'.join(markers)
             check(mode, text, self.log)
             for marker in markers:

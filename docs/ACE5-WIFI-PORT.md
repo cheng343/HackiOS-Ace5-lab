@@ -4,6 +4,33 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：HLOS ARC 原始请求的只读探测
+
+新增独立选择的 `--wifi-probe 5`。仅在确认匹配当前 SM8650 电源固件后
+进行首次访问测试，读取 ARC 的 HLOS 行；该模式不追加 SM/CRM/AOP 探测。
+其他模式的寄存器读取范围不变。解析当前 CMD DB 后，只读取 XO、CX 两个
+资源，各采样两次。拒绝错误映射、超出本固件 14 个资源的地址、非 16 字节
+对齐、重复资源、越界 selector、全 1 返回和采样变化；无寄存器写操作。
+
+依据来自两部分。公开原厂固定版本
+[sys_pm_vx.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/soc/qcom/sys_pm_vx.c)
+的 `drv_names_pineapple` 将 ARC/CXPC 第 2 项标为 HLOS。当前设备 AOP
+固件的静态分析确认 ARC 表的 CPU 本地基址 `0x00600000`、每行
+`0x10000`、资源间隔 `0x10`、selector 低 4 位，以及外部地址转换
+`+0x0b000000`。因此这次诊断选择 AP 视图 `0x0b620000`。这些是独立
+实现所用的地址/协议事实；固件与反汇编内容保留私有，不复制到源码。
+
+本次识别的 AOP 分区为 524288 字节，SHA-256 为
+`eb99c45cf082da15e75f42f90191d6dacd366948b7f0c2d636a205265572cb47`。
+私有试验打包器在启动前重新读取活动分区哈希，不允许离线旧 DT 跳过检查。
+固件能访问该表不等于 AP 访问一定可行；首次试验单独记录，不能用云端
+fixture 成功代替。云测试覆盖实际 CMD DB parser、四次读取故障、全部
+采样位置漂移、错误映射与地址，以及 XNU 实际入口和完整映射清理。
+
+稳定采样只提供当时请求值，尚不建立资源所有权或允许撤回共享请求。
+它不是物理电压、SLEEP/WAKE 请求或七路 VRM 基线。尤其不能把 ARC 的
+HLOS 编号 2 直接套用为 VRM 的 voter 编号，后者需要独立证据。
+
 ## 2026-11-16：真机交接发现 GEM XO 旁路编码不匹配
 
 对代码 `6a7e203` 进行了 60 秒 XNU 只读探测，随后确认 Android 启动完成。
@@ -25,6 +52,11 @@ HW-control 或未完成 UPDATE 仍被拒绝。持有期间即使从 HID=0 变为
 以及两种合法编码下真实 ARC/RPMh/clock/QoS core 的组合。此次真机结果
 验证的是只读探测与输入条件；修复后的时钟写入和 Wi-Fi 联网尚未实测。
 原始电源请求、共享资源所有权和完整供电/PCIe 启动接线仍待完成。
+
+该修复 `5a3c7de` 已通过[云构建 43810916724](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43810916724)：
+全部回归、两种 loader 与完整 XNU 编译成功；下载后验证七项文件长度、
+哈希、ZIP CRC、源码提交及全部新旧测试记录。缓存命中 1065/1068，
+3 次重新编译；修复后的时钟写入仍未在真机执行。
 
 依据：[固定原厂 RCG2 频率计算](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/clk/qcom/clk-rcg2.c#L289)。
 

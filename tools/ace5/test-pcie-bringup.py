@@ -42,7 +42,7 @@ def main():
         (drivers/'giulia_wifi_board.c', root/'tools/ace5/test-wifi-board.c'),
         (drivers/'giulia_wifi_supply.c', root/'tools/ace5/test-wifi-supply.c'),
         (drivers/'giulia_mhi_snapshot.c', root/'tools/ace5/test-mhi-snapshot.c'),
-        (drivers/'giulia_aop.c', drivers/'giulia_pcie_noc.c', drivers/'giulia_bcm.c', drivers/'giulia_arc.c',
+        (drivers/'giulia_aop.c', drivers/'giulia_pcie_noc.c', drivers/'giulia_bcm.c', drivers/'giulia_arc.c', drivers/'giulia_arc_votes.c',
          drivers/'giulia_crm.c', root/'tools/ace5/test-wifi-probe.c'),
     ]
     for case in cases:

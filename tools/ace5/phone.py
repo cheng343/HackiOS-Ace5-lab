@@ -199,8 +199,8 @@ ROOT = Path(__file__).resolve().parents[2]
 def ace5_wifi_probe_arguments(mode, bootcpu, kernel, seconds):
     if not mode:
         return ''
-    if mode not in (1, 2, 3, 4) or not kernel or bootcpu != 1 or seconds <= 0:
-        raise RuntimeError('--wifi-probe requires mode 1..4, --kernel, --bootcpu 1 and a finite run')
+    if mode not in (1, 2, 3, 4, 5) or not kernel or bootcpu != 1 or seconds <= 0:
+        raise RuntimeError('--wifi-probe requires mode 1..5, --kernel, --bootcpu 1 and a finite run')
     return f' ace5_wifi_probe={mode}'
 
 
@@ -209,12 +209,14 @@ def check_wifi_probe_log(mode, text, log):
         return
     markers = [f'ace5-wifi: probe={mode} read-only begin',
                'ace5-wifi: read-only probe complete']
-    if mode >= 2:
+    if 2 <= mode <= 4:
         markers.append('ace5-wifi: early CESTA/CRM headers captured')
-    if mode >= 3:
+    if 3 <= mode <= 4:
         markers.append('ace5-wifi: AOP descriptor captured')
     if mode == 4:
         markers.append('ace5-wifi: full SM/CRM snapshot captured; no table/channel writes')
+    if mode == 5:
+        markers.append('ace5-wifi: HLOS ARC snapshot captured; resource ownership NOT assumed')
     if any(marker not in text for marker in markers):
         raise RuntimeError(f'Wi-Fi handoff probe incomplete; see {log}')
 
@@ -261,8 +263,8 @@ run.add_argument('--verbose', action='store_true')
 run.add_argument('--kernel', type=Path, help='Explicit locally built Mach-O kernel')
 run.add_argument('--root-image', type=Path, help='Local small APFS image, e.g. with device firmware')
 run.add_argument('--touch', action='store_true', help='Enable the giulia S3910 driver; requires --kernel')
-run.add_argument('--wifi-probe', type=int, choices=[1, 2, 3, 4],
-                 help='Read-only Ace 5 handoff probe: 1 baseline, 2 CESTA/CRM headers, 3 AOP headers, 4 full vendor SM/CRM runtime snapshot; requires --kernel, CPU 1 and a finite run')
+run.add_argument('--wifi-probe', type=int, choices=[1, 2, 3, 4, 5],
+                 help='Read-only Ace 5 handoff probe: 1 baseline, 2 CESTA/CRM headers, 3 AOP headers, 4 full SM/CRM snapshot, 5 HLOS ARC votes with a separately verified firmware profile; requires --kernel, CPU 1 and a finite run')
 run.add_argument('--aop-channel-test', action='store_true',
                  help='Open/close only the AOP host channel while loader firmware clients are parked; requires CPU 1 and 10..300 seconds')
 run.add_argument('--wlan-pdc-test', action='store_true',

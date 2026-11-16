@@ -2,7 +2,8 @@
 /* Ace 5 XNU handoff diagnostics. ace5_wifi_probe=1 reads the known GCC,
  * TLMM and CMD DB/RSC resources; >=2 adds narrow PCIe CESTA/CRM headers;
  * >=3 reads AOSS/QMP descriptor metadata without message payloads;
- * =4 deliberately attempts the vendor diagnostic SM/CRM runtime whitelist.
+ * =4 deliberately attempts the vendor diagnostic SM/CRM runtime whitelist;
+ * =5 instead adds the SM8650 HLOS ARC vote table (no SM/CRM/AOP reads).
  * This file has no device-register write operation and enables no radio.
  * Linux/vendor early-probe access is evidence for the intended MMIO path,
  * not a guarantee against hardware aborts in an untested boot environment.
@@ -23,6 +24,7 @@
 #include "giulia_aop.h"
 #include "giulia_bcm.h"
 #include "giulia_arc.h"
+#include "giulia_arc_votes.h"
 
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
@@ -31,7 +33,7 @@ extern void loader_log_line(const char *);
 
 static unsigned wifi_probe_mode, wifi_probe_started;
 struct wifi_mapping { vm_offset_t allocation, address; vm_size_t size; };
-struct wifi_probe_map { struct wifi_mapping gcc, gpio, rsc, db, sm, crm, aop; };
+struct wifi_probe_map { struct wifi_mapping gcc, gpio, rsc, db, sm, crm, aop, arc; };
 static void wifi_log(const char *format, ...) __printflike(1, 2);
 static void wifi_log(const char *format, ...)
 {
@@ -70,6 +72,8 @@ static void wifi_map(struct wifi_mapping *m, vm_offset_t physical,
 }
 static uint32_t wifi_aop_read(void *cookie, uint32_t offset)
 { return wifi_read((uintptr_t)cookie, offset); }
+static int wifi_arc_read(void *cookie,uint32_t offset,uint32_t *value)
+{ *value=wifi_read((uintptr_t)cookie,offset); return 0; }
 static int wifi_noc_read(void *cookie, unsigned block, uint32_t offset, uint32_t *value)
 {
     struct wifi_probe_map *m = cookie;
@@ -141,7 +145,24 @@ static void wifi_probe_thread(__unused void *arg, __unused wait_result_t wait)
                 !error ? arc.level[selector]:0);
         }
     }
-    if (wifi_probe_mode >= 2) {
+    if (wifi_probe_mode == 5) {
+        struct giulia_arc_votes s;
+        wifi_log("ace5-wifi: HLOS ARC vote-table diagnostic starts; profile must be verified before boot\n");
+        wifi_map(&m.arc,GIULIA_ARC_HLOS_PHYS,GIULIA_ARC_HLOS_SIZE,VM_WIMG_IO);
+        if (!m.arc.address) { wifi_log("ace5-wifi: HLOS ARC mapping failed\n"); goto out; }
+        const struct giulia_arc_votes_io io={(void *)m.arc.address,wifi_arc_read,
+            GIULIA_ARC_HLOS_PHYS,GIULIA_ARC_HLOS_SIZE};
+        int rc=giulia_arc_votes_snapshot(&io,(const uint8_t *)m.db.address,
+            GIULIA_RPMH_DB_MAX,db_version,&s);
+        wifi_log("ace5-wifi: HLOS ARC snapshot rc=%d valid=%u reads=%u failed=%#x callback=%d\n",
+            rc,s.valid,s.reads,s.failed_offset,s.callback_error);
+        for (unsigned i=0;i<2;i++)
+            wifi_log("ace5-wifi: HLOS ARC %s resource=%#x raw=%#x after=%#x selector=%u\n",
+                i ? "cx.lvl":"xo.lvl",s.resource[i].address,s.raw[i],s.after[i],s.selector[i]);
+        if (rc) goto out;
+        wifi_log("ace5-wifi: HLOS ARC snapshot captured; resource ownership NOT assumed\n");
+    }
+    if (wifi_probe_mode >= 2 && wifi_probe_mode <= 4) {
         /* Vendor crm_probe reads ENABLE/VERSION/CFG immediately after map,
          * with no clock/regulator/ICC operation. pci-msm pcie_init accesses
          * SM overrides before driver registration/enumeration. These exact
@@ -168,7 +189,7 @@ static void wifi_probe_thread(__unused void *arg, __unused wait_result_t wait)
         }
         wifi_log("ace5-wifi: early CESTA/CRM headers captured; full runtime snapshot deferred\n");
     }
-    if (wifi_probe_mode >= 3) {
+    if (wifi_probe_mode >= 3 && wifi_probe_mode <= 4) {
         struct giulia_aop_snapshot s;
         struct giulia_aop_io io = {0};
         int rc;
@@ -226,6 +247,7 @@ static void wifi_probe_thread(__unused void *arg, __unused wait_result_t wait)
     }
     wifi_log("ace5-wifi: read-only probe complete; NoC/CESTA ownership and rail baselines NOT assumed\n");
 out:
+    wifi_unmap(&m.arc);
     wifi_unmap(&m.aop);
     wifi_unmap(&m.crm); wifi_unmap(&m.sm);
     wifi_unmap(&m.db); wifi_unmap(&m.rsc);
@@ -237,7 +259,7 @@ void giulia_wifi_init(void)
     unsigned mode = 0;
     thread_t thread;
     if (!PE_parse_boot_argn("ace5_wifi_probe", &mode, sizeof(mode)) || !mode) return;
-    if (hackios_platform() != HACKIOS_PLATFORM_GIULIA || mode > 4) {
+    if (hackios_platform() != HACKIOS_PLATFORM_GIULIA || mode > 5) {
         wifi_log("ace5-wifi: unsupported board/probe mode; no MMIO\n"); return;
     }
     if (__atomic_exchange_n(&wifi_probe_started, 1, __ATOMIC_ACQ_REL)) return;
