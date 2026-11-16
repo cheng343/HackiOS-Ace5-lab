@@ -8,7 +8,18 @@ XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属�
 
 带宽表的真机确认见本文后续记录；它尚未证明物理 NoC 就绪。本次将既有
 `giulia_wlan_pdc` 接入 XNU 的 AOP MMIO 入口，选项为 `--wlan-pdc-test`。
-这次入口的云端 C 测试和真机结果仍待验证，不能据此宣布 Wi-Fi 可用。
+源码 [`c04fecc`](https://github.com/cheng343/HackiOS-Ace5-lab/commit/c04fecc42cd1f072568248419a0ab9b69988fc55)
+已通过[云构建 43796749624](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43796749624)
+和本机 PKG110 的 60 秒临时内核诊断，不能据此宣布 Wi-Fi 可用。
+
+实机日志为 `rc=0 attempted=0x3ff delivered=0x3ff pending=0`，完整 10 条
+消息收到 QMP 确认，内核正常返回，静态用户态自检为 35 项、0 失败。
+主机确认 `power-reset-required=yes`，随后冷重启并读到 Android
+`sys.boot_completed=1`。私有日志 SHA-256：
+`fc027a51f4f1e2f49a81bd0b1757224ec5dcac8da94f0bcf6ae89701feb2ec52`。
+未启动 WLAN、未发七路 RPMh 电压/模式请求、未训练 PCIe。下一项仍是共享
+电源策略和完整 NoC/CESTA/GCC 启动服务，再进入 PCIe/PHY、DMA/MSI、MHI/
+固件和实际扫描/联网。
 
 主机从本机当前 DT 提取完整 508 字节 `qcom,pdc_init_table`；loader 只复制
 该小表，并通过 chosen 属性交给 XNU。内核逐字节核对本板支持的原厂表，
