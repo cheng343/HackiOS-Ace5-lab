@@ -151,9 +151,11 @@ static int gr_plan(uint32_t address[GR_COUNT])
         if (address[i]==address[j]) return 0;
     return 1;
 }
+static uint32_t gr_slot0_addr;
 static void gr_dump_slots(void)
 {
     char line[192];
+    gr_slot0_addr = 0;
     for (unsigned s = 0; s < 3; s++) {
         uint32_t bank = s * 672u;
         uint32_t status = gr_mmio(&gr.rsc, 0xd28u + bank);
@@ -171,6 +173,7 @@ static void gr_dump_slots(void)
             uint32_t data = gr_mmio(&gr.rsc, off + 8u);
             uint32_t sts = gr_mmio(&gr.rsc, off + 12u);
             uint32_t resp = gr_mmio(&gr.rsc, off + 16u);
+            if (s == 0 && c == 0 && addr && !(addr & 3u)) gr_slot0_addr = addr;
             snprintf(line, sizeof(line),
                 "ace5-rpmh-read: pre-cmd slot=%u cmd=%u msgid=%#x addr=%#x data=%#x sts=%#x resp=%#x\n",
                 s, c, msgid, addr, data, sts, resp);
@@ -213,6 +216,16 @@ static void gr_thread(void *arg,__unused wait_result_t wait)
     }
     valid=gr_plan(again) && !memcmp(again,gr.address,sizeof(again)) &&
         !memcmp(gr.raw[0],gr.raw[1],sizeof(gr.raw[0]));
+    if (valid && gr_slot0_addr) {
+        uint32_t v0 = 0, v1 = 0;
+        int rc0 = giulia_rpmh_read(&gr.rpmh, gr_slot0_addr);
+        if (!rc0) rc0 = giulia_rpmh_read_result(&gr.rpmh, &v0);
+        int rc1 = giulia_rpmh_read(&gr.rpmh, gr_slot0_addr);
+        if (!rc1) rc1 = giulia_rpmh_read_result(&gr.rpmh, &v1);
+        snprintf(line, sizeof(line), "ace5-rpmh-read: slot0-cmd0 addr=%#x rc=%d/%d val=%#x/%#x\n",
+            gr_slot0_addr, rc0, rc1, v0, v1);
+        gr_log(line);
+    }
 report:
     snprintf(line,sizeof(line),"ace5-rpmh-read: rc=%d stable=%u reads=%u pending=%u guard=%u irq=%#x tcs=%#x cmd=%#x\n",
         rc,valid,gr.reads,gr.rpmh.triggered&&!gr.rpmh.completed,gr.guard_failed,
