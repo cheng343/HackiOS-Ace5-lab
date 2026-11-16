@@ -7,7 +7,7 @@ XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属�
 ## 2026-11-16：HLOS ARC 原始请求的只读探测
 
 新增独立选择的 `--wifi-probe 5`。仅在确认匹配当前 SM8650 电源固件后
-进行首次访问测试，读取 ARC 的 HLOS 行；该模式不追加 SM/CRM/AOP 探测。
+查询 ARC 的 HLOS 行；该模式不追加 SM/CRM/AOP 探测。
 其他模式的寄存器读取范围不变。解析当前 CMD DB 后，只读取 XO、CX 两个
 资源，各采样两次。拒绝错误映射、超出本固件 14 个资源的地址、非 16 字节
 对齐、重复资源、越界 selector、全 1 返回和采样变化；无寄存器写操作。
@@ -23,9 +23,23 @@ XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属�
 本次识别的 AOP 分区为 524288 字节，SHA-256 为
 `eb99c45cf082da15e75f42f90191d6dacd366948b7f0c2d636a205265572cb47`。
 私有试验打包器在启动前重新读取活动分区哈希，不允许离线旧 DT 跳过检查。
-固件能访问该表不等于 AP 访问一定可行；首次试验单独记录，不能用云端
-fixture 成功代替。云测试覆盖实际 CMD DB parser、四次读取故障、全部
-采样位置漂移、错误映射与地址，以及 XNU 实际入口和完整映射清理。
+
+**首次真机试验失败。** `6254a0c` 通过云构建 43812419602 后，在 CPU
+直接读取第一项 XO（该表偏移 `0xd0`）时触发同步外部 Data Abort，
+ESR=`0x96000010`。未读取到投票值，没有电源写入；loader 已取回异常
+日志，随后确认 Android 启动完成。异常说明当前 AP 直接访问不可用，
+不能单凭此日志区分权限限制与映射等原因。该路径不再映射或直接读取 ARC。
+
+改用 Linux 原厂同类接口 `qcom_scm_io_readl()` 的 SCM IO_READ 协议：先
+询问调用是否存在，再请求具体地址；保留 Qualcomm A6 中断恢复上下文，
+限制恢复次数，拒绝错误返回和非 32 位结果。没有 IO_WRITE、修改访问权限
+或直接 MMIO 的回退路径。固件是否允许读取这张表仍需真机验证。
+协议依据 [qcom_scm.c](https://github.com/torvalds/linux/blob/v6.12/drivers/firmware/qcom/qcom_scm.c)
+和 [qcom_scm-smc.c](https://github.com/torvalds/linux/blob/v6.12/drivers/firmware/qcom/qcom_scm-smc.c)。
+
+云测试覆盖实际 CMD DB parser、四次读取故障、全部采样位置漂移、错误
+地址，以及实际 XNU 入口；另模拟 SCM 不支持、拒绝、A6 恢复和持续中断，
+确认错误后没有裸寄存器读取。编译及 fixture 成功不能代替设备结果。
 
 稳定采样只提供当时请求值，尚不建立资源所有权或允许撤回共享请求。
 它不是物理电压、SLEEP/WAKE 请求或七路 VRM 基线。尤其不能把 ARC 的

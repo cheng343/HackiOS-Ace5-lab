@@ -23,8 +23,10 @@ struct giulia_arc_votes {
 };
 /* Diagnostic only: resolve both resources before table reads, sample each
  * twice and validate the selector against that boot's CMD DB. No write API.
- * Caller must independently verify the firmware/profile and AP access before
- * mapping. A stable observation is NOT a retained ownership lease, a voltage
+ * Caller must independently verify the firmware/profile and use an allowed
+ * reader. Direct AP reads aborted in the device trial; the XNU diagnostic
+ * now uses SCM IO_READ with availability/error checks, never an ARC mapping.
+ * A stable observation is NOT a retained ownership lease, a voltage
  * measurement, a sleep/wake vote or permission to restore a shared resource. */
 int giulia_arc_votes_snapshot(const struct giulia_arc_votes_io *,const uint8_t *,
     uint32_t bytes,uint32_t version,struct giulia_arc_votes *);

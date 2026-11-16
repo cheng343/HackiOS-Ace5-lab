@@ -3,7 +3,7 @@
  * TLMM and CMD DB/RSC resources; >=2 adds narrow PCIe CESTA/CRM headers;
  * >=3 reads AOSS/QMP descriptor metadata without message payloads;
  * =4 deliberately attempts the vendor diagnostic SM/CRM runtime whitelist;
- * =5 instead adds the SM8650 HLOS ARC vote table (no SM/CRM/AOP reads).
+ * =5 instead asks SCM IO_READ for HLOS ARC votes (no ARC MMIO mapping).
  * This file has no device-register write operation and enables no radio.
  * Linux/vendor early-probe access is evidence for the intended MMIO path,
  * not a guarantee against hardware aborts in an untested boot environment.
@@ -33,7 +33,7 @@ extern void loader_log_line(const char *);
 
 static unsigned wifi_probe_mode, wifi_probe_started;
 struct wifi_mapping { vm_offset_t allocation, address; vm_size_t size; };
-struct wifi_probe_map { struct wifi_mapping gcc, gpio, rsc, db, sm, crm, aop, arc; };
+struct wifi_probe_map { struct wifi_mapping gcc, gpio, rsc, db, sm, crm, aop; };
 static void wifi_log(const char *format, ...) __printflike(1, 2);
 static void wifi_log(const char *format, ...)
 {
@@ -72,8 +72,56 @@ static void wifi_map(struct wifi_mapping *m, vm_offset_t physical,
 }
 static uint32_t wifi_aop_read(void *cookie, uint32_t offset)
 { return wifi_read((uintptr_t)cookie, offset); }
+/* Direct AP reads of this ARC aperture aborted on the device. Never map it.
+ * Ask the documented Qualcomm SCM IO_READ service instead. Protocol facts:
+ * Linux v6.12 drivers/firmware/qcom/qcom_scm{,-smc}.c, qcom_scm_io_readl(),
+ * __qcom_scm_is_call_available() and the A6 interrupted-call convention.
+ * No IO_WRITE, page permission change or alternate convention fallback. */
+static void wifi_smc_exchange(uint64_t r[8]);
+#ifndef GIULIA_WIFI_HOST_TEST
+static void wifi_smc_exchange(uint64_t r[8])
+{
+    register uint64_t x0 __asm__("x0")=r[0],x1 __asm__("x1")=r[1];
+    register uint64_t x2 __asm__("x2")=r[2],x3 __asm__("x3")=r[3];
+    register uint64_t x4 __asm__("x4")=r[4],x5 __asm__("x5")=r[5];
+    register uint64_t x6 __asm__("x6")=r[6],x7 __asm__("x7")=r[7];
+    __asm__ volatile("smc #0" : "+r"(x0),"+r"(x1),"+r"(x2),"+r"(x3),
+        "+r"(x4),"+r"(x5),"+r"(x6),"+r"(x7) : :
+        "x8","x9","x10","x11","x12","x13","x14","x15","x16","x17","memory");
+    r[0]=x0; r[1]=x1; r[2]=x2; r[3]=x3;
+    r[4]=x4; r[5]=x5; r[6]=x6; r[7]=x7;
+}
+#endif
+static int wifi_scm_read_call(uint64_t function,uint32_t argument,uint64_t *answer)
+{
+    uint64_t session=0;
+    *answer=0;
+    for (unsigned i=0;i<100;i++) {
+        uint64_t r[8]={i ? 1u:function,1u,argument,0,0,0,session,0};
+        wifi_smc_exchange(r); session=r[6];
+        if (r[0]==1) continue;
+        wifi_log("ace5-wifi: SCM function=%#llx argument=%#x status=%#llx answer=%#llx\n",
+            (unsigned long long)function,argument,(unsigned long long)r[0],(unsigned long long)r[1]);
+        if (r[0]) return -1;
+        *answer=r[1]; return 0;
+    }
+    wifi_log("ace5-wifi: SCM read did not finish; no new call or MMIO fallback\n");
+    return -1;
+}
 static int wifi_arc_read(void *cookie,uint32_t offset,uint32_t *value)
-{ *value=wifi_read((uintptr_t)cookie,offset); return 0; }
+{
+    unsigned *available=cookie;
+    uint64_t answer;
+    *value=0;
+    if ((offset&15u) || offset>0xd0u) return -1;
+    if (!*available) {
+        if (wifi_scm_read_call(0xc2000601u,0x02000501u,&answer) || answer!=1) return -1;
+        *available=1;
+    }
+    if (wifi_scm_read_call(0xc2000501u,GIULIA_ARC_HLOS_PHYS+offset,&answer) || answer>UINT32_MAX)
+        return -1;
+    *value=(uint32_t)answer; return 0;
+}
 static int wifi_noc_read(void *cookie, unsigned block, uint32_t offset, uint32_t *value)
 {
     struct wifi_probe_map *m = cookie;
@@ -147,10 +195,9 @@ static void wifi_probe_thread(__unused void *arg, __unused wait_result_t wait)
     }
     if (wifi_probe_mode == 5) {
         struct giulia_arc_votes s;
-        wifi_log("ace5-wifi: HLOS ARC vote-table diagnostic starts; profile must be verified before boot\n");
-        wifi_map(&m.arc,GIULIA_ARC_HLOS_PHYS,GIULIA_ARC_HLOS_SIZE,VM_WIMG_IO);
-        if (!m.arc.address) { wifi_log("ace5-wifi: HLOS ARC mapping failed\n"); goto out; }
-        const struct giulia_arc_votes_io io={(void *)m.arc.address,wifi_arc_read,
+        unsigned available=0;
+        wifi_log("ace5-wifi: HLOS ARC SCM read diagnostic starts; no direct ARC mapping\n");
+        const struct giulia_arc_votes_io io={&available,wifi_arc_read,
             GIULIA_ARC_HLOS_PHYS,GIULIA_ARC_HLOS_SIZE};
         int rc=giulia_arc_votes_snapshot(&io,(const uint8_t *)m.db.address,
             GIULIA_RPMH_DB_MAX,db_version,&s);
@@ -247,7 +294,6 @@ static void wifi_probe_thread(__unused void *arg, __unused wait_result_t wait)
     }
     wifi_log("ace5-wifi: read-only probe complete; NoC/CESTA ownership and rail baselines NOT assumed\n");
 out:
-    wifi_unmap(&m.arc);
     wifi_unmap(&m.aop);
     wifi_unmap(&m.crm); wifi_unmap(&m.sm);
     wifi_unmap(&m.db); wifi_unmap(&m.rsc);

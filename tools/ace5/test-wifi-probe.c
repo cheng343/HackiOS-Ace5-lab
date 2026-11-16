@@ -25,6 +25,8 @@ static unsigned mode, board, creates, exits, deallocs, lines, mapped, unmapped;
 static uint32_t failed_pa;
 static int thread_error, saw_complete, saw_noc, saw_aop, saw_full, resolver_calls;
 static unsigned arc_lines,saw_arc_votes;
+static unsigned smc_calls,smc_reads,smc_unavailable,smc_fail,smc_interrupt,smc_stuck,smc_pending;
+static uint64_t smc_function;
 static _Alignas(0x4000) uint32_t gcc[0x70000 / 4], gpio[0x100000 / 4], rsc[0x10000 / 4];
 static _Alignas(0x4000) uint32_t db[0x20000 / 4], sm_pages[0xc000 / 4], crm_pages[0x4000 / 4];
 static _Alignas(0x4000) uint32_t aop_pages[0x4000 / 4];
@@ -50,6 +52,25 @@ static int quiet_printf(const char *format, ...) { (void)format; return 0; }
 #define printf quiet_printf
 #include "../../xnu/files/bsd/dev/giulia_wifi.c"
 #undef printf
+static void wifi_smc_exchange(uint64_t r[8])
+{
+    smc_calls++;
+    assert(r[1]==1 && !r[3] && !r[4] && !r[5] && !r[7]);
+    if (r[0]==1) { assert(smc_pending && r[6]==0x12345678u); }
+    else { assert(!smc_pending && !r[6]); smc_function=r[0]; }
+    assert(smc_function==0xc2000601u || smc_function==0xc2000501u);
+    if (smc_function==0xc2000601u) assert(r[2]==0x02000501u);
+    else assert(r[2]==0xb620080u || r[2]==0xb620090u);
+    if (smc_stuck || smc_interrupt) {
+        if (smc_interrupt) smc_interrupt--;
+        smc_pending=1; r[0]=1; r[1]=UINT64_MAX; r[6]=0x12345678u; return;
+    }
+    smc_pending=0;
+    if (smc_calls==smc_fail) { r[0]=UINT64_MAX-3u; r[1]=UINT64_MAX; return; }
+    r[0]=0;
+    if (smc_function==0xc2000601u) r[1]=smc_unavailable ? 0:1;
+    else { smc_reads++; r[1]=arc_pages[(r[2]-0xb620000u)/4]; }
+}
 vm_offset_t ml_io_map_unmappable(vm_offset_t pa, vm_size_t size, unsigned int flags)
 {
     unsigned index; void *base; unsigned expected;
@@ -63,7 +84,6 @@ vm_offset_t ml_io_map_unmappable(vm_offset_t pa, vm_size_t size, unsigned int fl
     case 0x01d04000: index = 4; base = sm_pages; expected = sizeof(sm_pages); break;
     case 0x01d00000: index = 5; base = crm_pages; expected = sizeof(crm_pages); break;
     case 0x0c300000: index = 6; base = aop_pages; expected = sizeof(aop_pages); break;
-    case 0x0b620000: index = 7; base = arc_pages; expected = sizeof(arc_pages); break;
     default: assert(!"unexpected physical mapping"); return 0;
     }
     assert(size == expected);
@@ -122,6 +142,8 @@ static void setup(unsigned requested)
     creates = exits = deallocs = lines = mapped = unmapped = failed_pa = 0;
     thread_error = saw_complete = saw_noc = saw_aop = saw_full = resolver_calls = 0;
     arc_lines=saw_arc_votes=0;
+    smc_calls=smc_reads=smc_unavailable=smc_fail=smc_interrupt=smc_stuck=smc_pending=0;
+    smc_function=0;
     wifi_probe_started = wifi_probe_mode = 0;
     memset(db, 0, sizeof(db));
     memset(sm_pages, 0, sizeof(sm_pages)); memset(crm_pages, 0, sizeof(crm_pages));
@@ -197,6 +219,28 @@ static void arc_snapshot_core(void)
     }
     puts("Ace5 HLOS ARC votes: real parser, exact row, bounded reads, invalid selectors and drift rejected");
 }
+static void arc_scm_core(void)
+{
+    uint32_t value=99; unsigned available=0;
+    setup(5); smc_interrupt=2;
+    assert(!wifi_arc_read(&available,0x80,&value) && value==3);
+    assert(available && smc_calls==4 && smc_reads==1 && !smc_pending);
+    assert(!wifi_arc_read(&available,0x90,&value) && value==2 && smc_calls==5);
+    for (unsigned i=0;i<2;i++) {
+        unsigned calls=smc_calls;
+        assert(wifi_arc_read(&available,i ? 0xe0u:4u,&value)<0 && !value);
+        assert(smc_calls==calls);
+    }
+    for (unsigned fail=1;fail<=2;fail++) {
+        setup(5); available=0; value=99; smc_fail=fail;
+        assert(wifi_arc_read(&available,0x80,&value)<0 && !value && !smc_reads);
+        assert(smc_calls==fail);
+    }
+    setup(5); available=0; value=99; smc_stuck=1;
+    assert(wifi_arc_read(&available,0x80,&value)<0 && !value);
+    assert(smc_calls==100 && smc_pending && !smc_reads && !mapped);
+    puts("Ace5 ARC SCM: availability, A6 interruption, bounded wait and rejected calls have no direct MMIO fallback");
+}
 int main(void)
 {
     setup(0); giulia_wifi_init(); assert(!creates && !mapped);
@@ -210,8 +254,14 @@ int main(void)
     setup(3); giulia_wifi_init(); check(); assert(mapped == 127 && saw_noc && saw_aop && saw_complete);
     setup(4); giulia_wifi_init(); check(); assert(mapped == 127 && saw_full && saw_aop && saw_complete);
     setup(5); giulia_wifi_init(); check();
-    assert(mapped==143 && saw_arc_votes && saw_complete && !saw_noc && !saw_aop);
-    setup(5); failed_pa=0xb620000; giulia_wifi_init(); check(); assert(!saw_arc_votes && !saw_complete);
+    assert(mapped==15 && saw_arc_votes && saw_complete && !saw_noc && !saw_aop);
+    assert(smc_calls==5 && smc_reads==4);
+    setup(5); smc_unavailable=1; giulia_wifi_init(); check();
+    assert(!saw_arc_votes && !saw_complete && smc_calls==1 && !smc_reads && mapped==15);
+    for (unsigned fail=1;fail<=5;fail++) {
+        setup(5); smc_fail=fail; giulia_wifi_init(); check();
+        assert(!saw_arc_votes && !saw_complete && smc_calls==fail && mapped==15);
+    }
     setup(5); arc_pages[0x90/4]=UINT32_MAX; original=fingerprint();
     giulia_wifi_init(); check(); assert(!saw_arc_votes && !saw_complete);
     setup(4); sm[0x1078/4] = UINT32_MAX; original = fingerprint();
@@ -233,7 +283,7 @@ int main(void)
     puts("Ace5 XNU Wi-Fi probe: opt-in, board gate, read-only maps and cleanup passed");
     puts("Ace5 XNU NoC snapshot: actual full capture, read failures and untouched MMIO passed");
     puts("Ace5 XNU ARC probe: real level parser, selector diagnostics and untouched MMIO passed");
-    arc_snapshot_core();
+    arc_scm_core(); arc_snapshot_core();
     puts("Ace5 XNU HLOS ARC probe: opt-in mode5, no SM/CRM/AOP access and untouched MMIO passed");
     return 0;
 }
