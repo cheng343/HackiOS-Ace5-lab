@@ -42,6 +42,7 @@ static void peer(void)
         assert(shared->ack && gic[0x184/4]==GR_IRQ);
         mask_writes++; if (!drop_mask) gic_enabled&=~GR_IRQ;
         gic[0x184/4]=0;
+        gic[0x104/4]=gic_enabled;
     }
     if (gic[0x104/4]!=gic_enabled) {
         assert(gic[0x104/4]==GR_IRQ && shared->ack);
