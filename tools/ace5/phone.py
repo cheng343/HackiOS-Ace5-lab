@@ -331,6 +331,8 @@ run.add_argument('--gpu-probe', type=int, choices=range(1, 21),
                  help='Ace 5 GPU probe: 1 GCC, 2 GPUCC, 3 CX power, 4 XO clocks/GMU, 5 TCM, 6 streams, 7 firmware, 8 SMMU, 9 operating clocks, 10 GMU boot, 11 HFI query, 12 power tables, 13 core firmware, 14 scheduler memory, 15 GX power, 16 GPU SMMU and firmware, 17 CP initialization, 18 ZAP authentication, 19 nonsecure CP DMA, 20 BR/BV indirect buffer; requires --kernel')
 run.add_argument('--bootcpu', type=int, choices=[0, 1], default=0,
                  help='0: validated boot core; 1: experimental separate USB observer core')
+run.add_argument('--cpus', type=int, choices=range(1, 8), default=1,
+                 help='Number of XNU CPU cores to enable (1..7; >1 requires --bootcpu 1 and no single-core hardware probes)')
 run.add_argument('--live-log', action='store_true',
                  help='Save live log snapshots every 10 seconds; requires CPU 1 and a finite run')
 run.add_argument('--live-interval', type=float, default=10,
@@ -453,7 +455,12 @@ try:
         persistent = args.command == 'run' and validate_run_timing(
             seconds, args.bootcpu, args.gpu_probe, args.gpu_direct, args.gpu_keep,
             args.gpu_step_delay, args.live_log)
-        commandline = (f'cpus=1 loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
+        cpus = args.cpus if args.command == 'run' else 1
+        if cpus > 1 and (args.bootcpu != 1 or args.cpu_khz or args.wifi_probe or
+                         args.aop_channel_test or args.aop_cx_vote_test or args.rpmh_read_test or
+                         args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test):
+            raise RuntimeError('--cpus > 1 requires --bootcpu 1 and cannot be combined with single-core hardware probes')
+        commandline = (f'cpus={cpus} loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
                        'touchscreen=0 buttons=0 cpufreq=0 gpu=0 wifi=0 adsp=0')
         if args.command == 'run':
             if args.crm_channel_test and args.crm_bandwidth_test:

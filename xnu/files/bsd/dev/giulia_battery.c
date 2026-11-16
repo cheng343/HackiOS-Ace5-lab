@@ -219,8 +219,9 @@ bool giulia_battery_init(void)
         pe_arm_get_soc_base_phys() + reg[2] != 0x17180000) return false;
     PE_parse_boot_argn("cpus", &cpus, sizeof(cpus));
     PE_parse_boot_argn("bootcpu", &bootcpu, sizeof(bootcpu));
-    if (cpus != 1 || bootcpu != 1 || ml_get_topology_info()->num_cpus != 1) {
-        gb_log("ace5-battery: experimental GPIO transport requires cpus=1 bootcpu=1\n");
+    if (bootcpu != 1 || cpus < 1 || cpus > 7 ||
+        ml_get_topology_info()->num_cpus < 1 || ml_get_topology_info()->num_cpus > 7) {
+        gb_log("ace5-battery: experimental GPIO transport requires bootcpu=1 and cpus=1..7\n");
         return true;
     }
     __atomic_store_n(&gb_phase, GB_IDLE, __ATOMIC_RELEASE);

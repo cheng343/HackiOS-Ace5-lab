@@ -86,11 +86,13 @@ int main(void)
     assert(!giulia_battery_init() && !spawned && !reads && !writes);
     board = 2; bootcpu = 0;
     assert(giulia_battery_init() && !spawned && !reads && !writes);
-    bootcpu = 1; cpus = 2;
+    bootcpu = 1; cpus = 0;
     assert(giulia_battery_init() && !spawned && !reads && !writes);
-    cpus = 1; topology.num_cpus = 2;
+    cpus = 8;
     assert(giulia_battery_init() && !spawned && !reads && !writes);
-    topology.num_cpus = 1; gic[0]++;
+    cpus = 1; topology.num_cpus = 8;
+    assert(giulia_battery_init() && !spawned && !reads && !writes);
+    cpus = 1; topology.num_cpus = 1; gic[0]++;
     assert(!giulia_battery_init() && !spawned && !reads && !writes);
     gic[0]--;
     assert(giulia_battery_init() && spawned == 1 && !reads && !writes);
