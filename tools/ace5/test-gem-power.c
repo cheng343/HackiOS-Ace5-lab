@@ -12,7 +12,7 @@ struct board {
     uint32_t cmd,cfg,qos[3];
     unsigned gcc_reads,gcc_writes,qos_reads,qos_writes,off_stuck,fail_lease,leases;
 };
-static void database(uint8_t db[1024])
+static void arc_database(uint8_t db[1024])
 {
     /* Deliberately shifted addresses and selector2 != corner64. */
     memset(db,0,1024); le32(db,9); le32(db+4,0x0c0330db);
@@ -78,7 +78,7 @@ static void check_stop(struct board *b,struct giulia_rpmh *t,struct giulia_gem_p
 static void parser(void)
 {
     uint8_t db[1024],bad[1024]; struct giulia_arc_resource r; uint32_t s;
-    database(db); assert(!giulia_arc_resolve(db,sizeof(db),9,"cx.lvl",&r));
+    arc_database(db); assert(!giulia_arc_resolve(db,sizeof(db),9,"cx.lvl",&r));
     assert(r.address==0x31010 && r.count==5 && r.level[2]==64);
     assert(!giulia_arc_select(&r,64,&s) && s==2);
     assert(!giulia_arc_select(&r,65,&s) && s==3);
@@ -110,7 +110,7 @@ static void parser(void)
 static void flow(void)
 {
     struct board b; struct giulia_rpmh t; struct giulia_gem_power p;
-    uint8_t db[1024]; database(db);
+    uint8_t db[1024]; arc_database(db);
     for (unsigned prior=0;prior<3;prior++) {
         struct giulia_gem_clock_io io=prepare(&b,&t,&p);
         struct giulia_gem_power_lease l={&b,platform};
@@ -142,7 +142,7 @@ static void flow(void)
 static void failures(void)
 {
     struct board b; struct giulia_rpmh t; struct giulia_gem_power p;
-    uint8_t db[1024]; database(db);
+    uint8_t db[1024]; arc_database(db);
     struct giulia_gem_power_baseline base={{0,0},3};
     for (unsigned stage=1;stage<=4;stage++) {
         struct giulia_gem_clock_io io=prepare(&b,&t,&p);
