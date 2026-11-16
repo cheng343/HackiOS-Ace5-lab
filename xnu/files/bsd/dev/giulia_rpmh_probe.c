@@ -217,6 +217,7 @@ static void gr_thread(void *arg,__unused wait_result_t wait)
     valid=gr_plan(again) && !memcmp(again,gr.address,sizeof(again)) &&
         !memcmp(gr.raw[0],gr.raw[1],sizeof(gr.raw[0]));
     if (valid && gr_slot0_addr) {
+        static const char *const ref_rails[2] = {"ldob17", "ldoc1"};
         uint32_t v0 = 0, v1 = 0;
         int rc0 = giulia_rpmh_read(&gr.rpmh, gr_slot0_addr);
         if (!rc0) rc0 = giulia_rpmh_read_result(&gr.rpmh, &v0);
@@ -225,6 +226,24 @@ static void gr_thread(void *arg,__unused wait_result_t wait)
         snprintf(line, sizeof(line), "ace5-rpmh-read: slot0-cmd0 addr=%#x rc=%d/%d val=%#x/%#x\n",
             gr_slot0_addr, rc0, rc1, v0, v1);
         gr_log(line);
+        for (unsigned r = 0; r < 2; r++) {
+            uint32_t rbase = 0;
+            if (giulia_rpmh_resolve_vrm((const uint8_t *)gr.db.address, GIULIA_RPMH_DB_MAX,
+                    gr.version, ref_rails[r], &rbase) == 0) {
+                uint32_t f[3] = {0}, s[3] = {0};
+                int rrc = 0;
+                for (unsigned j = 0; j < 3 && !rrc; j++) {
+                    rrc = giulia_rpmh_read(&gr.rpmh, rbase + j * 4u);
+                    if (!rrc) rrc = giulia_rpmh_read_result(&gr.rpmh, &f[j]);
+                    if (!rrc) rrc = giulia_rpmh_read(&gr.rpmh, rbase + j * 4u);
+                    if (!rrc) rrc = giulia_rpmh_read_result(&gr.rpmh, &s[j]);
+                }
+                snprintf(line, sizeof(line),
+                    "ace5-rpmh-read: ref=%s base=%#x rc=%d v=%#x/%#x e=%#x/%#x m=%#x/%#x\n",
+                    ref_rails[r], rbase, rrc, f[0], s[0], f[1], s[1], f[2], s[2]);
+                gr_log(line);
+            }
+        }
     }
 report:
     snprintf(line,sizeof(line),"ace5-rpmh-read: rc=%d stable=%u reads=%u pending=%u guard=%u irq=%#x tcs=%#x cmd=%#x\n",
