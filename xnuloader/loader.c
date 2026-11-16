@@ -3095,7 +3095,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
     firmware_quiet_enabled = 0;
 #if defined(HACKIOS_GIULIA)
     if (kernel_mpidr != this_mpidr) {
-        int crm_test=quiet_flag_present(pi.cmdline,"ace5_crm_channel_test=1");
+        int crm_test=quiet_flag_present(pi.cmdline,"ace5_crm_channel_test=1") ||
+            quiet_flag_present(pi.cmdline,"ace5_crm_channel_test=2");
         firmware_quiet_enabled=crm_test || quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=1");
         if (crm_test) crm_reset_required=1;
     }

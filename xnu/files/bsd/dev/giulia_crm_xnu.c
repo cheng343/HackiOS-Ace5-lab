@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Finite, explicit HW DRV0 channel test. Both tables stay zero. The only
- * nonzero device write is CHN_UPDATE=1; no performance/BCM votes are enabled.
+/* Finite, explicit HW DRV0 channel tests. Mode1 keeps both tables zero.
+ * Mode2 stages the fixed-500/800 PCIe0 profile from current CMD DB aux data.
  * Dedicated PCIe0 domains must remain collapsed, the APPS firmware CPU is
  * parked with IRQs masked, and no other XNU hardware/client is admitted.
  */
@@ -19,15 +19,18 @@
 #include <vm/memory_types.h>
 #endif
 #include "giulia_crm.h"
+#include "giulia_bcm.h"
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
 extern void loader_log_line(const char *);
 struct gc_mapping { uintptr_t allocation,address; vm_size_t size; };
 struct gc_trial {
-    struct gc_mapping shared,gcc,crm;
+    struct gc_mapping shared,gcc,crm,db;
     volatile struct loader_firmware_quiet *quiet;
     struct giulia_crm transport;
+    struct giulia_bcm_pcie0_plan plan;
+    unsigned mode,plan_ready;
 };
 static struct gc_trial gc;
 static unsigned gc_started;
@@ -106,16 +109,29 @@ static int gc_read(void *cookie,uint32_t off,uint32_t *out)
 static int gc_write(void *cookie,uint32_t off,uint32_t value)
 {
     struct gc_trial *p=cookie;
-    int table=0;
     static const uint32_t perf[]={0,0x40,0x80,0x600,0x640};
     static const uint32_t bw[]={0xc0,0x140,0x680,0x700,0x780};
-    /* Defense at the MMIO adapter as well as the core. This trial must not
-     * introduce a vote or an undocumented UPDATE=0 rollback. */
+    int table=0; uint32_t expected=0;
+    /* Only channel0 table fields and UPDATE=1. For a bandwidth trial, every
+     * nonzero write must match the computed plan; zero is also allowed for
+     * pre-publication compensation. Before publishing, read ALL fields back
+     * against the intended plan so a partial/zero profile cannot pass as ready.
+     * Unrelated resources, states and channel1 remain zero in these trials. */
     if (gc_lease(p) || off>=0x3000 || (off&3)) return -1;
+    if (off!=0x1020 && p->transport.published) return -1;
+    if (off==0x1020 && (gc_word(p->crm.address,0x1020) || gc_word(p->crm.address,0x1000))) return -1;
+    if (p->mode==2 && !p->plan_ready) return -1;
     for (unsigned k=0;k<2;k++) for (unsigned st=0;st<5;st++)
-        for (unsigned i=0;i<(k?p->transport.bw_count:p->transport.perf_count);i++)
-            if (off==0x200+(k?bw[st]:perf[st])+4*i) table=1;
-    if (off==0x1020 ? value!=1 : !table || value!=0) return -1;
+        for (unsigned i=0;i<(k?p->transport.bw_count:p->transport.perf_count);i++) {
+            uint32_t address=0x200+(k?bw[st]:perf[st])+4*i,desired=0;
+            if (p->mode==2) for (unsigned n=0;n<12;n++) {
+                const struct giulia_crm_patch *q=&p->plan.patch[n];
+                if (q->kind==k && q->state==st && q->resource==i) desired=q->value;
+            }
+            if (off==address) { table=1; expected=desired; }
+            if (off==0x1020 && gc_word(p->crm.address,address)!=desired) return -1;
+        }
+    if (off==0x1020 ? value!=1 : !table || (value!=expected && value!=0)) return -1;
     *(volatile uint32_t *)(p->crm.address+off)=value; gc_barrier(0); return 0;
 }
 static void gc_thread(void *context,__unused wait_result_t wait)
@@ -133,11 +149,21 @@ static void gc_thread(void *context,__unused wait_result_t wait)
     }
     gc_map(&gc.gcc,0x100000,0x70000,VM_WIMG_IO);
     gc_map(&gc.crm,0x1d01000,0x3000,VM_WIMG_IO);
-    if (!gc.gcc.address || !gc.crm.address) goto done;
+    if (gc.mode==2) gc_map(&gc.db,0x81c60000,0x20000,VM_WIMG_WCOMB);
+    if (!gc.gcc.address || !gc.crm.address || (gc.mode==2 && !gc.db.address)) goto done;
     if (!gc_quiet_acquire(&gc)) {
         gc_log("ace5-crm: loader quiet ACK timeout; no device writes\n"); goto done;
     }
-    rc=giulia_crm_start_empty_keep(&gc.transport,&io,&unchanged,1);
+    if (gc.mode==2) {
+        rc=giulia_bcm_pcie0_plan((const uint8_t *)gc.db.address,0x20000,
+            gc_word(gc.db.address,0),GIULIA_BCM_PCIE0_FIXED_500_800,&gc.plan);
+        if (rc) { gc_log("ace5-crm: current BCM metadata invalid; no channel request\n"); goto release; }
+        for (unsigned i=0;i<5;i++) if (gc.plan.vote[i].saturated) {
+            gc_log("ace5-crm: bandwidth profile saturated; no channel request\n"); goto release;
+        }
+        gc.plan_ready=1;
+        rc=giulia_crm_start_empty_keep(&gc.transport,&io,gc.plan.patch,12);
+    } else rc=giulia_crm_start_empty_keep(&gc.transport,&io,&unchanged,1);
     {
         char line[180];
         snprintf(line,sizeof(line),"ace5-crm: status rc=%d busy=%#x update=%#x power-index=%#x\n",
@@ -145,7 +171,9 @@ static void gc_thread(void *context,__unused wait_result_t wait)
         gc_log(line);
     }
     if (!rc) {
-        gc_log("ace5-crm: empty channel0 acknowledged; all PERF/BW table words remain zero\n");
+        if (gc.mode==2)
+            gc_log("ace5-crm: bandwidth profile acknowledged; physical NoC readiness NOT assumed\n");
+        else gc_log("ace5-crm: empty channel0 acknowledged; all PERF/BW table words remain zero\n");
         rc=giulia_crm_stop(&gc.transport);
         if (rc==GIULIA_CRM_RETAINED)
             gc_log("ace5-crm: channel test complete; selected channel and firmware quiet retained until kernel return\n");
@@ -163,9 +191,10 @@ static void gc_thread(void *context,__unused wait_result_t wait)
         }
         if (giulia_crm_stop(&gc.transport)) goto retain;
     }
+release:
     if (!gc_quiet_release(&gc)) goto retain;
 done:
-    gc_unmap(&gc.crm); gc_unmap(&gc.gcc); gc_unmap(&gc.shared);
+    gc_unmap(&gc.db); gc_unmap(&gc.crm); gc_unmap(&gc.gcc); gc_unmap(&gc.shared);
 retain:
     thread_terminate(current_thread());
 }
@@ -173,12 +202,18 @@ void giulia_crm_test_init(void)
 {
     uint32_t enabled=0,cpus=0,cpu=0,seconds=0;
     DTEntry entry; const void *property; unsigned size; uint64_t pa; thread_t thread;
-    if (!PE_parse_boot_argn("ace5_crm_channel_test",&enabled,sizeof(enabled)) || enabled!=1) return;
+    if (!PE_parse_boot_argn("ace5_crm_channel_test",&enabled,sizeof(enabled)) || !enabled || enabled>2) return;
     if (hackios_platform()!=HACKIOS_PLATFORM_GIULIA) return;
     PE_parse_boot_argn("cpus",&cpus,sizeof(cpus)); PE_parse_boot_argn("bootcpu",&cpu,sizeof(cpu));
     PE_parse_boot_argn("loader_return_after",&seconds,sizeof(seconds));
     if (cpus!=1 || cpu!=1 || ml_get_topology_info()->num_cpus!=1 || seconds<10 || seconds>120) {
         gc_log("ace5-crm: requires cpus=1 bootcpu=1 and finite 10..120 second run\n"); return;
+    }
+    if (enabled==2) {
+        uint32_t fixed=0;
+        if (!PE_parse_boot_argn("ace5_crm_fixed_bw",&fixed,sizeof(fixed)) || fixed!=1) {
+            gc_log("ace5-crm: fixed bandwidth policy not explicitly verified; no test started\n"); return;
+        }
     }
     const char *const incompatible[]={"ace5_wifi_probe","ace5_aop_channel_test","ace5_touch",
         "ace5_battery","ace5_cpu_khz","ace5_gpu_probe"};
@@ -194,6 +229,7 @@ void giulia_crm_test_init(void)
     }
     __builtin_memcpy(&pa,property,sizeof(pa)); if (!pa || (pa&127u)) return;
     if (__atomic_exchange_n(&gc_started,1,__ATOMIC_ACQ_REL)) return;
+    gc.mode=enabled;
     if (kernel_thread_start(gc_thread,(void *)(uintptr_t)pa,&thread)==KERN_SUCCESS) thread_deallocate(thread);
     else gc_log("ace5-crm: no test thread\n");
 }

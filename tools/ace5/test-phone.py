@@ -171,6 +171,8 @@ class PhoneTests(unittest.TestCase):
         args = self.namespace['ace5_crm_test_arguments']
         self.assertEqual(args(False, 0, None, 0, True, True), '')
         self.assertEqual(args(True, 1, 'kernel', 60, False, False), ' ace5_crm_channel_test=1')
+        self.assertEqual(args(True, 1, 'kernel', 60, False, False, True),
+                         ' ace5_crm_channel_test=2 ace5_crm_fixed_bw=1')
         for cpu, kernel, seconds, other, live in ((0, 'kernel', 60, False, False),
                 (1, None, 60, False, False), (1, 'kernel', 0, False, False),
                 (1, 'kernel', 121, False, False), (1, 'kernel', 60, True, False),

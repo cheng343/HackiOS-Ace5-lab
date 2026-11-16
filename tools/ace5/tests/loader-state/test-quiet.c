@@ -58,6 +58,7 @@ int main(void)
 {
     uint64_t last = 0;
     assert(quiet_flag_present("cpus=1 ace5_crm_channel_test=1 bootcpu=1","ace5_crm_channel_test=1"));
+    assert(quiet_flag_present("cpus=1 ace5_crm_channel_test=2 bootcpu=1","ace5_crm_channel_test=2"));
     assert(quiet_flag_present("ace5_aop_channel_test=1","ace5_aop_channel_test=1"));
     const char *invalid[]={"ace5_crm_channel_test=10","xace5_crm_channel_test=1",
         "ace5_crm_channel_test=1x","ace5_crm_channel_test=0",""};

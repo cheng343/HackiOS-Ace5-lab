@@ -21,10 +21,11 @@ typedef int kern_return_t;
 typedef int wait_result_t;
 typedef void *thread_t;
 typedef int DTEntry;
-static unsigned enabled,board,cpu,cpus,seconds,other,missing_property,property_size;
+static unsigned enabled,board,cpu,cpus,seconds,other,missing_property,property_size,fixed_policy;
 static unsigned creates,exits,deallocs,maps,unmaps,fail_map,no_quiet_ack,no_channel_ack;
-static unsigned complete,requests,time_us,thread_error;
+static unsigned complete,requests,time_us,thread_error,bandwidth_complete;
 static _Alignas(0x4000) uint32_t shared_page[0x4000/4],gcc[0x70000/4],crm_page[0x4000/4];
+static _Alignas(0x4000) uint8_t db_page[0x20000];
 static uint32_t *const crm=crm_page+0x1000/4;
 static uint64_t shared_pa=0x90000100;
 static volatile struct loader_firmware_quiet *const shared=
@@ -39,6 +40,7 @@ static int PE_parse_boot_argn(const char *name,void *out,unsigned size)
 {
     unsigned value=0; assert(size==4);
     if (!strcmp(name,"ace5_crm_channel_test")) value=enabled;
+    if (!strcmp(name,"ace5_crm_fixed_bw")) value=fixed_policy;
     if (!strcmp(name,"cpus")) value=cpus;
     if (!strcmp(name,"bootcpu")) value=cpu;
     if (!strcmp(name,"loader_return_after")) value=seconds;
@@ -72,6 +74,7 @@ vm_offset_t ml_io_map_unmappable(vm_offset_t pa,vm_size_t size,unsigned flags)
     unsigned bit; void *base;
     if (pa==0x90000000) { bit=1; base=shared_page; assert(size==0x4000 && flags==VM_WIMG_WCOMB); }
     else if (pa==0x100000) { bit=2; base=gcc; assert(size==0x70000 && flags==VM_WIMG_IO); }
+    else if (pa==0x81c60000) { bit=8; base=db_page; assert(size==0x20000 && flags==VM_WIMG_WCOMB); }
     else { assert(pa==0x1d00000 && size==0x4000 && flags==VM_WIMG_IO); bit=4; base=crm_page; }
     if (bit==fail_map) return 0;
     assert(!(maps&bit)); maps|=bit; return (uintptr_t)base;
@@ -81,22 +84,39 @@ void ml_io_unmap(vm_offset_t base,vm_size_t size)
     unsigned bit;
     if (base==(uintptr_t)shared_page) { bit=1; assert(size==0x4000); }
     else if (base==(uintptr_t)gcc) { bit=2; assert(size==0x70000); }
+    else if (base==(uintptr_t)db_page) { bit=8; assert(size==0x20000); }
     else { assert(base==(uintptr_t)crm_page && size==0x4000); bit=4; }
     assert((maps&bit) && !(unmaps&bit)); unmaps|=bit;
 }
 kern_return_t thread_terminate(thread_t t) { assert(t==current_thread()); exits++; return 0; }
-void loader_log_line(const char *line) { if (strstr(line,"ace5-crm: channel test complete;")) complete++; }
+void loader_log_line(const char *line)
+{
+    if (strstr(line,"ace5-crm: channel test complete;")) complete++;
+    if (strstr(line,"ace5-crm: bandwidth profile acknowledged;")) bandwidth_complete++;
+}
+static void put16(uint8_t *p,uint32_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
+static void put32(uint8_t *p,uint32_t v) { put16(p,v); put16(p+2,v>>16); }
 static void setup(void)
 {
     memset(&gc,0,sizeof(gc)); gc_started=0;
     memset(shared_page,0,sizeof(shared_page)); memset(gcc,0,sizeof(gcc)); memset(crm_page,0,sizeof(crm_page));
+    memset(db_page,0,sizeof(db_page));
     shared->magic=LOADER_QUIET_MAGIC; shared->version=LOADER_QUIET_VERSION; shared->size=sizeof(*shared);
     gcc[0x6b004/4]=gcc[0x6c000/4]=1; gcc[0x6b008/4]=gcc[0x6c004/4]=0x8000;
     gcc[0x5214c/4]=9;
     crm[0]=0x10000; crm[1]=0x1228225; crm[2]=0x40108128; crm[3]=1;
+    const char *const names[]={"MC0","SH0","SH1","SN4","ACV"};
+    const unsigned units[]={4700000,4800000,4800000,530000,1},widths[]={16,64,64,16,1};
+    put32(db_page,1); put32(db_page+4,0x0c0330db);
+    put16(db_page+8,5); put16(db_page+12,256); put16(db_page+14,5);
+    for (unsigned i=0;i<5;i++) {
+        uint8_t *e=db_page+144+24*i,*a=db_page+400+8*i;
+        memcpy(e,names[i],strlen(names[i])); put32(e+16,0x50000+4*i);
+        put16(e+20,8); put16(e+22,i*8); put32(a,units[i]); put16(a+4,widths[i]);
+    }
     board=2; enabled=cpu=cpus=topology.num_cpus=1; seconds=60; property_size=8;
     other=missing_property=creates=exits=deallocs=maps=unmaps=fail_map=0;
-    no_quiet_ack=no_channel_ack=complete=requests=time_us=thread_error=0;
+    no_quiet_ack=no_channel_ack=complete=requests=time_us=thread_error=bandwidth_complete=fixed_policy=0;
 }
 static void no_start(void) { giulia_crm_test_init(); assert(!creates && !maps && !requests); }
 static void rejected(void)
@@ -109,6 +129,7 @@ static void admission(void)
 {
     setup(); enabled=0; no_start();
     setup(); enabled=2; no_start();
+    setup(); enabled=3; no_start();
     setup(); board=1; no_start();
     setup(); cpu=0; no_start();
     setup(); cpus=2; no_start();
@@ -129,32 +150,51 @@ static void admission(void)
     setup(); gcc[0x6c004/4]=UINT32_MAX; rejected();
     setup(); crm[0]=0; rejected();
     setup(); crm[0x208/4]=1; rejected(); /* Other channel is not empty. */
+    setup(); enabled=2; fixed_policy=1; fail_map=8; rejected();
+    setup(); enabled=2; fixed_policy=1; db_page[4]^=1; rejected();
+    setup(); enabled=2; fixed_policy=1; put32(db_page+400,1); put16(db_page+404,65535); rejected();
     puts("Ace5 CRM XNU: actual opt-in, quiet lease, cold domains, map and table admission passed");
 }
-static void retained(unsigned timeout)
+static void retained(unsigned timeout,unsigned bandwidth)
 {
-    setup(); no_channel_ack=timeout; giulia_crm_test_init();
-    assert(creates==1 && exits==1 && deallocs==1 && maps==7 && !unmaps && requests==1);
+    setup(); no_channel_ack=timeout;
+    if (bandwidth) { enabled=2; fixed_policy=1; }
+    giulia_crm_test_init();
+    assert(creates==1 && exits==1 && deallocs==1 && maps==(bandwidth?15u:7u) && !unmaps && requests==1);
     assert(shared->request==1 && shared->ack==1 && shared->active==1 && gc.transport.owned);
     assert(gc.transport.published && crm[0x1020/4]==1);
     assert(complete==!timeout && gc.transport.pending==timeout);
+    assert(bandwidth_complete==(bandwidth && !timeout));
     if (!timeout) assert(gc.transport.state==GIULIA_CRM_HELD && crm[0x1000/4]==1);
     assert(gc_write(&gc,0,0)==-1 && gc_write(&gc,0x1020,0)==-1);
     assert(gc_write(&gc,0x200,1)==-1 && gc_write(&gc,0x208,0)==-1);
+    assert(gc_write(&gc,0x1020,1)==-1 && requests==1); /* No repeat request. */
     static const uint32_t po[]={0,0x40,0x80,0x600,0x640},bo[]={0xc0,0x140,0x680,0x700,0x780};
     for (unsigned ch=0;ch<2;ch++) for (unsigned st=0;st<5;st++) {
-        for (unsigned i=0;i<2;i++) assert(!crm[(0x200+po[st]+4*(ch*2+i))/4]);
-        for (unsigned i=0;i<16;i++) assert(!crm[(0x200+bo[st]+4*(ch*16+i))/4]);
+        for (unsigned i=0;i<2;i++) {
+            uint32_t expected=bandwidth && ch==0 && st<2 && i==0 ? 2 : 0;
+            assert(crm[(0x200+po[st]+4*(ch*2+i))/4]==expected);
+        }
+        for (unsigned i=0;i<16;i++) {
+            uint32_t expected=0;
+            if (bandwidth && ch==0 && st<2 && (i<4 || i==5))
+                expected=i==2 || i==5 ? 0x60000001u : 0x60004001u;
+            assert(crm[(0x200+bo[st]+4*(ch*16+i))/4]==expected);
+        }
     }
     giulia_crm_test_init(); assert(creates==1 && requests==1);
-    puts(timeout ? "Ace5 CRM XNU: actual timeout keeps mappings, channel and firmware quiet" :
+    if (bandwidth) puts(timeout ? "Ace5 CRM XNU bandwidth: timeout retains the complete intended profile" :
+        "Ace5 CRM XNU bandwidth: actual current-DB profile, strict MMIO and channel ACK passed");
+    else puts(timeout ? "Ace5 CRM XNU: actual timeout keeps mappings, channel and firmware quiet" :
         "Ace5 CRM XNU: actual zero-table channel ACK and retained lifetime passed");
 }
 int main(int argc,char **argv)
 {
     if (argc==1) admission();
-    else if (argc==2 && !strcmp(argv[1],"--retained")) retained(0);
-    else if (argc==2 && !strcmp(argv[1],"--timeout")) retained(1);
+    else if (argc==2 && !strcmp(argv[1],"--retained")) retained(0,0);
+    else if (argc==2 && !strcmp(argv[1],"--timeout")) retained(1,0);
+    else if (argc==2 && !strcmp(argv[1],"--bandwidth")) retained(0,1);
+    else if (argc==2 && !strcmp(argv[1],"--bandwidth-timeout")) retained(1,1);
     else assert(!"unknown test scenario");
     return 0;
 }

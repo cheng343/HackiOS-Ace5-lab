@@ -507,3 +507,32 @@ CESTA 已停或允许 direct-GCC 接管。控制器仍须通过真实 ACK 才报
 隔离、cold-domain 条件、映射、空表、写入白名单、一次 channel ACK 和超时保留。
 另从真实 loader 提取精确参数解析和保留状态命令限制，防止伪前缀／参数值误开。
 此入口是否被硬件确认，必须记录随后真实会话结果；编译成功不能代替它。
+
+提交 `fcbd93719de4d5de16b5f113544dfdf6a932c8d5` 的
+[云端构建 43786597908](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43786597908)
+已通过全部新增／既有回归、两类 loader 和完整 XNU 构建，七项产物长度与
+SHA-256 均已下载校验。ccache 命中 1058/1062（99.62%）。随后在本机 Ace 5
+实际运行 60 秒通道测试：rc=0，BUSY=UPDATE=1，全零表 channel0 请求得到硬件
+确认；power-index 仍只记录原始值 4。35 项静态 init 检查无失败，内核正常返回，
+host 核对 `crm-reset-required=yes` 后冷重启，Android 启动完成。只验证全零
+表首次通道确认，没有启用带宽／性能票或无线初始化，不代表 Wi-Fi 已能联网。
+用户在返回 Android 后再次拔下手机；后续带宽入口只做源码／云端验证。
+
+## 后续：实际带宽投票的独立测试入口
+
+新增 `--crm-bandwidth-test`（wire 参数 `ace5_crm_channel_test=2` 与显式
+`ace5_crm_fixed_bw=1`）。该入口在同一 quiet／无活动 PCIe0 用户条件下，从
+本次启动的 CMD DB 生成原厂 fixed avg500/peak800 方案，然后将 12 个 PERF/BW
+字段提交到首次 channel0。私有准备工具逐次核对提供的 DT：只允许 PCIe0 的
+`qcom,no-client-based-bw-voting` 缺省策略，不能将这一带宽政策自动套到不同 DT。
+运行时缺少显式政策、DB 损坏或票值饱和均不发送通道请求。
+
+XNU adapter 仅允许写 0 或该字段计算出的目标值；请求前再逐项核对整份目标表，
+防止未完成的／全零方案冒充带宽测试成功。发布后禁止表写入与重复通道请求，
+保留无关节点、states2..4 和 channel1；继续使用相同冷重启生命周期。此阶段只
+确认方案被通道接受，不将 ACK 当作实际 NoC 频率、电源状态、CPU→PCIe QoS 或
+整个总线 ready 的证明。它不启动 GPIO/PHY/链路、无线固件或 DMA。
+
+云端测试以实测 unit/width 和合成 CMD DB 链接真实 BCM→CRM→XNU adapter，检查
+目标字段、IP0 等保留项、严格写入白名单、政策／元数据拒绝、ACK 和超时保留。
+该非零带宽方案尚未真机执行，不能把前一个全零通道测试的成功沿用于此阶段。

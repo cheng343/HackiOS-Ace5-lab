@@ -227,12 +227,12 @@ def ace5_aop_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware):
     return ' ace5_aop_channel_test=1'
 
 
-def ace5_crm_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware, live_log):
+def ace5_crm_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware, live_log, bandwidth=False):
     if not enabled:
         return ''
     if not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
         raise RuntimeError('--crm-channel-test requires --kernel, CPU 1, 10..120 seconds, no live USB polling and no other hardware probes')
-    return ' ace5_crm_channel_test=1'
+    return ' ace5_crm_channel_test=2 ace5_crm_fixed_bw=1' if bandwidth else ' ace5_crm_channel_test=1'
 
 
 ap = argparse.ArgumentParser(description=__doc__)
@@ -255,6 +255,8 @@ run.add_argument('--aop-channel-test', action='store_true',
                  help='Open/close only the AOP host channel while loader firmware clients are parked; requires CPU 1 and 10..300 seconds')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
+run.add_argument('--crm-bandwidth-test', action='store_true',
+                 help='Stage PCIe0 fixed avg500/peak800 profile from current CMD DB under firmware quiet; caller verifies current DT policy; requires CPU1, finite run, no live-log and cold reboot afterwards')
 run.add_argument('--battery', action='store_true',
                  help='Experimental Ace 5 NFG8011B sampling; requires --kernel and --bootcpu 1')
 run.add_argument('--cpu-khz', type=int, default=0,
@@ -388,14 +390,16 @@ try:
         commandline = (f'cpus=1 loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
                        'touchscreen=0 buttons=0 cpufreq=0 gpu=0 wifi=0 adsp=0')
         if args.command == 'run':
+            if args.crm_channel_test and args.crm_bandwidth_test:
+                raise RuntimeError('--crm-channel-test and --crm-bandwidth-test are mutually exclusive')
             commandline += ace5_driver_arguments(args.bootcpu, args.kernel, args.battery, args.cpu_khz)
         if args.command == 'run':
             commandline += ace5_wifi_probe_arguments(args.wifi_probe, args.bootcpu, args.kernel, seconds)
             commandline += ace5_aop_test_arguments(args.aop_channel_test, args.bootcpu, args.kernel,
-                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.crm_channel_test)
-            commandline += ace5_crm_test_arguments(args.crm_channel_test, args.bootcpu, args.kernel,
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.crm_channel_test or args.crm_bandwidth_test)
+            commandline += ace5_crm_test_arguments(args.crm_channel_test or args.crm_bandwidth_test, args.bootcpu, args.kernel,
                 seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test,
-                args.live_log)
+                args.live_log, args.crm_bandwidth_test)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -469,7 +473,7 @@ try:
                                          args.bootcpu if args.command == 'run' else 0,
                                          args.live_log if args.command == 'run' else False,
                                          live_interval, logs, log,
-                                         args.command == 'run' and args.crm_channel_test)
+                                         args.command == 'run' and (args.crm_channel_test or args.crm_bandwidth_test))
         print(result, log)
         saved_log = log.read_bytes().decode('utf-8', errors='replace')
         for line in saved_log.splitlines():
@@ -480,11 +484,15 @@ try:
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
             if args.aop_channel_test and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:
                 raise RuntimeError(f'AOP channel handshake incomplete; see {log}')
-            if args.crm_channel_test:
+            if args.crm_channel_test or args.crm_bandwidth_test:
                 marker = 'ace5-crm: channel test complete; selected channel and firmware quiet retained until kernel return'
                 if marker not in saved_log or getvar('crm-reset-required') != 'yes':
                     raise RuntimeError(f'CRM channel test incomplete; preserve {log} and cold reboot before another operation')
-                print('CRM zero-table channel confirmed; cold reboot required before another kernel or payload upload.', flush=True)
+                specific = ('ace5-crm: bandwidth profile acknowledged;' if args.crm_bandwidth_test else
+                            'ace5-crm: empty channel0 acknowledged; all PERF/BW table words remain zero')
+                if specific not in saved_log:
+                    raise RuntimeError(f'CRM requested profile not confirmed; preserve {log} and cold reboot')
+                print('CRM requested profile confirmed; cold reboot required before another kernel or payload upload.', flush=True)
         if args.command == 'run' and args.gpu_probe and f'ace5-gpu: stage {args.gpu_probe} complete' not in saved_log:
             raise RuntimeError(f'GPU probe did not complete requested stage {args.gpu_probe}; see {log}')
         if args.command == 'run' and args.gpu_keep and 'ace5-gpu: persistent startup ready=1' not in saved_log:
