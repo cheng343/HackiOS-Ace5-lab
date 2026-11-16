@@ -81,7 +81,7 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
 
     b->stage = GIULIA_BRINGUP_PERST_RELEASE;
     rc = giulia_wifi_gpio_perst_release(&b->supply.gpio,
-        GIULIA_WGPIO_PERST_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
+        GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_PERST_RELEASE, GIULIA_BRINGUP_GPIO, rc);
 
     b->stage = GIULIA_BRINGUP_LINK_TRAIN;
@@ -122,7 +122,7 @@ int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b)
         if (rc) return GIULIA_BRINGUP_LINK;
     }
     if (b->supply.gpio.state == GIULIA_WGPIO_ON ||
-        b->supply.gpio.perst_released) {
+        b->supply.gpio.state == GIULIA_WGPIO_RELEASED) {
         rc = giulia_wifi_gpio_perst_assert(&b->supply.gpio,
             GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
         if (rc) return GIULIA_BRINGUP_GPIO;

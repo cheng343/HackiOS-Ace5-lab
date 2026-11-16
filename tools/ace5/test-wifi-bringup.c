@@ -37,9 +37,9 @@ int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t f, const struct gi
 int giulia_pcie_phy_stop(struct giulia_pcie_phy *p, uint32_t f)
 { (void)f; assert(!p->io.pipe_disable(p->io.cookie)); p->state = GIULIA_PHY_STOPPED; return ev('y', 0); }
 int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *g, uint32_t f)
-{ (void)f; int rc = ev('R', GIULIA_WGPIO_BUSY); if (!rc) g->perst_released = 1; return rc; }
+{ (void)f; int rc = ev('R', GIULIA_WGPIO_BUSY); if (!rc) g->state = GIULIA_WGPIO_RELEASED; return rc; }
 int giulia_wifi_gpio_perst_assert(struct giulia_wifi_gpio *g, uint32_t f)
-{ (void)f; g->perst_released = 0; g->state = GIULIA_WGPIO_HELD; return ev('r', 0); }
+{ (void)f; g->state = GIULIA_WGPIO_HELD; return ev('r', 0); }
 int giulia_pcie_link_train(struct giulia_pcie_link *l, uint32_t f)
 { (void)f; int rc = ev('T', GIULIA_LINK_TIMEOUT); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_READY; return rc; }
 int giulia_pcie_link_mem_enable(struct giulia_pcie_link *l, uint32_t f)
