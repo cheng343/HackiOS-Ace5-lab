@@ -66,6 +66,10 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     rc = giulia_pcie_power_finish_reset(&b->supply.power, power_finish_flags(b));
     if (rc) return fail_stop(b, GIULIA_BRINGUP_POWER_RESET, GIULIA_BRINGUP_POWER, rc);
 
+    /* Mask PARF global interrupts after BCR reset; SM8650 resets PARF_INT_MASK non-zero. */
+    if (b->cfg.link.write32)
+        b->cfg.link.write32(b->cfg.link.cookie, GIULIA_LINK_PARF, 0x22cu, 0);
+
     b->stage = GIULIA_BRINGUP_LINK_PREPARE;
     rc = giulia_pcie_link_prepare(&b->link, link_base | GIULIA_LINK_PERST_ASSERTED,
         &b->cfg.link);
