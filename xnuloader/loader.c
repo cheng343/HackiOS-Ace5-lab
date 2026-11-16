@@ -3103,7 +3103,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
     if (kernel_mpidr != this_mpidr) {
         int crm_test=quiet_flag_present(pi.cmdline,"ace5_crm_channel_test=1") ||
             quiet_flag_present(pi.cmdline,"ace5_crm_channel_test=2");
-        int pdc_test=quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=2");
+        int pdc_test=quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=2") ||
+            quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=4");
         firmware_quiet_enabled=crm_test || pdc_test || quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=1") ||
             quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=3");
         if (crm_test) crm_reset_required=1;

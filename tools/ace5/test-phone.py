@@ -18,7 +18,8 @@ SOURCE = Path(__file__).with_name('phone.py')
 FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect_run_diagnostics',
              'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel',
              'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments',
-             'ace5_crm_test_arguments', 'ace5_pdc_test_arguments', 'ace5_cx_vote_arguments'}
+             'ace5_crm_test_arguments', 'ace5_pdc_test_arguments', 'ace5_cx_vote_arguments',
+             'ace5_rpmh_read_arguments', 'check_rpmh_read_log', 'check_rpmh_read_profile'}
 
 
 class Clock:
@@ -36,6 +37,35 @@ class Clock:
 
 
 class PhoneTests(unittest.TestCase):
+    def test_rpmh_read_profile_uses_current_dt(self):
+        fn=self.namespace['check_rpmh_read_profile']
+        nodes={'/rsc':{'compatible':b'qcom,rpmh-rsc\0','reg':bytes.fromhex('17a000000001000017a100000001000017a2000000010000'),
+                'interrupts':bytes.fromhex('000000000000000300000004000000000000000400000004000000000000000500000004')},
+            '/rsc/drv@2':{'qcom,drv-id':bytes.fromhex('00000002'),'qcom,tcs-offset':bytes.fromhex('00000d00')},
+            '/rsc/drv@2/channel@0':{'qcom,tcs-config':bytes.fromhex('00000002000000030000000000000002000000010000000200000003000000000000000400000001')},
+            '/gic':{'compatible':b'arm,gic-v3\0','reg':bytes.fromhex('17100000000100001718000000200000')},
+            '/db':{'compatible':b'qcom,cmd-db\0','reg':bytes.fromhex('0000000081c600000000000000020000')}}
+        fn(nodes)
+        for path,properties in nodes.items():
+            for key in properties:
+                bad={p:dict(v) for p,v in nodes.items()};bad[path][key]=b''
+                with self.assertRaises(RuntimeError): fn(bad)
+        nodes['/rsc']['qcom,hw-channel']=b''
+        with self.assertRaises(RuntimeError): fn(nodes)
+    def test_rpmh_read_trial_and_result_are_explicit(self):
+        fn=self.namespace['ace5_rpmh_read_arguments']
+        self.assertEqual(fn(False,0,None,0,True,True),'')
+        self.assertEqual(fn(True,1,'kernel',90,False,False),' ace5_aop_channel_test=4')
+        for cpu,kernel,seconds,other,live in ((0,'kernel',90,False,False),
+            (1,None,90,False,False),(1,'kernel',0,False,False),(1,'kernel',121,False,False),
+            (1,'kernel',90,True,False),(1,'kernel',90,False,True)):
+            with self.assertRaises(RuntimeError): fn(True,cpu,kernel,seconds,other,live)
+        check=self.namespace['check_rpmh_read_log']
+        capture='ace5-rpmh-read: capture complete; 46 READ replies stable; resource ownership NOT assumed'
+        cleanup='ace5-rpmh-read: cleanup complete; IRQ restored and firmware resumed'
+        check(True,capture+'\n'+cleanup,'yes',self.log)
+        for text,reset in ((capture,'yes'),(cleanup,'yes'),(capture+'\n'+cleanup,'no'),('','yes')):
+            with self.assertRaises(RuntimeError): check(True,text,reset,self.log)
     def setUp(self):
         tree = ast.parse(SOURCE.read_text(encoding='utf-8'), filename=str(SOURCE))
         functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in FUNCTIONS]

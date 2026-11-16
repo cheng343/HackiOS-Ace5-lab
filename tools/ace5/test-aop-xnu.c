@@ -26,6 +26,8 @@ static unsigned creates, exits, deallocs, maps, unmaps, fail_map, thread_error;
 static unsigned no_quiet_ack, no_close_ack, complete, kicks, time_us;
 static unsigned pdc_complete, pdc_messages, stall_message, drift_message, missing_table;
 static unsigned cx_complete,cx_messages,cx_stall,cx_bad;
+static unsigned rpmh_starts;
+void giulia_rpmh_read_test_start(uint64_t pa) { assert(pa==0x90000100); rpmh_starts++; }
 static char pdc_payloads[10][64];
 static const uint8_t dt_table[] =
     "{class: wlan_pdc, ss: rf, res: s3c.v, upval: 916}\0"
@@ -170,6 +172,7 @@ static void setup(void)
     fail_map = thread_error = no_quiet_ack = no_close_ack = complete = kicks = time_us = 0;
     pdc_complete = pdc_messages = stall_message = drift_message = missing_table = 0;
     cx_complete=cx_messages=cx_stall=cx_bad=0;
+    rpmh_starts=0;
 }
 static void check_no_start(void) { giulia_aop_test_init(); assert(!creates && !maps && !kicks); }
 static void pdc_tests(unsigned stall, unsigned drift)
@@ -243,6 +246,10 @@ int main(int argc, char **argv)
     setup(); seconds = 301; check_no_start();
     setup(); missing_property = 1; check_no_start();
     setup(); incompatible = 1; check_no_start();
+    setup(); enabled=4; seconds=121; check_no_start();
+    setup(); enabled=4; incompatible=1; check_no_start();
+    setup(); enabled=4; giulia_aop_test_init(); assert(rpmh_starts==1 && !maps && !kicks);
+    giulia_aop_test_init(); assert(rpmh_starts==1);
     setup(); giulia_aop_test_init();
     assert(complete == 1 && maps == 7 && unmaps == maps && kicks == 3 && exits == 1 && deallocs == 1);
     assert(msg_page[0x24/4] == GIULIA_AOP_UP && msg_page[0x2c/4] == GIULIA_AOP_DOWN);

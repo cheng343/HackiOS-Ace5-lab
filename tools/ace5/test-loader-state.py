@@ -67,6 +67,9 @@ def main() -> int:
         (build / 'quiet-observer.inc').write_text(quiet, encoding='utf8')
         quiet_args = section(text, 'static int\nquiet_flag_present(', 'static int\nobserver_firmware_quiet(', source)
         (build / 'quiet-args.inc').write_text(quiet_args, encoding='utf8')
+        quiet_enable=section(text,'    firmware_quiet_enabled = 0;',
+                             '    if (firmware_quiet_enabled) {',source)
+        (build / 'quiet-enable.inc').write_text(quiet_enable,encoding='utf8')
         prefix = section(text, 'static int\nstarts_with(', '/*\n * One command from the host.', source)
         gate = section(text, 'static int\ncrm_command_allowed(', 'static void\nfb_command(', source)
         (build / 'crm-command-gate.inc').write_text(prefix + gate, encoding='utf8')

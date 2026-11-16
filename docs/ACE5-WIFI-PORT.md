@@ -6,6 +6,29 @@ XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属�
 
 ## 2026-11-16：补充正式 RPMh 读请求
 
+新增独立 `--rpmh-read-test`（内核模式 `ace5_aop_channel_test=4`）。
+入口先核对 Ace 5、单 CPU1、有限 10..120 秒、无其他硬件测试，以及
+真实 loader firmware-quiet 服务。打包器使用当前 Android DT 核对
+DRV2/GICD/CMD DB 范围、SPI5、非 hardware-channel 布局和完整 TCS 配置；
+该模式拒绝离线旧 DTB。资源地址在 XNU 内从当前 CMD DB 重新解析。
+
+读取两项 ARC（XO/CX）和七路 VRM 的 V/E/M，共 23 项，第二遍倒序读取，
+合计 46 条正式 READ。只记录两遍原始响应及稳定性，不设置基线 known
+或电源所有权。没有读取受限 ARC aperture，没有发资源 WRITE 请求；
+实验确实会写 RSC 命令槽和 GIC 中断屏蔽寄存器。
+
+本机公开 DT 将 DRV2 的中断列为 SPI5，即 INTID37。入口核对 GICv3/4
+标识、RWP、原有 pending/active 状态，只对该中断的 enable 位执行
+W1C 屏蔽；不修改组别、路由或其他中断。实际 transport 的每次访问重新
+核对固件 quiet 和中断隔离。完成时先清理 RSC，再恢复原 enable 位，
+恢复固件并解除映射。RSC 未完成、访问条件丢失或仍有 pending/active
+中断时保留租约/映射，不清 pending 或重发来伪造完成。
+
+该模式在 loader 中启用 cold-reset gate，测试后取日志并冷重启，不能
+继续上传另一个内核。CLI 等待内核返回再轮询 USB，并同时要求完整采集
+和清理标记。当前新增入口尚未在手机执行；此前 core 的云测试通过不能
+替代这一入口的测试或真机支持证明。
+
 新核对到高通的 [upstream rpmh_read 提交](https://github.com/torvalds/linux/commit/edbafe65eef2b58625db1e113fbbfb1fe10c0291)。
 它在 2026-08 合入 Linux，用于读取启动固件设置的资源值。Ace 5 的固定
 6.1 参考驱动没有这个 API；旧参考代码中同名接口还被禁用。这不等于硬件

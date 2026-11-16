@@ -36,7 +36,7 @@ def wait_for_result(command, seconds, bootcpu, live_log, live_interval, log_dir,
     # CPU 0 owns USB. Do not grant a second full run duration after that wait.
     deadline = time.monotonic() + seconds + 60
     if command == 'run' and quiet_until_return:
-        print('CRM trial parks firmware USB until kernel return; waiting before result polling.', flush=True)
+        print('Firmware-quiet trial parks USB until kernel return; waiting before result polling.', flush=True)
         quiet_deadline = time.monotonic() + seconds + 5
         while time.monotonic() < quiet_deadline:
             time.sleep(min(5, quiet_deadline - time.monotonic()))
@@ -237,6 +237,42 @@ def ace5_cx_vote_arguments(enabled, bootcpu, kernel, seconds, other_hardware, li
     return ' ace5_aop_channel_test=3'
 
 
+def ace5_rpmh_read_arguments(enabled, bootcpu, kernel, seconds, other_hardware, live_log):
+    if not enabled:
+        return ''
+    if not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
+        raise RuntimeError('--rpmh-read-test requires current DT verification, --kernel, CPU1, 10..120 seconds, no other probes or live-log; cold reboot afterwards')
+    return ' ace5_aop_channel_test=4'
+
+
+def check_rpmh_read_log(enabled, text, reset_required, log):
+    if not enabled:
+        return
+    markers = ('ace5-rpmh-read: capture complete; 46 READ replies stable; resource ownership NOT assumed',
+               'ace5-rpmh-read: cleanup complete; IRQ restored and firmware resumed')
+    if reset_required != 'yes' or any(marker not in text for marker in markers):
+        raise RuntimeError(f'RPMh READ capture incomplete; preserve {log} and cold reboot before another operation')
+
+
+def check_rpmh_read_profile(nodes):
+    def one(compatible, reg):
+        found=[(path,p) for path,p in nodes.items()
+               if compatible in p.get('compatible',b'').split(b'\0') and p.get('reg')==bytes.fromhex(reg)]
+        if len(found)!=1:
+            raise RuntimeError('Current DT does not match the tested RPMh READ MMIO profile')
+        return found[0]
+    path,rsc=one(b'qcom,rpmh-rsc','17a000000001000017a100000001000017a2000000010000')
+    if rsc.get('interrupts')!=bytes.fromhex('000000000000000300000004000000000000000400000004000000000000000500000004') or 'qcom,hw-channel' in rsc:
+        raise RuntimeError('Current DRV2 IRQ/channel profile differs')
+    drv=nodes.get(path+'/drv@2',{})
+    channel=nodes.get(path+'/drv@2/channel@0',{})
+    config='00000002000000030000000000000002000000010000000200000003000000000000000400000001'
+    if drv.get('qcom,drv-id')!=bytes.fromhex('00000002') or drv.get('qcom,tcs-offset')!=bytes.fromhex('00000d00') or channel.get('qcom,tcs-config')!=bytes.fromhex(config) or 'qcom,hw-channel' in drv:
+        raise RuntimeError('Current DRV2 TCS profile differs')
+    one(b'arm,gic-v3','17100000000100001718000000200000')
+    one(b'qcom,cmd-db','0000000081c600000000000000020000')
+
+
 def ace5_crm_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware, live_log, bandwidth=False):
     if not enabled:
         return ''
@@ -277,6 +313,8 @@ run.add_argument('--aop-channel-test', action='store_true',
                  help='Open/close only the AOP host channel while loader firmware clients are parked; requires CPU 1 and 10..300 seconds')
 run.add_argument('--aop-cx-vote-test', action='store_true',
                  help='Query current AOP CX votes through shared SRAM; requires separately verified firmware profile, CPU1, finite run and no live-log')
+run.add_argument('--rpmh-read-test', action='store_true',
+                 help='Read XO/CX and seven VRM V/E/M requests; no resource WRITE; current DT, CPU1, finite <=120s, no live-log; cold reboot afterwards')
 run.add_argument('--wlan-pdc-test', action='store_true',
                  help='Deliver the 10 stock AOP WLAN PDC messages with WLAN/BT quiet; no rail/radio startup; CPU1, finite <=120 seconds, no live-log; cold reboot afterwards')
 run.add_argument('--wlan-pdc-table', type=Path,
@@ -424,16 +462,19 @@ try:
         if args.command == 'run':
             commandline += ace5_wifi_probe_arguments(args.wifi_probe, args.bootcpu, args.kernel, seconds)
             commandline += ace5_aop_test_arguments(args.aop_channel_test, args.bootcpu, args.kernel,
-                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test or args.aop_cx_vote_test)
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test or args.aop_cx_vote_test or args.rpmh_read_test)
             commandline += ace5_cx_vote_arguments(args.aop_cx_vote_test,args.bootcpu,args.kernel,seconds,
-                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test,
+                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test or args.rpmh_read_test,
+                args.live_log)
+            commandline += ace5_rpmh_read_arguments(args.rpmh_read_test,args.bootcpu,args.kernel,seconds,
+                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.aop_cx_vote_test or args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test,
                 args.live_log)
             commandline += ace5_crm_test_arguments(args.crm_channel_test or args.crm_bandwidth_test, args.bootcpu, args.kernel,
-                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.wlan_pdc_test or args.aop_cx_vote_test,
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.wlan_pdc_test or args.aop_cx_vote_test or args.rpmh_read_test,
                 args.live_log, args.crm_bandwidth_test)
             commandline += ace5_pdc_test_arguments(args.wlan_pdc_test, args.wlan_pdc_table,
                 args.bootcpu, args.kernel, seconds,
-                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test,
+                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test,
                 args.live_log)
         if args.command == 'run' and args.touch:
             if not args.kernel:
@@ -511,7 +552,7 @@ try:
                                          args.bootcpu if args.command == 'run' else 0,
                                          args.live_log if args.command == 'run' else False,
                                          live_interval, logs, log,
-                                         args.command == 'run' and (args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test))
+                                         args.command == 'run' and (args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test or args.rpmh_read_test))
         print(result, log)
         saved_log = log.read_bytes().decode('utf-8', errors='replace')
         for line in saved_log.splitlines():
@@ -520,6 +561,8 @@ try:
         check_kernel_log(saved_log, log)
         if args.command == 'run':
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
+            check_rpmh_read_log(args.rpmh_read_test,saved_log,
+                getvar('power-reset-required') if args.rpmh_read_test else None,log)
             if (args.aop_channel_test or args.aop_cx_vote_test) and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:
                 raise RuntimeError(f'AOP channel handshake incomplete; see {log}')
             if args.aop_cx_vote_test and 'ace5-cx-vote: AOP capture complete; no ARC access or power requests' not in saved_log:

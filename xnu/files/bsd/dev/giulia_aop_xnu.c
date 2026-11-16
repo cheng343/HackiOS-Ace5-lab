@@ -23,6 +23,7 @@
 #include "giulia_wlan_pdc.h"
 #include "giulia_wifi_gpio.h"
 #include "giulia_cx_vote.h"
+#include "giulia_rpmh_probe.h"
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
@@ -294,7 +295,7 @@ void giulia_aop_test_init(void)
     uint64_t pa;
     thread_t thread;
     if (!PE_parse_boot_argn("ace5_aop_channel_test", &enabled, sizeof(enabled)) ||
-        (enabled != 1 && enabled != 2 && enabled != 3)) return;
+        (enabled != 1 && enabled != 2 && enabled != 3 && enabled != 4)) return;
     if (hackios_platform() != HACKIOS_PLATFORM_GIULIA) return;
     if (__atomic_load_n(&ga_started, __ATOMIC_ACQUIRE)) return;
     PE_parse_boot_argn("cpus", &cpus, sizeof(cpus));
@@ -316,6 +317,7 @@ void giulia_aop_test_init(void)
     }
     __builtin_memcpy(&pa, property, sizeof(pa));
     if (!pa || (pa & 127u)) return;
+    if (enabled == 4 && seconds > 120) return;
     if (enabled == 2) {
         if (seconds > 120 || SecureDTGetProperty(entry, "loader-wlan-pdc-table", &property, &size) != kSuccess ||
             size != sizeof(ga.table)) {
@@ -324,6 +326,7 @@ void giulia_aop_test_init(void)
         __builtin_memcpy(ga.table, property, sizeof(ga.table));
     }
     if (__atomic_exchange_n(&ga_started, 1, __ATOMIC_ACQ_REL)) return;
+    if (enabled == 4) { giulia_rpmh_read_test_start(pa); return; }
     ga_pdc_mode = enabled == 2;
     ga_cx_mode = enabled == 3;
     if (kernel_thread_start(ga_thread, (void *)(uintptr_t)pa, &thread) == KERN_SUCCESS)

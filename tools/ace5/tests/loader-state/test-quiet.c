@@ -12,6 +12,14 @@ static uint64_t ticks;
 static int crm_reset_required, pdc_reset_required;
 static int str_eq(const char *a,const char *b) { return !strcmp(a,b); }
 #include "quiet-args.inc"
+#define HACKIOS_GIULIA
+static void select_trial(const char *cmd,int other_cpu)
+{
+    struct { const char *cmdline; } pi={cmd};
+    unsigned kernel_mpidr=other_cpu ? 1u:0u,this_mpidr=0;
+    crm_reset_required=pdc_reset_required=0;
+#include "quiet-enable.inc"
+}
 #include "crm-command-gate.inc"
 #define CNTVCT_EL0 0
 #define READ_SYSREG(x) (++ticks)
@@ -57,6 +65,13 @@ static void reset(void)
 int main(void)
 {
     uint64_t last = 0;
+    select_trial("cpus=1 ace5_aop_channel_test=4 bootcpu=1",1);
+    assert(firmware_quiet_enabled && pdc_reset_required && !crm_reset_required);
+    select_trial("ace5_aop_channel_test=4",0);
+    assert(!firmware_quiet_enabled && !pdc_reset_required);
+    select_trial("ace5_aop_channel_test=40",1);
+    assert(!firmware_quiet_enabled && !pdc_reset_required);
+    puts("PASS: actual RPMh READ selection enables quiet and cold-reset gate");
     assert(quiet_flag_present("cpus=1 ace5_crm_channel_test=1 bootcpu=1","ace5_crm_channel_test=1"));
     assert(quiet_flag_present("cpus=1 ace5_crm_channel_test=2 bootcpu=1","ace5_crm_channel_test=2"));
     assert(quiet_flag_present("ace5_aop_channel_test=1","ace5_aop_channel_test=1"));
