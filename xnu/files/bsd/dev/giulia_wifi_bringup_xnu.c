@@ -265,6 +265,12 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     wb_log("ace5-wifi-bringup: start rc=%d stage=%u failed=%u err=%d sub=%d cleanup=%d\n",
         rc, wb.bringup.stage, wb.bringup.failed_stage, wb.bringup.error,
         wb.bringup.sub_error, wb.bringup.cleanup_error);
+    wb_log("ace5-wifi-bringup: supply state=%u failed=%u err=%d drv=%d retained=%#x pdc=%u/%#x rails=%u/%#x\n",
+        wb.bringup.supply.state, wb.bringup.supply.failed_stage,
+        wb.bringup.supply.error, wb.bringup.supply.driver_error,
+        wb.bringup.supply.retained,
+        wb.bringup.supply.pdc.state, wb.bringup.supply.pdc.delivered,
+        wb.bringup.supply.rails.state, wb.bringup.supply.rails.completed_mask);
     wb_log("ace5-wifi-bringup: root=%#x ep=%#x link_sts=%#x bar0=%#x/%#x\n",
         wb.bringup.link.root_id, wb.bringup.link.endpoint_id,
         wb.bringup.link.link_status, wb.bringup.link.bar0_mask, wb.bringup.link.bar0_mask_hi);
