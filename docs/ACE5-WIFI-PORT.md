@@ -32,7 +32,13 @@ XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属�
 
 本轮保持 Android，不重启或刷写手机；新流程没有自动启动 hook。组合
 fixture 用 leaf 合约模型检查顺序与失败生命周期，各 leaf 的真实 MMIO/
-协议 core 仍分别运行现有回归。云端构建结果待核验，尚无新真机结果。
+协议 core 仍分别运行现有回归。源码
+[`3f6e60b`](https://github.com/cheng343/HackiOS-Ace5-lab/commit/3f6e60b1df681adb99cdc0efa0545b43ff5abdda)
+已通过[云构建 43802452519](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43802452519)：
+25 组组合场景、全部旧回归、两种 loader 和完整 XNU 均成功，七项产物
+长度与 SHA-256 已核验。可缓存编译调用命中 1055/1064（99.15%）。
+后续 XNU 入口仍需接入真实平台所有者及 loader 的冷重启保留契约；
+本轮没有手机操作或新真机结果。
 
 ## 2026-11-16：共享电源与分阶段 PCIe 启动源码
 
