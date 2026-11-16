@@ -37,6 +37,19 @@ ESR=`0x96000010`。未读取到投票值，没有电源写入；loader 已取回
 协议依据 [qcom_scm.c](https://github.com/torvalds/linux/blob/v6.12/drivers/firmware/qcom/qcom_scm.c)
 和 [qcom_scm-smc.c](https://github.com/torvalds/linux/blob/v6.12/drivers/firmware/qcom/qcom_scm-smc.c)。
 
+`c8eb9d4` 已通过[云构建 43813304016](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43813304016)
+的全部回归、两种 loader 和完整 XNU 编译；七项产物长度/哈希、ZIP CRC、
+源码及全部测试记录已核验。随后真机运行了约 60 秒：availability 查询
+返回 status=0、answer=1，说明 IO_READ 接口存在；对 `0x0b6200d0`
+的读取返回 status=`-2`（QCOM_SCM_EINVAL_ARG），没有取得投票值。
+本轮没有 panic，内核按时返回 loader，随后确认 Android 启动完成。
+不能把失败输出结构中的零当成实际零请求；快照 valid=0。
+
+因此当前已移除导致崩溃的裸读取路径，但仍未解决电源基线获取。仅凭
+固件的参数错误也不能确定完整的地址白名单或权限规则。下一条调查路径是
+现有 AOP 调试服务代读；当前静态分析只确认 `cx_vote` 可采集 CX 请求，
+没有据此宣称它可获取 XO 或七路 VRM 基线，也没有发送该调试消息。
+
 云测试覆盖实际 CMD DB parser、四次读取故障、全部采样位置漂移、错误
 地址，以及实际 XNU 入口；另模拟 SCM 不支持、拒绝、A6 恢复和持续中断，
 确认错误后没有裸寄存器读取。编译及 fixture 成功不能代替设备结果。
