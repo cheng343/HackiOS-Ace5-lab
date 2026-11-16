@@ -4,6 +4,30 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：GEM 配置时钟的 XO 保持流程
+
+Android 只读采集确认 `gcc_cpuss_ubwcp_clk_src` 当前为 19.2 MHz，
+CMD=`0`、CFG=`0x00100001`，父时钟为 `bi_tcxo_ao`。临时 debugfs 以
+只读方式挂载，采集后已卸载；没有重启、切换 Wi-Fi 或写时钟节点。
+这只代表 Android 采集时状态，XNU 必须重新读取交接后的寄存器。
+
+新增 `giulia_gem_clock`：仅接受已提交的 XO/div1/HW_CLK_CTRL 配置，
+保存并持有 ROOT_EN，最多等待 500 us 确认 ROOT_OFF 清除；结束后恢复
+自己的使能改动，保留继承的请求及其他位。它不写 CFG、UPDATE、PLL 或
+UBWCP 下游分支，避免为了配置 QoS 改动共享时钟频率。UPDATE/dirty 未完成、
+配置变化或资源所有权丢失会停止访问；恢复失败保留依赖供原所有者处理。
+
+前置条件包括真正持有 XO 父时钟、完成并维持 CX_AO 等级至少 64、共享
+时钟写入互斥及固件协调。64 是 RPMh 电源等级编码，**不是 64 微伏**；
+原厂 `clk_prepare_regmap()` 即便在 XO 速率也选择首个非零 rate_max 对应
+等级。新 core 不代替实际电源投票服务，不自动接入 XNU 启动探测。
+
+原厂固定版本参考：[gcc-pineapple.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/clk/qcom/gcc-pineapple.c)、
+[clk-rcg2.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/clk/qcom/clk-rcg2.c)、
+[clk-regmap.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/clk/qcom/clk-regmap.c)。
+云端测试连接实际时钟与 QoS core，检查先后顺序、超时、写入后报错、
+依赖丢失后的禁止访问及恢复；测试结果与设备是否能扫描联网分开记录。
+
 ## 2026-11-16：PCIe ANOC 与 GEM NoC 静态 QoS 驱动
 
 新增生产 core `giulia_pcie_qos`，补齐 Wi-Fi 物理路径上两处静态互连
