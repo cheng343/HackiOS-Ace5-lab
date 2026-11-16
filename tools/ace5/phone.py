@@ -372,6 +372,8 @@ run.add_argument('--gpu-cached', action='store_true',
                  help='Experimental cached buffers with synchronous ownership; requires --gpu-keep')
 run.add_argument('--fb-filter', choices=['bilinear', 'nearest'],
                  help='Display scaling filter; nearest trades edge smoothness for less CPU work')
+run.add_argument('--fb-hz', type=int, default=0,
+                 help='Display refresh cadence in Hz (1..240; 0 uses kernel default 60 Hz)')
 run.add_argument('--gpu-display', action='store_true',
                  help='Experimental A750 hardware scaling directly into the panel; requires --gpu-keep')
 selftest = sub.add_parser('selftest')
@@ -534,6 +536,10 @@ try:
             commandline += ' gpu_cached=2'
         if args.command == 'run' and args.fb_filter:
             commandline += f' fb_filter={int(args.fb_filter == "bilinear")}'
+        if args.command == 'run' and args.fb_hz:
+            if not 1 <= args.fb_hz <= 240:
+                raise RuntimeError('--fb-hz must be between 1 and 240')
+            commandline += f' fb_hz={args.fb_hz}'
         if args.command == 'run' and args.gpu_display:
             if not args.gpu_keep:
                 raise RuntimeError('--gpu-display requires --gpu-keep')
