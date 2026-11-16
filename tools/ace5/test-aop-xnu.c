@@ -25,6 +25,7 @@ static unsigned board, enabled, cpu, cpus, seconds, incompatible, missing_proper
 static unsigned creates, exits, deallocs, maps, unmaps, fail_map, thread_error;
 static unsigned no_quiet_ack, no_close_ack, complete, kicks, time_us;
 static unsigned pdc_complete, pdc_messages, stall_message, drift_message, missing_table;
+static unsigned cx_complete,cx_messages,cx_stall,cx_bad;
 static char pdc_payloads[10][64];
 static const uint8_t dt_table[] =
     "{class: wlan_pdc, ss: rf, res: s3c.v, upval: 916}\0"
@@ -39,6 +40,7 @@ static const uint8_t dt_table[] =
     "{class: wlan_pdc, ss: bb, res: s4i.v, dwnval: 420}";
 static _Alignas(0x4000) uint32_t shared_page[0x4000/4], msg_page[0x4000/4], ipcc_page[0x4000/4];
 static _Alignas(0x4000) uint32_t gcc_pages[0x70000/4], tlmm_pages[0x100000/4];
+static _Alignas(0x4000) uint32_t stats_page[0x4000/4],db_pages[0x20000/4];
 static uint64_t shared_pa = 0x90000100;
 static volatile struct loader_firmware_quiet *const shared =
     (volatile struct loader_firmware_quiet *)((uint8_t *)shared_page + 0x100);
@@ -86,6 +88,18 @@ static void peer_barrier(void)
         assert(shared->ack == 1 && shared->active == 1);
         kicks++; ipcc_page[(0x2000+0xc)/4] = 0xffffffff;
         if (msg_page[0x128/4]) {
+            if (enabled==3) {
+                assert(msg_page[0x128/4]==64 && !cx_messages);
+                assert(!strcmp((char *)msg_page+0x12c,"{class: misc_debug, res: cx_vote}"));
+                cx_messages++;
+                for (unsigned i=0;i<7;i++) stats_page[(0x1f0+i*4)/4]=0;
+                for (unsigned i=0;i<24;i++) {
+                    unsigned value=(i==11 || i==19 || i==20) ? 0xfe:i%4;
+                    stats_page[(0x1f0+(i/4)*4)/4]|=value<<((i%4)*8);
+                }
+                stats_page[0x208/4]=cx_bad ? 0:0x7f7f7f7f;
+                if (!cx_stall) msg_page[0x128/4]=0;
+            } else {
             assert(enabled == 2 && msg_page[0x128/4] == 64 && pdc_messages < 10);
             assert((tlmm_pages[16*0x1000/4] & 0x3ff) == 0x201);
             assert((tlmm_pages[94*0x1000/4] & 0x3ff) == 0x201);
@@ -94,6 +108,7 @@ static void peer_barrier(void)
             memcpy(pdc_payloads[pdc_messages++], (uint8_t *)msg_page+0x12c, 64);
             if (pdc_messages != stall_message) msg_page[0x128/4] = 0;
             if (pdc_messages == drift_message) gcc_pages[0x52008/4] = 1;
+            }
         }
         if (msg_page[0x2c/4] == GIULIA_AOP_UP) msg_page[0x30/4] = GIULIA_AOP_UP;
         else if (!no_close_ack) msg_page[0x30/4] = GIULIA_AOP_DOWN;
@@ -102,11 +117,13 @@ static void peer_barrier(void)
 vm_offset_t ml_io_map_unmappable(vm_offset_t pa, vm_size_t size, unsigned flags)
 {
     unsigned bit; void *base;
-    assert(size == 0x4000 || size == 0x70000 || size == 0x100000);
+    assert(size == 0x4000 || size == 0x70000 || size == 0x100000 || size==0x20000);
     if (pa == 0x90000000) { bit = 1; base = shared_page; assert(flags == VM_WIMG_WCOMB); }
     else if (pa == 0xc300000) { bit = 2; base = msg_page; assert(flags == VM_WIMG_IO); }
     else if (pa == 0x404000) { bit = 4; base = ipcc_page; assert(flags == VM_WIMG_IO); }
     else if (pa == 0x100000) { bit = 8; base = gcc_pages; assert(size == 0x70000 && flags == VM_WIMG_IO); }
+    else if (pa == 0xc3f0000) { bit=32; base=stats_page; assert(size==0x4000 && flags==VM_WIMG_IO); }
+    else if (pa == 0x81c60000) { bit=64; base=db_pages; assert(size==0x20000 && flags==VM_WIMG_WCOMB); }
     else { assert(pa == 0xf100000 && size == 0x100000 && flags == VM_WIMG_IO); bit = 16; base = tlmm_pages; }
     if (bit == fail_map) return 0;
     assert(!(maps & bit)); maps |= bit; return (uintptr_t)base;
@@ -114,19 +131,29 @@ vm_offset_t ml_io_map_unmappable(vm_offset_t pa, vm_size_t size, unsigned flags)
 void ml_io_unmap(vm_offset_t address, vm_size_t size)
 {
     unsigned bit = address == (uintptr_t)shared_page ? 1 : address == (uintptr_t)msg_page ? 2 :
-        address == (uintptr_t)ipcc_page ? 4 : address == (uintptr_t)gcc_pages ? 8 : 16;
-    assert(size == (bit == 8 ? 0x70000u : bit == 16 ? 0x100000u : 0x4000u));
+        address == (uintptr_t)ipcc_page ? 4 : address == (uintptr_t)gcc_pages ? 8 :
+        address==(uintptr_t)stats_page ? 32:address==(uintptr_t)db_pages ? 64:16;
+    assert(size == (bit == 8 ? 0x70000u : bit == 16 ? 0x100000u : bit==64 ? 0x20000u:0x4000u));
     assert((maps & bit) && !(unmaps & bit)); unmaps |= bit;
 }
 kern_return_t thread_terminate(thread_t t) { assert(t == current_thread()); exits++; return 0; }
 void loader_log_line(const char *text)
-{ if (strstr(text,"channel handshake complete;")) complete++; if (strstr(text,"all 10 stock messages acknowledged;")) pdc_complete++; }
+{ if (strstr(text,"channel handshake complete;")) complete++; if (strstr(text,"all 10 stock messages acknowledged;")) pdc_complete++;
+  if (strstr(text,"ace5-cx-vote: AOP capture complete;")) cx_complete++; }
 static void setup(void)
 {
-    memset(&ga,0,sizeof(ga)); ga_started = ga_pdc_mode = 0;
+    memset(&ga,0,sizeof(ga)); ga_started = ga_pdc_mode = ga_cx_mode=0;
     memset(shared_page,0,sizeof(shared_page)); memset(msg_page,0,sizeof(msg_page));
     memset(ipcc_page,0xff,sizeof(ipcc_page));
     memset(gcc_pages,0,sizeof(gcc_pages)); memset(tlmm_pages,0,sizeof(tlmm_pages));
+    memset(stats_page,0,sizeof(stats_page)); memset(db_pages,0,sizeof(db_pages));
+    db_pages[0]=1; db_pages[1]=0xc0330db;
+    uint16_t *desc=(uint16_t *)((uint8_t *)db_pages+8);
+    desc[0]=3; desc[2]=32; desc[3]=1;
+    uint8_t *e=(uint8_t *)db_pages+144;
+    memcpy(e,"cx.lvl",6); uint32_t address=0x30000; memcpy(e+16,&address,4);
+    uint16_t auxbytes=8; memcpy(e+20,&auxbytes,2);
+    const uint16_t levels[]={0,16,64,128}; memcpy((uint8_t *)db_pages+176,levels,8);
     gcc_pages[0x6b004/4] = gcc_pages[0x6c000/4] = 1;
     gcc_pages[0x6b008/4] = gcc_pages[0x6c004/4] = 1u << 15;
     gcc_pages[0x5214c/4] = 9;
@@ -142,6 +169,7 @@ static void setup(void)
     incompatible = missing_property = creates = exits = deallocs = maps = unmaps = 0;
     fail_map = thread_error = no_quiet_ack = no_close_ack = complete = kicks = time_us = 0;
     pdc_complete = pdc_messages = stall_message = drift_message = missing_table = 0;
+    cx_complete=cx_messages=cx_stall=cx_bad=0;
 }
 static void check_no_start(void) { giulia_aop_test_init(); assert(!creates && !maps && !kicks); }
 static void pdc_tests(unsigned stall, unsigned drift)
@@ -234,5 +262,24 @@ int main(int argc, char **argv)
     ga_unmap(&ga.ipcc); ga_unmap(&ga.msg); ga_unmap(&ga.shared);
     assert(unmaps == maps);
     puts("Ace5 AOP XNU: actual guarded MMIO adapter, quiet lease, handshake and failure retention passed");
+    setup(); enabled=3; giulia_aop_test_init();
+    assert(cx_complete && cx_messages==1 && complete && maps==103 && unmaps==maps);
+    assert(!shared->request && !ga.aop.pending && !ga.aop.owned && !pdc_messages);
+    setup(); enabled=3; cx_bad=1; giulia_aop_test_init();
+    assert(!cx_complete && cx_messages==1 && complete && maps==unmaps && !shared->request);
+    for (unsigned bit=32;bit<=64;bit<<=1) {
+        setup(); enabled=3; fail_map=bit; giulia_aop_test_init();
+        assert(!cx_messages && maps==unmaps && !shared->request);
+    }
+    setup(); enabled=3; db_pages[1]=0; giulia_aop_test_init();
+    assert(!cx_messages && !kicks && maps==unmaps);
+    setup(); enabled=3; cx_stall=1; giulia_aop_test_init();
+    assert(!cx_complete && cx_messages==1 && ga.aop.pending && ga.aop.owned && !unmaps);
+    assert(shared->request && shared->ack && shared->active && maps==103);
+    msg_page[0x128/4]=0; assert(!giulia_aop_recover(&ga.aop));
+    assert(!giulia_aop_close(&ga.aop) && ga_quiet_release(&ga));
+    ga_unmap(&ga.db);ga_unmap(&ga.stats);ga_unmap(&ga.ipcc);ga_unmap(&ga.msg);ga_unmap(&ga.shared);
+    assert(maps==unmaps);
+    puts("Ace5 CX AOP XNU: actual query, current DB, SRAM validation and timeout ownership passed");
     return 0;
 }

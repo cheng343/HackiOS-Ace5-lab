@@ -18,7 +18,7 @@ SOURCE = Path(__file__).with_name('phone.py')
 FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect_run_diagnostics',
              'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel',
              'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments',
-             'ace5_crm_test_arguments', 'ace5_pdc_test_arguments'}
+             'ace5_crm_test_arguments', 'ace5_pdc_test_arguments', 'ace5_cx_vote_arguments'}
 
 
 class Clock:
@@ -178,6 +178,18 @@ class PhoneTests(unittest.TestCase):
         self.results = ['result: returned 0 0\n']
         with self.assertRaisesRegex(RuntimeError, 'selftest failed: returned'):
             self.collect(command='selftest')
+
+    def test_cx_vote_trial_is_finite_isolated_and_has_no_live_polling(self):
+        args = self.namespace['ace5_cx_vote_arguments']
+        self.assertEqual(args(False, 0, None, 0, True, True), '')
+        self.assertEqual(args(True, 1, 'kernel', 60, False, False), ' ace5_aop_channel_test=3')
+        for cpu, kernel, seconds, other, live in ((0, 'kernel', 60, False, False),
+                (1, None, 60, False, False), (1, 'kernel', 9, False, False),
+                (1, 'kernel', 121, False, False), (1, 'kernel', 60, True, False),
+                (1, 'kernel', 60, False, True)):
+            with self.assertRaises(RuntimeError):
+                args(True, cpu, kernel, seconds, other, live)
+        self.assertEqual(self.commands, [])
 
     def test_aop_channel_trial_is_explicit_and_isolated(self):
         args = self.namespace['ace5_aop_test_arguments']

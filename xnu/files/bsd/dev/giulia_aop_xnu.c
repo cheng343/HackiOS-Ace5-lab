@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
-/* Explicit, finite Ace 5 AOP channel handshake (mode 1) or stock WLAN PDC
- * table delivery (mode 2). Neither mode enables the WLAN radio or RPMh rails.
+/* Explicit, finite Ace 5 AOP channel handshake (mode 1), stock WLAN PDC
+ * table delivery (mode 2), or current-firmware CX diagnostic (mode 3).
+ * None enables the WLAN radio or RPMh rails.
  * Loader quiet ACK pauses its firmware clients and masks its CPU interrupts;
  * single-core XNU and the board guards exclude the old Redwood QMP clients.
  */
@@ -21,13 +22,14 @@
 #include "giulia_aop.h"
 #include "giulia_wlan_pdc.h"
 #include "giulia_wifi_gpio.h"
+#include "giulia_cx_vote.h"
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
 extern void loader_log_line(const char *);
 struct ga_mapping { uintptr_t allocation, address; vm_size_t size; };
 struct ga_trial {
-    struct ga_mapping shared, msg, ipcc, gcc, tlmm;
+    struct ga_mapping shared, msg, ipcc, gcc, tlmm, stats, db;
     volatile struct loader_firmware_quiet *quiet;
     struct giulia_aop aop;
     struct giulia_wlan_pdc pdc;
@@ -36,7 +38,7 @@ struct ga_trial {
     uint32_t guard_failed, guard_pa, guard_mask, guard_expected, guard_observed;
 };
 static struct ga_trial ga;
-static unsigned ga_started, ga_pdc_mode;
+static unsigned ga_started, ga_pdc_mode, ga_cx_mode;
 static void ga_log(const char *line) { loader_log_line(line); printf("%s", line); }
 static void ga_barrier(__unused void *cookie)
 {
@@ -112,10 +114,18 @@ static uint32_t ga_read(void *cookie, uint32_t offset)
     uint32_t v = *(volatile uint32_t *)(p->msg.address + offset);
     ga_barrier(0); return v;
 }
+static int ga_cx_read(void *cookie,uint32_t offset,uint32_t *value)
+{ *value=ga_mmio(&((struct ga_trial *)cookie)->stats,offset); return 0; }
+static int ga_cx_quiet(struct ga_trial *p)
+{
+    return ga_check(p,0,(p->quiet->request==1) | ((p->quiet->ack==1)<<1) |
+        ((p->quiet->active==1)<<2),7,7);
+}
 static void ga_write(void *cookie, uint32_t offset, uint32_t value)
 {
     struct ga_trial *p = cookie;
     if (ga_pdc_mode && !ga_pdc_quiet(p)) return;
+    if (ga_cx_mode && !ga_cx_quiet(p)) return;
     *(volatile uint32_t *)(p->msg.address + offset) = value;
     ga_barrier(0);
 }
@@ -124,6 +134,7 @@ static int ga_kick(void *cookie)
 {
     struct ga_trial *p = cookie;
     if (ga_pdc_mode && !ga_pdc_quiet(p)) return GIULIA_AOP_PREREQUISITE;
+    if (ga_cx_mode && !ga_cx_quiet(p)) return GIULIA_AOP_PREREQUISITE;
     /* Fixed official qcom-ipcc.c: SEND_ID=0xc, client AOP=0, signal QMP=0.
      * Receive routing is left with firmware; ACKs are polled in message RAM. */
     *(volatile uint32_t *)(p->ipcc.address + 0xcu) = 0;
@@ -152,6 +163,7 @@ static void ga_thread(void *context, __unused wait_result_t wait)
 {
     uint64_t pa = (uint64_t)(uintptr_t)context;
     struct giulia_aop_snapshot before, after;
+    struct giulia_arc_resource cx={0};
     struct giulia_aop_io io = {&ga, ga_read, ga_write, ga_barrier, ga_delay, ga_kick};
     int opened = 0, closed = 0, released = 0, rc;
     ga_map(&ga.shared, pa, sizeof(struct loader_firmware_quiet), VM_WIMG_WCOMB);
@@ -164,6 +176,16 @@ static void ga_thread(void *context, __unused wait_result_t wait)
     ga_map(&ga.msg, GIULIA_AOP_MSGRAM_PHYS, GIULIA_AOP_MSGRAM_SIZE, VM_WIMG_IO);
     ga_map(&ga.ipcc, 0x00406000u, 0x1000u, VM_WIMG_IO);
     if (!ga.msg.address || !ga.ipcc.address) goto done;
+    if (ga_cx_mode) {
+        ga_map(&ga.stats,GIULIA_CX_STATS_PHYS,GIULIA_CX_STATS_SIZE,VM_WIMG_IO);
+        ga_map(&ga.db,0x81c60000u,GIULIA_RPMH_DB_MAX,VM_WIMG_WCOMB);
+        if (!ga.stats.address || !ga.db.address) goto done;
+        uint32_t version=*(volatile uint32_t *)ga.db.address;
+        if (giulia_arc_resolve((const uint8_t *)ga.db.address,GIULIA_RPMH_DB_MAX,
+            version,"cx.lvl",&cx) || cx.address!=0x30000u) {
+            ga_log("ace5-cx-vote: current CX CMD DB profile rejected; no query sent\n"); goto done;
+        }
+    }
     if (ga_pdc_mode) {
         ga_map(&ga.gcc, 0x00100000u, 0x70000u, VM_WIMG_IO);
         ga_map(&ga.tlmm, GIULIA_WIFI_GPIO_PA, GIULIA_WIFI_GPIO_SIZE, VM_WIMG_IO);
@@ -193,6 +215,23 @@ static void ga_thread(void *context, __unused wait_result_t wait)
         GIULIA_AOP_OPEN_ON_INHERITED_LINK);
     opened = rc == 0;
     if (opened) ga_log("ace5-aop: channel open acknowledged; no power message sent\n");
+    if (opened && ga_cx_mode) {
+        struct giulia_cx_vote s;
+        char status[192];
+        const struct giulia_cx_vote_io ci={&ga,ga_cx_read,GIULIA_CX_STATS_PHYS,GIULIA_CX_STATS_SIZE};
+        rc=giulia_cx_vote_capture(&ga.aop,&ci,&cx,&s);
+        snprintf(status,sizeof(status),"ace5-cx-vote: rc=%d valid=%u reads=%u pending=%u callback=%d\n",
+            rc,s.valid,s.reads,ga.aop.pending,s.callback_error); ga_log(status);
+        for (unsigned i=0;i<7;i++) {
+            snprintf(status,sizeof(status),"ace5-cx-vote: word%u before=%#x after=%#x\n",i,s.words[i],s.after[i]);
+            ga_log(status);
+        }
+        if (!rc) {
+            snprintf(status,sizeof(status),"ace5-cx-vote: HLOS selector=%u corner=%u; observation only\n",
+                s.selector[2],cx.level[s.selector[2]]); ga_log(status);
+            ga_log("ace5-cx-vote: AOP capture complete; no ARC access or power requests\n");
+        }
+    }
     if (opened && ga_pdc_mode) {
         char status[192];
         rc = giulia_wlan_pdc_start(&ga.pdc, &ga.aop, ga.table, sizeof(ga.table),
@@ -236,6 +275,7 @@ release:
     else ga_log("ace5-aop: channel handshake incomplete; preserve diagnostics\n");
     if (!released) goto retain;
 done:
+    ga_unmap(&ga.db); ga_unmap(&ga.stats);
     ga_unmap(&ga.tlmm); ga_unmap(&ga.gcc);
     ga_unmap(&ga.ipcc); ga_unmap(&ga.msg); ga_unmap(&ga.shared);
 retain:
@@ -254,7 +294,7 @@ void giulia_aop_test_init(void)
     uint64_t pa;
     thread_t thread;
     if (!PE_parse_boot_argn("ace5_aop_channel_test", &enabled, sizeof(enabled)) ||
-        (enabled != 1 && enabled != 2)) return;
+        (enabled != 1 && enabled != 2 && enabled != 3)) return;
     if (hackios_platform() != HACKIOS_PLATFORM_GIULIA) return;
     if (__atomic_load_n(&ga_started, __ATOMIC_ACQUIRE)) return;
     PE_parse_boot_argn("cpus", &cpus, sizeof(cpus));
@@ -285,6 +325,7 @@ void giulia_aop_test_init(void)
     }
     if (__atomic_exchange_n(&ga_started, 1, __ATOMIC_ACQ_REL)) return;
     ga_pdc_mode = enabled == 2;
+    ga_cx_mode = enabled == 3;
     if (kernel_thread_start(ga_thread, (void *)(uintptr_t)pa, &thread) == KERN_SUCCESS)
         thread_deallocate(thread);
     else ga_log("ace5-aop: no test thread\n");

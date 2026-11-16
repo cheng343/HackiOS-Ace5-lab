@@ -4,6 +4,34 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：AOP 代读 CX 请求
+
+新增单独选择的 `--aop-cx-vote-test`，使用已验证的本机 AOP 固件配置。
+专用 core `giulia_cx_vote` 只发送固定消息
+`{class: misc_debug, res: cx_vote}`，由 AOP 读取受限 ARC 表，将结果写入
+共享 SRAM。XNU 不映射 ARC、不写电源请求、不切换 GPIO 或启动无线电。
+loader 为该模式提供真实 firmware-quiet 握手；单 CPU、有限时间运行，
+与其他硬件测试互斥。该模式无实时 USB 日志轮询，结束后统一取日志。
+
+静态核对当前设备固件：`misc_debug` 注册了同步处理函数，`cx_vote`
+只读取 CX 请求并填充调试缓冲；匹配到处理函数的消息路径在函数返回后
+才清除长度并发出 ACK，排队路径也在回调返回后确认。此结论只用于该
+固定命令/固件，不推广为所有 AOP 消息的硬件完成证明。打包器重新核对
+活动 AOP 哈希及本机 DT 的 SRAM 范围，拒绝离线旧配置。
+
+返回位于 `0x0c3f0000 + 0x1f0`，在原厂
+[pineapple.dtsi 的 rpmh-stats-v4 SRAM 范围](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8650/blob/453d8875f815bf9dfad9035982861226a4823a6c/kernel_platform/qcom/proprietary/devicetree/qcom/pineapple.dtsi)
+内。固件输出前 24 个 DRV 的 CX selector；第 24 号 DRV 没有输出。
+第 11/19/20 项是固件跳过读取后的 `0xfe` 标记，末字保留 `0x7f7f7f7f`。
+解析当前 CMD DB 的 CX 等级表，再核对两遍数据、保留标记和 selector
+范围；格式不符或变化则不报告有效结果。只允许 CX 仍为该固件固定资源
+`0x30000` 的配置，不能把命令误用为任意 ARC 资源读取。
+
+云测试连接真实 AOP transport，核对固定消息、ACK 后才读 SRAM、所有
+14 个读取位置的错误/漂移、畸形标记，以及实际 XNU 入口、QMP 超时
+保留与映射清理。收到 CX 数值仍只是一份观测；没有据此建立共享资源
+所有权，也不能代替 XO 和七路 VRM 基线。
+
 ## 2026-11-16：HLOS ARC 原始请求的只读探测
 
 新增独立选择的 `--wifi-probe 5`。仅在确认匹配当前 SM8650 电源固件后

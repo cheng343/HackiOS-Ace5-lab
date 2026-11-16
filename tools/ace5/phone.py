@@ -229,6 +229,14 @@ def ace5_aop_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware):
     return ' ace5_aop_channel_test=1'
 
 
+def ace5_cx_vote_arguments(enabled, bootcpu, kernel, seconds, other_hardware, live_log):
+    if not enabled:
+        return ''
+    if not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
+        raise RuntimeError('--aop-cx-vote-test requires verified firmware profile, --kernel, CPU1, 10..120 seconds, no other probes and no live-log')
+    return ' ace5_aop_channel_test=3'
+
+
 def ace5_crm_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware, live_log, bandwidth=False):
     if not enabled:
         return ''
@@ -267,6 +275,8 @@ run.add_argument('--wifi-probe', type=int, choices=[1, 2, 3, 4, 5],
                  help='Read-only Ace 5 handoff probe: 1 baseline, 2 CESTA/CRM headers, 3 AOP headers, 4 full SM/CRM snapshot, 5 HLOS ARC votes with a separately verified firmware profile; requires --kernel, CPU 1 and a finite run')
 run.add_argument('--aop-channel-test', action='store_true',
                  help='Open/close only the AOP host channel while loader firmware clients are parked; requires CPU 1 and 10..300 seconds')
+run.add_argument('--aop-cx-vote-test', action='store_true',
+                 help='Query current AOP CX votes through shared SRAM; requires separately verified firmware profile, CPU1, finite run and no live-log')
 run.add_argument('--wlan-pdc-test', action='store_true',
                  help='Deliver the 10 stock AOP WLAN PDC messages with WLAN/BT quiet; no rail/radio startup; CPU1, finite <=120 seconds, no live-log; cold reboot afterwards')
 run.add_argument('--wlan-pdc-table', type=Path,
@@ -414,13 +424,16 @@ try:
         if args.command == 'run':
             commandline += ace5_wifi_probe_arguments(args.wifi_probe, args.bootcpu, args.kernel, seconds)
             commandline += ace5_aop_test_arguments(args.aop_channel_test, args.bootcpu, args.kernel,
-                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test)
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test or args.aop_cx_vote_test)
+            commandline += ace5_cx_vote_arguments(args.aop_cx_vote_test,args.bootcpu,args.kernel,seconds,
+                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test,
+                args.live_log)
             commandline += ace5_crm_test_arguments(args.crm_channel_test or args.crm_bandwidth_test, args.bootcpu, args.kernel,
-                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.wlan_pdc_test,
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.wlan_pdc_test or args.aop_cx_vote_test,
                 args.live_log, args.crm_bandwidth_test)
             commandline += ace5_pdc_test_arguments(args.wlan_pdc_test, args.wlan_pdc_table,
                 args.bootcpu, args.kernel, seconds,
-                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test,
+                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test,
                 args.live_log)
         if args.command == 'run' and args.touch:
             if not args.kernel:
@@ -507,8 +520,10 @@ try:
         check_kernel_log(saved_log, log)
         if args.command == 'run':
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
-            if args.aop_channel_test and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:
+            if (args.aop_channel_test or args.aop_cx_vote_test) and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:
                 raise RuntimeError(f'AOP channel handshake incomplete; see {log}')
+            if args.aop_cx_vote_test and 'ace5-cx-vote: AOP capture complete; no ARC access or power requests' not in saved_log:
+                raise RuntimeError(f'AOP CX vote capture incomplete; see {log}')
             if args.wlan_pdc_test:
                 marker = 'ace5-pdc: all 10 stock messages acknowledged; table/GPIO/firmware quiet retained until kernel return'
                 if marker not in saved_log or getvar('power-reset-required') != 'yes':
