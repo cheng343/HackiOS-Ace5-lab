@@ -82,16 +82,16 @@ int main(void)
     tlen = 0; fail_at = -1;
     assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_OK);
     assert(b.stage == GIULIA_BRINGUP_READY && strcmp(giulia_kiwi_fw_name(&b.soc), "amss20.bin") == 0);
-    assert(strcmp(trace, "SNPLYERTMIH") == 0);
+    assert(strcmp(trace, "SNPYLERTMIH") == 0);
     assert(giulia_wifi_bringup_stop(&b) == GIULIA_BRINGUP_RETAINED);
     assert(b.stage == GIULIA_BRINGUP_HELD);
-    assert(strcmp(trace, "SNPLYERTMIHmrqeylpns") == 0);
+    assert(strcmp(trace, "SNPYLERTMIHmrqeylpns") == 0);
 
     /* Failure at link train (step 8 = 'T') triggers clean reverse unwind */
     tlen = 0; memset(trace, 0, sizeof(trace)); fail_at = 8;
     assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_LINK);
     assert(b.failed_stage == GIULIA_BRINGUP_LINK_TRAIN && b.stage == GIULIA_BRINGUP_HELD);
-    assert(strcmp(trace, "SNPLYERTrqeylpns") == 0);
+    assert(strcmp(trace, "SNPYLERTrqeylpns") == 0);
 
     puts("Wi-Fi end-to-end bringup coordinator tests passed");
     return 0;

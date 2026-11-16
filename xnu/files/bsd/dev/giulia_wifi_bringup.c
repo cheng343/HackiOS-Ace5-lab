@@ -69,15 +69,15 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     if (rc) return fail_stop(b, GIULIA_BRINGUP_POWER_RESET, GIULIA_BRINGUP_POWER, rc);
     if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
-    /* Mask PARF global interrupts after BCR reset; SM8650 resets PARF_INT_MASK non-zero. */
-    if (b->cfg.link.write32)
+    /* Mask PARF global interrupts and release PHY_TEST_PWR_DOWN before QMP PHY init. */
+    if (b->cfg.link.write32) {
         b->cfg.link.write32(b->cfg.link.cookie, GIULIA_LINK_PARF, 0x22cu, 0);
-
-    b->stage = GIULIA_BRINGUP_LINK_PREPARE;
-    rc = giulia_pcie_link_prepare(&b->link, link_base | GIULIA_LINK_PERST_ASSERTED,
-        &b->cfg.link);
-    if (rc) return fail_stop(b, GIULIA_BRINGUP_LINK_PREPARE, GIULIA_BRINGUP_LINK, rc);
-    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
+        if (b->cfg.link.read32) {
+            uint32_t phy_pwr = b->cfg.link.read32(b->cfg.link.cookie, GIULIA_LINK_PARF, 0x040u);
+            if (phy_pwr != 0xffffffffu && (phy_pwr & 1u))
+                b->cfg.link.write32(b->cfg.link.cookie, GIULIA_LINK_PARF, 0x040u, phy_pwr & ~1u);
+        }
+    }
 
     b->stage = GIULIA_BRINGUP_PHY_START;
     phy_io = b->cfg.phy;
@@ -86,6 +86,12 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     phy_io.pipe_disable = pipe_off;
     rc = giulia_pcie_phy_start(&b->phy, phy_req, &phy_io);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_PHY, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
+
+    b->stage = GIULIA_BRINGUP_LINK_PREPARE;
+    rc = giulia_pcie_link_prepare(&b->link, link_base | GIULIA_LINK_PERST_ASSERTED,
+        &b->cfg.link);
+    if (rc) return fail_stop(b, GIULIA_BRINGUP_LINK_PREPARE, GIULIA_BRINGUP_LINK, rc);
     if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_PERST_RELEASE;
