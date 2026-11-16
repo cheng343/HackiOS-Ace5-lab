@@ -1,6 +1,6 @@
 # Ace 5 Wi-Fi 移植状态
 
-核对日期：2026-11-14。本文记录源码和 Android 只读采集所得证据；不表示
+核对日期：2026-11-16。本文记录源码和 Android 只读采集所得证据；不表示
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
@@ -27,6 +27,12 @@ UBWCP 下游分支，避免为了配置 QoS 改动共享时钟频率。UPDATE/di
 [clk-regmap.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/clk/qcom/clk-regmap.c)。
 云端测试连接实际时钟与 QoS core，检查先后顺序、超时、写入后报错、
 依赖丢失后的禁止访问及恢复；测试结果与设备是否能扫描联网分开记录。
+
+代码 `4bf860f9600b4faca56f3cb29f87ab92738ad5d6` 的
+[云构建 43806848336](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43806848336)
+已通过全部回归、两种 loader 和完整 XNU 编译；下载后验证 7 项文件的
+长度/哈希、ZIP CRC、源码版本与新旧测试记录。ccache 命中 1064/1066
+（99.81%），2 次未命中。此版本尚未在手机上执行时钟或 QoS 写入。
 
 ## 2026-11-16：PCIe ANOC 与 GEM NoC 静态 QoS 驱动
 
