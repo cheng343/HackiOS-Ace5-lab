@@ -235,6 +235,18 @@ def ace5_crm_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware, l
     return ' ace5_crm_channel_test=2 ace5_crm_fixed_bw=1' if bandwidth else ' ace5_crm_channel_test=1'
 
 
+def ace5_pdc_test_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log):
+    if not enabled:
+        if table:
+            raise RuntimeError('--wlan-pdc-table requires --wlan-pdc-test')
+        return ''
+    if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
+        raise RuntimeError('--wlan-pdc-test requires current DT table, --kernel, CPU1, 10..120 seconds, no live-log and no other hardware probes')
+    if not table.is_file() or table.stat().st_size != 508:
+        raise RuntimeError('Missing or invalid current-DT PDC table (508 bytes); no upload attempted')
+    return ' ace5_aop_channel_test=2'
+
+
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
 sub = ap.add_subparsers(dest='command', required=True)
@@ -253,6 +265,10 @@ run.add_argument('--wifi-probe', type=int, choices=[1, 2, 3, 4],
                  help='Read-only Ace 5 handoff probe: 1 baseline, 2 CESTA/CRM headers, 3 AOP headers, 4 full vendor SM/CRM runtime snapshot; requires --kernel, CPU 1 and a finite run')
 run.add_argument('--aop-channel-test', action='store_true',
                  help='Open/close only the AOP host channel while loader firmware clients are parked; requires CPU 1 and 10..300 seconds')
+run.add_argument('--wlan-pdc-test', action='store_true',
+                 help='Deliver the 10 stock AOP WLAN PDC messages with WLAN/BT quiet; no rail/radio startup; CPU1, finite <=120 seconds, no live-log; cold reboot afterwards')
+run.add_argument('--wlan-pdc-table', type=Path,
+                 help='508-byte qcom,pdc_init_table property extracted from this phone current DT; kernel compares every byte against the supported board table')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -396,10 +412,14 @@ try:
         if args.command == 'run':
             commandline += ace5_wifi_probe_arguments(args.wifi_probe, args.bootcpu, args.kernel, seconds)
             commandline += ace5_aop_test_arguments(args.aop_channel_test, args.bootcpu, args.kernel,
-                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.crm_channel_test or args.crm_bandwidth_test)
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test)
             commandline += ace5_crm_test_arguments(args.crm_channel_test or args.crm_bandwidth_test, args.bootcpu, args.kernel,
-                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test,
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.wlan_pdc_test,
                 args.live_log, args.crm_bandwidth_test)
+            commandline += ace5_pdc_test_arguments(args.wlan_pdc_test, args.wlan_pdc_table,
+                args.bootcpu, args.kernel, seconds,
+                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test,
+                args.live_log)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -463,6 +483,9 @@ try:
             command.append(f'ramdisk={root_image.resolve()}')
         command += ['--cmdline', commandline]
         print(call(command))
+        if args.command == 'run' and args.wlan_pdc_test:
+            fb('stage', args.wlan_pdc_table, timeout=15)
+            print(fb('oem', 'wlan-pdc-table'), flush=True)
         fb('stage', payload, timeout=60)
         print(fb('oem', 'run' if args.command == 'run' else 'selftest'), flush=True)
         log = logs / (time.strftime('%Y%m%d-%H%M%S') + '-' + args.command + '.log')
@@ -473,7 +496,7 @@ try:
                                          args.bootcpu if args.command == 'run' else 0,
                                          args.live_log if args.command == 'run' else False,
                                          live_interval, logs, log,
-                                         args.command == 'run' and (args.crm_channel_test or args.crm_bandwidth_test))
+                                         args.command == 'run' and (args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test))
         print(result, log)
         saved_log = log.read_bytes().decode('utf-8', errors='replace')
         for line in saved_log.splitlines():
@@ -484,6 +507,11 @@ try:
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
             if args.aop_channel_test and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:
                 raise RuntimeError(f'AOP channel handshake incomplete; see {log}')
+            if args.wlan_pdc_test:
+                marker = 'ace5-pdc: all 10 stock messages acknowledged; table/GPIO/firmware quiet retained until kernel return'
+                if marker not in saved_log or getvar('power-reset-required') != 'yes':
+                    raise RuntimeError(f'WLAN PDC delivery incomplete; preserve {log} and cold reboot before another operation')
+                print('All 10 PDC messages acknowledged; no PMIC readback or radio startup claimed; cold reboot required.', flush=True)
             if args.crm_channel_test or args.crm_bandwidth_test:
                 marker = 'ace5-crm: channel test complete; selected channel and firmware quiet retained until kernel return'
                 if marker not in saved_log or getvar('crm-reset-required') != 'yes':

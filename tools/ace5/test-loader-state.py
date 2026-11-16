@@ -53,7 +53,7 @@ def main() -> int:
         if len(state) != 1:
             raise ValueError("expected one payload_available definition")
         (build / "constants.inc").write_text("\n".join(constants + state) + "\n", encoding="utf-8")
-        command = section(text, '\t\t} else if (starts_with(cmd, "oem ramdisk")) {',
+        command = section(text, '\t\t} else if (str_eq(cmd, "oem wlan-pdc-table")) {',
                           '\t\t} else if (starts_with(cmd, "upload")) {', source)
         (build / "commands.inc").write_text(
             'static void command(char *cmd) {\nif (0) {\n' + command + '\n}\n}\n', encoding="utf-8")
@@ -70,7 +70,7 @@ def main() -> int:
         prefix = section(text, 'static int\nstarts_with(', '/*\n * One command from the host.', source)
         gate = section(text, 'static int\ncrm_command_allowed(', 'static void\nfb_command(', source)
         (build / 'crm-command-gate.inc').write_text(prefix + gate, encoding='utf8')
-        if text.index('if (!crm_command_allowed(cmd))') > text.index('if (busy && (starts_with(cmd, "oem ramdisk")'):
+        if text.index('if (!crm_command_allowed(cmd))') > text.index('if (busy && (starts_with(cmd, "oem wlan-pdc-table")'):
             raise ValueError('CRM retained-lifetime gate must precede all command dispatch')
         if '\twhile (status == 0) {\n        if (observer_firmware_quiet(started, budget, &last_pet)) continue;' not in text:
             raise ValueError('firmware quiet must gate every observer iteration before firmware services')

@@ -966,6 +966,12 @@ static int firmware_quiet_enabled;
  * the payload/ownership reserved after XNU returns; only inspection/upload
  * and cold reboot are admitted until the platform reset ends its lifetime. */
 static int crm_reset_required;
+/* PDC has no readback/undo API. Forward delivery reserves this session until
+ * cold reset too, including partial delivery. The host provides only the
+ * small current-DT table; no Android/Apple system image is needed. */
+static int pdc_reset_required;
+static uint8_t wlan_pdc_table[508];
+static uint32_t wlan_pdc_table_bytes;
 
 static void wdt_pet(void);
 static int wdt_armed;
@@ -3097,8 +3103,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
     if (kernel_mpidr != this_mpidr) {
         int crm_test=quiet_flag_present(pi.cmdline,"ace5_crm_channel_test=1") ||
             quiet_flag_present(pi.cmdline,"ace5_crm_channel_test=2");
-        firmware_quiet_enabled=crm_test || quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=1");
+        int pdc_test=quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=2");
+        firmware_quiet_enabled=crm_test || pdc_test || quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=1");
         if (crm_test) crm_reset_required=1;
+        if (pdc_test) pdc_reset_required=1;
     }
 #endif
     if (firmware_quiet_enabled) {
@@ -3106,6 +3114,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
         clean_dcache((uint64_t)(uintptr_t)&firmware_quiet,
             (uint64_t)(uintptr_t)&firmware_quiet + sizeof(firmware_quiet));
         dt_prop_u64(&w, "loader-firmware-quiet", (uint64_t)(uintptr_t)&firmware_quiet);
+        if (wlan_pdc_table_bytes == sizeof(wlan_pdc_table))
+            dt_prop(&w, "loader-wlan-pdc-table", wlan_pdc_table, wlan_pdc_table_bytes);
     }
 	dt_prop(&w, "random-seed", seed, sizeof(seed));
 	dt_prop_u64(&w, "dram-base", phys_base);
@@ -3717,7 +3727,7 @@ starts_with(const char *s, const char *prefix)
 static int
 crm_command_allowed(const char *cmd)
 {
-    return !crm_reset_required || starts_with(cmd,"getvar:") || starts_with(cmd,"upload") ||
+    return !(crm_reset_required || pdc_reset_required) || starts_with(cmd,"getvar:") || starts_with(cmd,"upload") ||
         starts_with(cmd,"oem screenshot") || str_eq(cmd,"oem stop") || starts_with(cmd,"reboot");
 }
 static void
@@ -3725,12 +3735,12 @@ fb_command(char *cmd)
 {
 	int busy = running_live != NULL;
 	if (!crm_command_allowed(cmd)) {
-		fb_reply("FAIL","CRM trial retained: cold reboot required before another operation");
+		fb_reply("FAIL","Power trial retained: cold reboot required before another operation");
 		return;
 	}
 
 	{
-		if (busy && (starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
+		if (busy && (starts_with(cmd, "oem wlan-pdc-table") || starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
 		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
@@ -3756,6 +3766,8 @@ fb_command(char *cmd)
 #endif
 			} else if (str_eq(var, "crm-reset-required")) {
 				fb_reply("OKAY",crm_reset_required ? "yes" : "no");
+			} else if (str_eq(var, "power-reset-required")) {
+				fb_reply("OKAY",(crm_reset_required || pdc_reset_required) ? "yes" : "no");
 			} else if (str_eq(var, "version")) {
 				fb_reply("OKAY", "0.5");
 			} else if (str_eq(var, "max-download-size")) {
@@ -3772,6 +3784,22 @@ fb_command(char *cmd)
 			} else {
 				fb_reply("OKAY", "");
 			}
+		} else if (str_eq(cmd, "oem wlan-pdc-table")) {
+            wlan_pdc_table_bytes = 0;
+#if defined(HACKIOS_GIULIA)
+            if (payload_available != sizeof(wlan_pdc_table)) {
+                payload_available = 0;
+                fb_reply("FAIL", "expected 508-byte current-DT WLAN PDC table");
+                return;
+            }
+            memcpy(wlan_pdc_table, (const void *)PAYLOAD_BASE, sizeof(wlan_pdc_table));
+            wlan_pdc_table_bytes = sizeof(wlan_pdc_table);
+            payload_available = 0; /* This table is never an executable payload. */
+            fb_reply("OKAY", "WLAN PDC table staged; no device writes");
+#else
+            payload_available = 0;
+            fb_reply("FAIL", "WLAN PDC table is giulia-only");
+#endif
 		} else if (starts_with(cmd, "oem ramdisk")) {
 			/* "oem ramdisk": the next download is a root image for the resident area; "oem ramdisk none" drops it */
 			struct payload_info pi;

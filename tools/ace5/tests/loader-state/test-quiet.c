@@ -9,7 +9,7 @@ static int firmware_quiet_enabled, wdt_armed, masked, mode;
 static volatile uint64_t other_cpu_done;
 static unsigned flushes, clean_acks, restored, pets;
 static uint64_t ticks;
-static int crm_reset_required;
+static int crm_reset_required, pdc_reset_required;
 static int str_eq(const char *a,const char *b) { return !strcmp(a,b); }
 #include "quiet-args.inc"
 #include "crm-command-gate.inc"
@@ -60,6 +60,7 @@ int main(void)
     assert(quiet_flag_present("cpus=1 ace5_crm_channel_test=1 bootcpu=1","ace5_crm_channel_test=1"));
     assert(quiet_flag_present("cpus=1 ace5_crm_channel_test=2 bootcpu=1","ace5_crm_channel_test=2"));
     assert(quiet_flag_present("ace5_aop_channel_test=1","ace5_aop_channel_test=1"));
+    assert(quiet_flag_present("ace5_aop_channel_test=2","ace5_aop_channel_test=2"));
     const char *invalid[]={"ace5_crm_channel_test=10","xace5_crm_channel_test=1",
         "ace5_crm_channel_test=1x","ace5_crm_channel_test=0",""};
     for (unsigned i=0;i<sizeof(invalid)/sizeof(invalid[0]);i++)
@@ -72,6 +73,11 @@ int main(void)
         "oem touchprobe","oem live-log","oem memmap","oem clearscreen"};
     for (unsigned i=0;i<sizeof(allowed)/sizeof(allowed[0]);i++) assert(crm_command_allowed(allowed[i]));
     for (unsigned i=0;i<sizeof(denied)/sizeof(denied[0]);i++) assert(!crm_command_allowed(denied[i]));
+    crm_reset_required=0; pdc_reset_required=1;
+    assert(!crm_command_allowed("oem wlan-pdc-table"));
+    for (unsigned i=0;i<sizeof(allowed)/sizeof(allowed[0]);i++) assert(crm_command_allowed(allowed[i]));
+    for (unsigned i=0;i<sizeof(denied)/sizeof(denied[0]);i++) assert(!crm_command_allowed(denied[i]));
+    puts("PASS: actual PDC retained cold-reset command gate");
     reset(); firmware_quiet_enabled = 0;
     assert(!observer_firmware_quiet(0, 90, &last) && !flushes);
     reset(); assert(!observer_firmware_quiet(0, 90, &last) && !restored);

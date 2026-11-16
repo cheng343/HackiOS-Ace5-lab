@@ -24,7 +24,8 @@ def main():
              for name in ('power', 'phy', 'link', 'noc')]
     cases += [
         (drivers/'giulia_aop.c', root/'tools/ace5/test-aop.c'),
-        (drivers/'giulia_aop.c', root/'tools/ace5/test-aop-xnu.c'),
+        (drivers/'giulia_aop.c', drivers/'giulia_wlan_pdc.c', drivers/'giulia_wifi_gpio.c',
+         root/'tools/ace5/test-aop-xnu.c'),
         (drivers/'giulia_aop.c', drivers/'giulia_wlan_pdc.c', root/'tools/ace5/test-wlan-pdc.c'),
         (drivers/'giulia_crm.c', root/'tools/ace5/test-crm.c'),
         (drivers/'giulia_crm.c', drivers/'giulia_bcm.c', root/'tools/ace5/test-crm-xnu.c'),
@@ -50,6 +51,12 @@ def main():
                 '-Werror', '-fsanitize=address,undefined', '-I', str(drivers),
                 *map(str, sources), str(test), '-o', str(exe)], check=True, timeout=90)
             subprocess.run([str(exe)], check=True, timeout=30)
+            if test.stem == 'test-aop-xnu':
+                subprocess.run([str(exe), '--pdc'], check=True, timeout=30)
+                for index in range(1, 11):
+                    subprocess.run([str(exe), '--pdc-timeout', str(index)], check=True, timeout=30)
+                for index in (1, 9):
+                    subprocess.run([str(exe), '--pdc-drift', str(index)], check=True, timeout=30)
             if test.stem == 'test-crm':
                 for scenario in ('success', 'timeout', 'post-error', 'drift'):
                     subprocess.run([str(exe), '--empty-' + scenario], check=True, timeout=30)

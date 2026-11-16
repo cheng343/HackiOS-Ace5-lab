@@ -14,11 +14,15 @@ static uint8_t payload_memory[1024], resident_memory[1024], rx_memory[USB_CHUNK]
 static uint8_t *usb_rx_buf = rx_memory;
 static uint64_t win_base, win_size, resident_rd_size;
 static int download_to_ramdisk;
+static uint8_t wlan_pdc_table[508];
+static uint32_t wlan_pdc_table_bytes;
+#define HACKIOS_GIULIA 1
 static unsigned log_len;
 struct payload_info { int unused; };
 static int parse_payload(struct payload_info *pi, int verbose) { (void)pi; (void)verbose; return 1; }
 static int choose_window(const struct payload_info *pi) { (void)pi; return 1; }
 static int starts_with(const char *s, const char *prefix) { return strncmp(s, prefix, strlen(prefix)) == 0; }
+static int str_eq(const char *s, const char *other) { return !strcmp(s, other); }
 static uint64_t parse_number(const char *s, unsigned base) { return strtoull(s, NULL, (int)base); }
 static char reply_code[5], reply_text[64];
 static uint64_t data_reply;
@@ -60,6 +64,16 @@ static void filled(const uint8_t *p, unsigned count, uint8_t value)
 }
 int main(void)
 {
+    reset(); payload_available = 508; command("oem wlan-pdc-table");
+    assert(!strcmp(reply_code, "OKAY") && wlan_pdc_table_bytes == 508 && !payload_available);
+    filled(wlan_pdc_table, 508, 0xcc);
+    memset(payload_memory, 0x11, 508); /* Table survives the following kernel upload. */
+    filled(wlan_pdc_table, 508, 0xcc);
+    for (unsigned size = 507; size <= 509; size += 2) {
+        payload_available = size; command("oem wlan-pdc-table");
+        assert(!strcmp(reply_code, "FAIL") && !wlan_pdc_table_bytes && !payload_available);
+    }
+    puts("PASS: actual current-DT PDC upload size, private copy and non-executable state");
     reset(); command("oem ramdisk"); assert(download_to_ramdisk == 1);
     command("oem ramdisk none"); assert(download_to_ramdisk == 0 && resident_rd_size == 0);
     receive(32, -1); command("download:00000020");

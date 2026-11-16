@@ -18,7 +18,7 @@ SOURCE = Path(__file__).with_name('phone.py')
 FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect_run_diagnostics',
              'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel',
              'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments',
-             'ace5_crm_test_arguments'}
+             'ace5_crm_test_arguments', 'ace5_pdc_test_arguments'}
 
 
 class Clock:
@@ -94,6 +94,28 @@ class PhoneTests(unittest.TestCase):
 
     def test_experimental_drivers_are_off_by_default(self):
         self.assertEqual(self.namespace['ace5_driver_arguments'](0, None, False, 0), '')
+        self.assertEqual(self.commands, [])
+
+    def test_pdc_requires_table_quiet_run_and_excludes_other_clients(self):
+        fn = self.namespace['ace5_pdc_test_arguments']
+        table = self.directory/'pdc-table.bin'
+        self.assertEqual(fn(False, None, 0, None, 0, False, False), '')
+        with self.assertRaises(RuntimeError):
+            fn(False, table, 1, Path('kernel'), 60, False, False)
+        for size in (0, 507, 509):
+            table.write_bytes(b'x'*size)
+            with self.assertRaises(RuntimeError):
+                fn(True, table, 1, Path('kernel'), 60, False, False)
+        table.write_bytes(b'x'*508)
+        self.assertEqual(fn(True, table, 1, Path('kernel'), 60, False, False), ' ace5_aop_channel_test=2')
+        for args in ((None, 1, Path('kernel'), 60, False, False),
+                     (table, 0, Path('kernel'), 60, False, False),
+                     (table, 1, None, 60, False, False),
+                     (table, 1, Path('kernel'), 9, False, False),
+                     (table, 1, Path('kernel'), 121, False, False),
+                     (table, 1, Path('kernel'), 60, True, False),
+                     (table, 1, Path('kernel'), 60, False, True)):
+            with self.assertRaises(RuntimeError): fn(True, *args)
         self.assertEqual(self.commands, [])
 
     def test_experimental_drivers_require_supported_run_conditions(self):

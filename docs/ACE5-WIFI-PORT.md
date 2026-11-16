@@ -4,6 +4,30 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：实际 AOP WLAN PDC 下发入口
+
+带宽表的真机确认见本文后续记录；它尚未证明物理 NoC 就绪。本次将既有
+`giulia_wlan_pdc` 接入 XNU 的 AOP MMIO 入口，选项为 `--wlan-pdc-test`。
+这次入口的云端 C 测试和真机结果仍待验证，不能据此宣布 Wi-Fi 可用。
+
+主机从本机当前 DT 提取完整 508 字节 `qcom,pdc_init_table`；loader 只复制
+该小表，并通过 chosen 属性交给 XNU。内核逐字节核对本板支持的原厂表，
+再按 CNSS `cnss_aop_pdc_reconfig()` 顺序发送 10 条、各 64 字节的消息。
+部分供电同时被 UFS/蓝牙/其他设备引用，本入口不改七路 RPMh 电压或模式，
+不启用 WLAN，不训练 PCIe 链路。
+
+只在真实 loader firmware-quiet ACK、单 CPU1、有限 10–120 秒、PCIe0
+core/PHY 域已关闭、无线/蓝牙/SW_CTRL 控制脚安静时进入。先用既有 GPIO
+core 将 WLAN_EN/PERST 保持低；每次 AOP 写和门铃前重查条件。无后台
+硬件探针或 live USB 查询。首个错误停止；超时不重发。缺少原固件表的读回
+接口，因此本项是明确的 forward-only 测试，发送后保留 table/GPIO/QMP/
+quiet 所有权至内核返回；loader 的 `power-reset-required=yes` 随后只允许
+读取诊断、停止与冷重启，禁止新 payload/内核启动。最后必须冷重启。
+
+QMP 的消息长度 ACK 只证明传输完成，不是电源表/PMIC 寄存器读回，更不是
+无线芯片上电、MHI 固件启动或联网结果。云端 fixture 覆盖每一条消息超时、
+中途控制状态改变以及下发后保留资源，不替代实机验证。
+
 ## 已确认的设备和传输
 
 Android 报告 PCI vendor/device `17cb:1107`、revision `01`，绑定 `cnss_pci`；
