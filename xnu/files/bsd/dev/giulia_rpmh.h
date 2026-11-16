@@ -47,6 +47,7 @@ struct giulia_rpmh {
     uint32_t saved_cmd[GIULIA_RPMH_MAX_COMMANDS][3];
     uint32_t last_irq, last_tcs, last_command, polls;
     uint32_t read_request, response, response_valid;
+    uint32_t slot;
     /* First admission failure from existing reads, before any RSC write.
      * Diagnostic only; these fields never relax idle/IRQ/ownership checks. */
     uint32_t busy_reason, busy_irq, busy_slot, busy_status, busy_enable, busy_control;
@@ -70,7 +71,7 @@ int giulia_rpmh_bus_owned(const void *owner);
 int giulia_rpmh_init(struct giulia_rpmh *, const struct giulia_rpmh_io *, uint32_t);
 /* ACTIVE_ONLY writes, with response requested and ordered completion for
  * every command. All three active slots must be idle/unarmed; only slot 0 is
- * borrowed. Saves/restores its programming and only its IRQ enable bit.
+ * borrowed for WRITE. Saves/restores its programming and only its IRQ bit.
  * This DOES NOT save or undo prior remote VRM/BCM votes. DONE/completed prove
  * command completion, not a measured regulator voltage or working Wi-Fi.
  * At most 200 ms waiting per call, plus bounded posted-write readback polls.
@@ -83,6 +84,10 @@ int giulia_rpmh_write(struct giulia_rpmh *, const struct giulia_rpmh_command *, 
  * never evidence: completion must belong to this newly issued request.
  * Timeout/response failure retains the transaction; recover does not resend.
  * No automatic Wi-Fi hook. Support on Ace 5 hardware remains unverified.
+ * READ can borrow the first idle, ENABLE=0, TRIGGER=0 active slot, while all
+ * three slots must be idle and have no pending completion. Other slots may
+ * retain completed firmware command buffers/latched trigger bits; those
+ * registers and IRQ enable bits are preserved, never cleared to get a slot.
  */
 int giulia_rpmh_read(struct giulia_rpmh *, uint32_t address);
 /* Pure extraction after successful read AND TCS cleanup. Output is untouched

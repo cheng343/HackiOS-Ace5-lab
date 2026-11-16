@@ -37,6 +37,7 @@ static int quiet_printf(const char *fmt,...) { (void)fmt; return 0; }
 #undef __sync_synchronize
 static void peer(void)
 {
+    unsigned bank=gr.rpmh.slot*672,mask=1u<<gr.rpmh.slot;
     if (!no_ack) { shared->ack=shared->request; shared->active=shared->request; }
     if (gic[0x184/4]) {
         assert(shared->ack && gic[0x184/4]==GR_IRQ);
@@ -49,25 +50,25 @@ static void peer(void)
         unmask_writes++; gic_enabled|=gic[0x104/4];
     }
     gic[0x104/4]=gic_enabled;
-    if (!(rsc[0xd24/4]&(1u<<24))) issued=0;
-    if (!issued && (rsc[0xd24/4]&(1u<<24))) {
+    if (!(rsc[(0xd24+bank)/4]&(1u<<24))) issued=0;
+    if (gr.rpmh.triggered && !issued && (rsc[(0xd24+bank)/4]&(1u<<24))) {
         unsigned i=0; issued=1; triggers++;
         assert(shared->ack && !(gic_enabled&GR_IRQ));
-        assert(rsc[0xd34/4]==0x108 && rsc[0xd3c/4]==original[2]);
-        assert(rsc[0xd2c/4]==1 && (rsc[0xd20/4]&1));
-        while (i<23 && addresses[i]!=rsc[0xd38/4]) i++;
+        assert(rsc[(0xd34+bank)/4]==0x108 && rsc[(0xd3c+bank)/4]==(bank ? 0:original[2]));
+        assert(rsc[(0xd2c+bank)/4]==1 && (rsc[(0xd20+bank)/4]&1));
+        while (i<23 && addresses[i]!=rsc[(0xd38+bank)/4]) i++;
         assert(i<23);
-        rsc[0xd28/4]=0;
+        rsc[(0xd28+bank)/4]=0;
         if (triggers!=hold_at) {
-            rsc[0xd28/4]=1; rsc[0xd40/4]=0x10100;
-            rsc[0xd44/4]=bad_reply ? UINT32_MAX:votes[i]+(drift_at && triggers>=drift_at);
-            rsc[0xd04/4]|=1; gic[0x204/4]|=GR_IRQ;
+            rsc[(0xd28+bank)/4]=1; rsc[(0xd40+bank)/4]=0x10100;
+            rsc[(0xd44+bank)/4]=bad_reply ? UINT32_MAX:votes[i]+(drift_at && triggers>=drift_at);
+            rsc[0xd04/4]|=mask; gic[0x204/4]|=GR_IRQ;
         }
         if (triggers==lose_guard) gic_enabled|=GR_IRQ;
     }
     if (rsc[0xd08/4]) {
-        assert(rsc[0xd08/4]==1); rsc[0xd04/4]&=~1u; rsc[0xd08/4]=0;
-        rsc[0xd44/4]=0xdeadbeef;
+        assert(rsc[0xd08/4]==mask); rsc[0xd04/4]&=~mask; rsc[0xd08/4]=0;
+        rsc[(0xd44+bank)/4]=0xdeadbeef;
         if (!sticky_pending) gic[0x204/4]&=~GR_IRQ;
     }
     gic[0x104/4]=gic_enabled;
@@ -128,6 +129,34 @@ static void recovered(void)
     assert(gr_irq_release() && gr_request(0));
     gr_unmap(&gr.gic);gr_unmap(&gr.db);gr_unmap(&gr.rsc);gr_unmap(&gr.shared);
 }
+static void finish_reply(uint32_t value)
+{
+    unsigned bank=gr.rpmh.slot*672;
+    rsc[(0xd28+bank)/4]=1;rsc[0xd04/4]=1u<<gr.rpmh.slot;
+    rsc[(0xd40+bank)/4]=0x10100;rsc[(0xd44+bank)/4]=value;hold_at=0;
+}
+static void borrowed_slots(void)
+{
+    uint32_t saved[2][672/4];
+    for (unsigned target=1;target<3;target++) {
+        setup();
+        for (unsigned i=0;i<target;i++) {
+            rsc[(0xd2c+i*672)/4]=0x7f;rsc[(0xd24+i*672)/4]=0x1010000;
+            memcpy(saved[i],&rsc[(0xd00+i*672)/4],672);
+        }
+        run();assert(complete && cleaned && gr.rpmh.slot==target && triggers==46);
+        for (unsigned i=0;i<target;i++) assert(!memcmp(saved[i],&rsc[(0xd00+i*672)/4],672));
+        assert(rsc[0xd00/4]==8 && rsc[(0xd2c+target*672)/4]==0);
+        setup();rsc[0xd2c/4]=0x7f;rsc[0xd24/4]=0x1010000;
+        if (target==2) { rsc[(0xd2c+672)/4]=0x7f;rsc[(0xd24+672)/4]=0x1010000; }
+        hold_at=1;run();assert(gr.rpmh.slot==target && !complete && !unmaps && triggers==1);
+        finish_reply(2);recovered();assert(triggers==1 && maps==unmaps);
+    }
+    setup();
+    for (unsigned i=0;i<3;i++) { rsc[(0xd2c+i*672)/4]=0x7f;rsc[(0xd24+i*672)/4]=0x1010000; }
+    run();assert(!triggers && !complete && cleaned && gr.rpmh.busy_reason==GIULIA_RPMH_BUSY_SLOT);
+    puts("Ace5 RPMh READ spare slots: inherited slot0 preserved, slot1/2 replies and timeout ownership passed");
+}
 int main(void)
 {
     setup();run();assert(complete && cleaned && gr.reads==46 && triggers==46 && maps==unmaps);
@@ -142,14 +171,14 @@ int main(void)
     setup();gic[0x204/4]=GR_IRQ;run();assert(!triggers && !mask_writes && maps==unmaps);
     setup();drop_mask=1;run();assert(!triggers && maps==unmaps && !shared->request);
     setup();drift_at=24;run();assert(gr.reads==46 && !complete && cleaned && maps==unmaps);
-    setup();rsc[(0xd2c+672)/4]=3;run();
+    setup();rsc[(0xd2c+672)/4]=3;rsc[(0xd28+672)/4]=0;run();
     assert(!triggers && !gr.reads && !gr.observed[0] && !gr.observed[1] && !complete && cleaned);
     assert(gr.rpmh.busy_reason==GIULIA_RPMH_BUSY_SLOT && gr.rpmh.busy_slot==1 && gr.rpmh.busy_enable==3);
     assert(maps==unmaps && !shared->request && gic_enabled==(GR_IRQ|1));
     puts("Ace5 RPMh busy admission: exact blocker and unobserved fields preserved; cleanup independent of capture");
     setup();hold_at=1;run();assert(triggers==1 && !complete && !unmaps && shared->request);
     assert(giulia_rpmh_bus_owned(&gr.rpmh) && gr.irq_dirty && !(gic_enabled&GR_IRQ));
-    rsc[0xd28/4]=1;rsc[0xd04/4]=1;rsc[0xd40/4]=0x10100;rsc[0xd44/4]=2;hold_at=0;
+    finish_reply(2);
     recovered();assert(triggers==1 && maps==unmaps);
     setup();bad_reply=1;run();assert(triggers==1 && !complete && !unmaps && giulia_rpmh_bus_owned(&gr.rpmh));
     bad_reply=0;rsc[0xd44/4]=2;recovered();assert(triggers==1);
@@ -158,6 +187,7 @@ int main(void)
     gic[0x204/4]=0;recovered();
     setup();lose_guard=1;run();assert(triggers==1 && !complete && !unmaps && gr.guard_failed);
     gic_enabled=gic[0x104/4]=1;gr.guard_failed=0;recovered();assert(triggers==1);
+    borrowed_slots();
     puts("Ace5 RPMh READ XNU: real 46-query capture, IRQ37 isolation, cleanup and retained faults passed");
     return 0;
 }

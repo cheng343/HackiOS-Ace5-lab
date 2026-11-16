@@ -189,9 +189,9 @@ report:
     snprintf(line,sizeof(line),"ace5-rpmh-read: rc=%d stable=%u reads=%u pending=%u guard=%u irq=%#x tcs=%#x cmd=%#x\n",
         rc,valid,gr.reads,gr.rpmh.triggered&&!gr.rpmh.completed,gr.guard_failed,
         gr.rpmh.last_irq,gr.rpmh.last_tcs,gr.rpmh.last_command); gr_log(line);
-    snprintf(line,sizeof(line),"ace5-rpmh-read: busy_reason=%u irq=%#x slot=%u status=%#x enable=%#x control=%#x triggered=%u\n",
+    snprintf(line,sizeof(line),"ace5-rpmh-read: busy_reason=%u irq=%#x slot=%u status=%#x enable=%#x control=%#x triggered=%u selected=%u\n",
         gr.rpmh.busy_reason,gr.rpmh.busy_irq,gr.rpmh.busy_slot,gr.rpmh.busy_status,
-        gr.rpmh.busy_enable,gr.rpmh.busy_control,gr.rpmh.triggered); gr_log(line);
+        gr.rpmh.busy_enable,gr.rpmh.busy_control,gr.rpmh.triggered,gr.rpmh.slot); gr_log(line);
     for (unsigned i=0;i<GR_COUNT;i++) {
         snprintf(line,sizeof(line),"ace5-rpmh-read: item=%u addr=%#x first=%#x second=%#x observed=%u/%u\n",
             i,gr.address[i],gr.raw[0][i],gr.raw[1][i],(gr.observed[0]>>i)&1u,(gr.observed[1]>>i)&1u); gr_log(line);

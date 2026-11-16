@@ -47,11 +47,17 @@ int giulia_rpmh_bus_owned(const void *owner)
 {
     return owner && __atomic_load_n(&bus_owner, __ATOMIC_ACQUIRE) == (uintptr_t)owner;
 }
+static uint32_t slot_offset(struct giulia_rpmh *p,uint32_t off)
+{
+    /* Admission scans with slot=0. Afterwards only the borrowed TCS bank
+     * moves; shared DRV IRQ/version/config registers keep their addresses. */
+    return off>=WAIT && off<TCS+STRIDE ? off+p->slot*STRIDE:off;
+}
 static uint32_t rd(struct giulia_rpmh *p, uint32_t off)
-{ return p->io.read32(p->io.cookie, off); }
+{ return p->io.read32(p->io.cookie, slot_offset(p,off)); }
 static void wr(struct giulia_rpmh *p, uint32_t off, uint32_t value)
 {
-    p->io.write32(p->io.cookie, off, value);
+    p->io.write32(p->io.cookie, slot_offset(p,off), value);
     p->io.barrier(p->io.cookie);
 }
 static int sync_write(struct giulia_rpmh *p, uint32_t off, uint32_t value)
@@ -70,7 +76,7 @@ static int irq_bit(struct giulia_rpmh *p, uint32_t bit)
 {
     uint32_t old = rd(p, IRQ_ENABLE);
     if (old == 0xffffffffu) return GIULIA_RPMH_READBACK;
-    return sync_write(p, IRQ_ENABLE, (old & ~1u) | bit);
+    return sync_write(p, IRQ_ENABLE, (old & ~BIT(p->slot)) | bit);
 }
 static int cleanup(struct giulia_rpmh *p)
 {
@@ -91,9 +97,9 @@ static int cleanup(struct giulia_rpmh *p)
         (r = sync_write(p, CONTROL, v & ~(TRIGGER | AMC))) ||
         (r = sync_write(p, ENABLE, 0))) return r;
     if (p->triggered) {
-        wr(p, IRQ_CLEAR, 1); /* W1C own bit only, never other TCS events. */
+        wr(p, IRQ_CLEAR, BIT(p->slot));
         v = rd(p, IRQ_STATUS);
-        if (v == 0xffffffffu || (v & 1u)) return GIULIA_RPMH_READBACK;
+        if (v == 0xffffffffu || (v & BIT(p->slot))) return GIULIA_RPMH_READBACK;
     }
     for (i = 0; i < p->count; i++)
         for (j = 0; j < (p->read_request ? 2u : 3u); j++)
@@ -115,7 +121,7 @@ static int wait_done(struct giulia_rpmh *p)
         p->last_tcs = rd(p, STATUS);
         if (p->last_irq == 0xffffffffu || p->last_tcs == 0xffffffffu)
             return GIULIA_RPMH_READBACK;
-        if ((p->last_irq & 1u) && p->last_tcs) {
+        if ((p->last_irq & BIT(p->slot)) && p->last_tcs) {
             for (i = 0; i < p->count; i++) {
                 p->last_command = rd(p, CMD_STATUS + i * 24);
                 if (p->last_command == 0xffffffffu) return GIULIA_RPMH_READBACK;
@@ -174,7 +180,8 @@ fault:
 static int transfer(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd,
     unsigned count, unsigned is_read)
 {
-    unsigned i, j;
+    unsigned i, j, selected=3;
+    uint32_t first_status=0,first_enable=0,first_control=0;
     uint32_t v, config;
     int r;
     if (!p || !cmd || !count || count > GIULIA_RPMH_MAX_COMMANDS || (is_read && count != 1))
@@ -194,6 +201,7 @@ static int transfer(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd
      */
     p->triggered = p->completed = 0;
     p->response = p->response_valid = 0; p->read_request = is_read;
+    p->slot = 0;
     p->busy_reason = p->busy_irq = p->busy_slot = 0;
     p->busy_status = p->busy_enable = p->busy_control = 0;
     if ((r = giulia_rpmh_bus_claim(p))) {
@@ -221,17 +229,25 @@ static int transfer(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd
         uint32_t control = rd(p, CONTROL + i * STRIDE);
         if (status == 0xffffffffu || enable == 0xffffffffu || control == 0xffffffffu)
             { r = GIULIA_RPMH_READBACK; goto failed; }
-        if (!status || enable || (control & TRIGGER)) {
+        if (!i) { first_status=status; first_enable=enable; first_control=control; }
+        if (!status || (!is_read && (enable || (control & TRIGGER)))) {
             p->busy_reason = GIULIA_RPMH_BUSY_SLOT; p->busy_slot = i;
             p->busy_status = status; p->busy_enable = enable; p->busy_control = control;
             r = GIULIA_RPMH_BUSY; goto failed;
         }
+        if (!enable && !(control&TRIGGER) && selected==3) selected=i;
     }
+    if (is_read && selected==3) {
+        p->busy_reason=GIULIA_RPMH_BUSY_SLOT; p->busy_slot=0;
+        p->busy_status=first_status; p->busy_enable=first_enable; p->busy_control=first_control;
+        r=GIULIA_RPMH_BUSY; goto failed;
+    }
+    if (is_read) p->slot=selected;
     p->saved_control = rd(p, CONTROL); p->saved_wait = rd(p, WAIT);
     v = rd(p, IRQ_ENABLE);
     if (p->saved_control == 0xffffffffu || p->saved_wait == 0xffffffffu || v == 0xffffffffu)
         { r = GIULIA_RPMH_READBACK; goto failed; }
-    p->saved_irq_bit = v & 1u;
+    p->saved_irq_bit = v & BIT(p->slot);
     for (i = 0; i < count; i++) for (j = 0; j < (is_read ? 2u : 3u); j++) {
         p->saved_cmd[i][j] = rd(p, MSG + i * 24 + j * 4);
         if (p->saved_cmd[i][j] == 0xffffffffu) { r = GIULIA_RPMH_READBACK; goto failed; }
@@ -246,7 +262,7 @@ static int transfer(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd
     }
     v = (1u << count) - 1u;
     if ((r = sync_write(p, WAIT, v)) || (r = sync_write(p, ENABLE, v)) ||
-        (r = irq_bit(p, 1)) || (r = sync_write(p, CONTROL, AMC))) goto failed;
+        (r = irq_bit(p, BIT(p->slot))) || (r = sync_write(p, CONTROL, AMC))) goto failed;
     p->triggered = 1; /* Even a lost read after this point may mean it issued. */
     wr(p, CONTROL, AMC | TRIGGER);
     if ((r = wait_done(p))) goto failed;
