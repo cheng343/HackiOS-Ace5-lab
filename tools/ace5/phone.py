@@ -293,6 +293,16 @@ def ace5_pdc_test_arguments(enabled, table, bootcpu, kernel, seconds, other_hard
     return ' ace5_aop_channel_test=2'
 
 
+def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log):
+    if not enabled:
+        return ''
+    if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
+        raise RuntimeError('--wifi-bringup-test requires current DT table, --kernel, CPU1, 10..120 seconds, no live-log and no other hardware probes')
+    if not table.is_file() or table.stat().st_size != 508:
+        raise RuntimeError('Missing or invalid current-DT PDC table (508 bytes); no upload attempted')
+    return ' ace5_wifi_bringup=1'
+
+
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
 sub = ap.add_subparsers(dest='command', required=True)
@@ -319,6 +329,8 @@ run.add_argument('--wlan-pdc-test', action='store_true',
                  help='Deliver the 10 stock AOP WLAN PDC messages with WLAN/BT quiet; no rail/radio startup; CPU1, finite <=120 seconds, no live-log; cold reboot afterwards')
 run.add_argument('--wlan-pdc-table', type=Path,
                  help='508-byte qcom,pdc_init_table property extracted from this phone current DT; kernel compares every byte against the supported board table')
+run.add_argument('--wifi-bringup-test', action='store_true',
+                 help='Run finite supply->PCIe->BAR0->SoC-ID->MHI Wi-Fi bringup diagnostic; requires --wlan-pdc-table, CPU1, 10..120s, no live-log; cold reboot afterwards')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -458,7 +470,8 @@ try:
         cpus = args.cpus if args.command == 'run' else 1
         if cpus > 1 and (args.bootcpu != 1 or args.cpu_khz or args.wifi_probe or
                          args.aop_channel_test or args.aop_cx_vote_test or args.rpmh_read_test or
-                         args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test):
+                         args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test or
+                         args.wifi_bringup_test):
             raise RuntimeError('--cpus > 1 requires --bootcpu 1 and cannot be combined with single-core hardware probes')
         commandline = (f'cpus={cpus} loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
                        'touchscreen=0 buttons=0 cpufreq=0 gpu=0 wifi=0 adsp=0')
@@ -479,9 +492,13 @@ try:
             commandline += ace5_crm_test_arguments(args.crm_channel_test or args.crm_bandwidth_test, args.bootcpu, args.kernel,
                 seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.wlan_pdc_test or args.aop_cx_vote_test or args.rpmh_read_test,
                 args.live_log, args.crm_bandwidth_test)
-            commandline += ace5_pdc_test_arguments(args.wlan_pdc_test, args.wlan_pdc_table,
+            commandline += ace5_pdc_test_arguments(args.wlan_pdc_test, args.wlan_pdc_table if args.wlan_pdc_test else None,
                 args.bootcpu, args.kernel, seconds,
-                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test,
+                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test or args.wifi_bringup_test,
+                args.live_log)
+            commandline += ace5_wifi_bringup_arguments(args.wifi_bringup_test, args.wlan_pdc_table,
+                args.bootcpu, args.kernel, seconds,
+                args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test or args.wlan_pdc_test,
                 args.live_log)
         if args.command == 'run' and args.touch:
             if not args.kernel:
@@ -546,7 +563,7 @@ try:
             command.append(f'ramdisk={root_image.resolve()}')
         command += ['--cmdline', commandline]
         print(call(command))
-        if args.command == 'run' and args.wlan_pdc_test:
+        if args.command == 'run' and (args.wlan_pdc_test or args.wifi_bringup_test):
             fb('stage', args.wlan_pdc_table, timeout=15)
             print(fb('oem', 'wlan-pdc-table'), flush=True)
         fb('stage', payload, timeout=60)
@@ -559,7 +576,7 @@ try:
                                          args.bootcpu if args.command == 'run' else 0,
                                          args.live_log if args.command == 'run' else False,
                                          live_interval, logs, log,
-                                         args.command == 'run' and (args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test or args.rpmh_read_test))
+                                         args.command == 'run' and (args.crm_channel_test or args.crm_bandwidth_test or args.wlan_pdc_test or args.rpmh_read_test or args.wifi_bringup_test))
         print(result, log)
         saved_log = log.read_bytes().decode('utf-8', errors='replace')
         for line in saved_log.splitlines():
