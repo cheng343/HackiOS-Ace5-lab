@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "giulia_pcie_power.h"
+#include "giulia_pcie_qos.h"
 
 #define BIT(n) (1u << (n))
 #define CFG_MASK 0x10371fu
@@ -514,6 +515,74 @@ static void staged_cesta(void)
     puts("SM8650 PCIe staged power: host clocks precede managed resources/reset; failure retains foundation");
 }
 
+struct qos_fixture {
+    struct mock *gcc;
+    struct giulia_pcie_power *power;
+    uint32_t qos[2];
+    unsigned writes, fail, last_block, noc_barriers;
+};
+static int qos_read(void *cookie,unsigned block,uint32_t off,uint32_t *v)
+{
+    struct qos_fixture *q=cookie;
+    if (!block) { assert(off==0x52000); *v=read32(q->gcc,0,off); return 0; }
+    assert(block<3 && off==(block==1 ? 0xb008u : 0xb7008u));
+    assert((raw(q->gcc,0,0x52000)&(BIT(12)|BIT(20)))==(BIT(12)|BIT(20)));
+    *v=q->qos[block-1]; return 0;
+}
+static int qos_write(void *cookie,unsigned block,uint32_t off,uint32_t v)
+{
+    struct qos_fixture *q=cookie;
+    q->last_block=block;
+    if (!block) { assert(off==0x52000); write32(q->gcc,0,off,v); return 0; }
+    assert(block<3 && off==(block==1 ? 0xb008u : 0xb7008u));
+    assert((raw(q->gcc,0,0x52000)&(BIT(12)|BIT(20)))==(BIT(12)|BIT(20)));
+    q->qos[block-1]=v;
+    return ++q->writes==q->fail ? -61 : 0; /* Can commit before error. */
+}
+static void qos_barrier(void *cookie)
+{
+    struct qos_fixture *q=cookie;
+    if (!q->last_block) barrier(q->gcc); else q->noc_barriers++;
+}
+static int qos_lease(void *cookie)
+{
+    struct qos_fixture *q=cookie;
+    /* Proxy/GEM-clock ownership is modeled; GCC/NoC code is production. */
+    return q->power->state==GIULIA_POWER_HOST_PREPARED ? 0 : -62;
+}
+static void host_qos_composition(void)
+{
+    for (unsigned fail=0;fail<=6;fail++) {
+        struct mock m; struct giulia_pcie_power p={0};
+        struct giulia_pcie_qos q={0};
+        init(&m); struct giulia_pcie_power_io v=io(&m);
+        struct qos_fixture f={.gcc=&m,.power=&p,.qos={0x41000048,0x83000010},.fail=fail};
+        struct giulia_pcie_qos_io qi={.cookie=&f,.read32=qos_read,.write32=qos_write,
+            .barrier=qos_barrier,.validate_lease=qos_lease,
+            .phys={0x100000,0x16c0000,0x24100000},.size={0x1f4200,0x12200,0xc5080}};
+        const uint32_t flags=GIULIA_POWER_HOST_REQUIRED|GIULIA_POWER_CESTA_COORDINATED;
+        assert(!giulia_pcie_power_prepare_host(&p,&v,flags));
+        uint32_t host_votes=raw(&m,0,0x52000);
+        assert(host_votes&BIT(12));
+        int rc=giulia_pcie_qos_start(&q,&qi,GIULIA_QOS_REQUIRED);
+        if (!fail) {
+            assert(!rc && q.state==GIULIA_QOS_ACTIVE);
+            assert((raw(&m,0,0x52000)&~BIT(20))==host_votes);
+            assert(!giulia_pcie_qos_check(&q));
+        } else assert(rc==GIULIA_QOS_IO);
+        assert(!p.reset_attempted && p.state==GIULIA_POWER_HOST_PREPARED);
+        assert(!giulia_pcie_qos_stop(&q));
+        assert(raw(&m,0,0x52000)==host_votes);
+        assert(f.qos[0]==0x41000048 && f.qos[1]==0x83000010);
+        assert(f.noc_barriers==f.writes);
+        for (unsigned i=0;i<m.writes;i++)
+            assert(m.events[i].off!=0x6b000 && m.events[i].off!=0x6c01c);
+        assert(!giulia_pcie_power_stop(&p,GIULIA_POWER_STOP_REQUIRED|GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET));
+        restored(&m,&p);
+    }
+    puts("Ace5 PCIe QoS/GCC: real cores preserve host votes and unwind QoS before host clocks without reset");
+}
+
 int main(void)
 {
     lifecycle();
@@ -523,6 +592,7 @@ int main(void)
     readback_and_retry();
     inaccessible_mmio();
     staged_cesta();
+    host_qos_composition();
     puts("SM8650 PCIe0 power/clock/reset tests passed");
     return 0;
 }

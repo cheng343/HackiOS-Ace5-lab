@@ -4,6 +4,38 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-16：PCIe ANOC 与 GEM NoC 静态 QoS 驱动
+
+新增生产 core `giulia_pcie_qos`，补齐 Wi-Fi 物理路径上两处静态互连
+配置及 PCIe ANOC 配置时钟，已加入 XNU 源码编译列表：
+
+- GCC `0x52000` 的 aggregate bit12 与 config-AHB bit20：保存原请求，
+  按原厂 `BRANCH_HALT_SKIP` 方式设置并读回，不修改 HWCG/CBCR。
+- GEM NoC `0x24100000 + 0xb7008`：priority=2、urgent-forward=1、
+  priority-forward-disable=0。
+- PCIe ANOC `0x016c0000 + 0xb008`：priority=3、urgent-forward=0、
+  priority-forward-disable=0。不会访问 PCIe1 的 `0xc008`。
+
+先打开配置路径，再保存两处 QoS 原值，先配置下游 GEM 后配置上游 PCIe。
+只改已定义字段；停止时先恢复 QoS，再恢复自己的 GCC 时钟请求，保留其他
+请求位。写入返回错误也按“可能已经写入”处理；失败后保留未恢复字段与
+底层资源，重试跳过已完成的恢复。失去时钟请求后停止访问 NoC，等待实际
+所有者修复访问条件，不能靠重试读取未上电的寄存器恢复。
+
+这段是实际寄存器操作 core，不是成功占位回调，但目前没有绑定真机启动
+入口。调用者仍必须实际取得共享客户端/寄存器所有权，完成 provider BCM
+proxy 请求并保持 GEM 配置时钟和访问路径可用；映射、CPU 互连下限和
+CRM ACK 都不能单独替代这些条件。`ACTIVE` 仅表示静态 QoS 字段已读回，
+不宣称 CESTA/NoC 完整就绪或 Wi-Fi 可用。
+
+依据固定原厂 [qnoc-qos.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/interconnect/qcom/qnoc-qos.c)、
+[pineapple.c](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/interconnect/qcom/pineapple.c)
+和同版本 `icc-rpmh.c:enable_qos_deps`，以及 Linux v6.12
+[GCC 时钟定义](https://github.com/torvalds/linux/blob/v6.12/drivers/clk/qcom/gcc-sm8650.c)。
+云端 fixture 对实际 core 注入读/写/读回/所有权故障，另将真实 GCC 与 QoS
+core 组合，验证主机准备后配置与撤回 QoS 保留原有请求、不触发 BCR。
+本轮保持 Android，不重启、不刷写；没有新的真机结果。
+
 ## 2026-11-16：初始 PCIe 速率与资源配置一致
 
 发现此前 CRM 初始计划按 Gen1 性能级别（2）准备，而 link core 仍配置
