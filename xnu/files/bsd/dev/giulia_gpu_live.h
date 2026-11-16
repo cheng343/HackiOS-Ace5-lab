@@ -101,7 +101,13 @@ static uint32_t a750_live_submit(const uint64_t *addresses,const uint32_t *words
     }
     if (room<n) { a750_live_report("ring full");return 0; }
     for (unsigned i=0;i<n;i++) a750_live.ring[(a750_live.wptr+i)&8191]=packet[i];
-    a750_flush((vm_offset_t)a750_live.ring,0x8000);
+    unsigned first=8192-a750_live.wptr;
+    if (n<=first) {
+        a750_flush((vm_offset_t)(a750_live.ring+a750_live.wptr),(vm_size_t)n*sizeof(uint32_t));
+    } else {
+        a750_flush((vm_offset_t)(a750_live.ring+a750_live.wptr),(vm_size_t)first*sizeof(uint32_t));
+        a750_flush((vm_offset_t)a750_live.ring,(vm_size_t)(n-first)*sizeof(uint32_t));
+    }
     a750_live.wptr=(a750_live.wptr+n)&8191;a750_live.fence=fence;
     a750_wr(a750_live.gx,0x807*4,a750_live.wptr);
     if (gpu_log || fence<=10)

@@ -27,6 +27,7 @@
 #include <kern/thread_call.h>
 #include <kern/thread.h>
 #include <kern/clock.h>
+#include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
@@ -414,6 +415,13 @@ IOMobileFramebuffer::start(IOService * provider)
 	thread_set_thread_name(thread, "frames to the panel");
 	thread_deallocate(thread);
 	fThreads = gThreads >= 1 && gThreads <= 8 ? gThreads : 1;
+	{
+		int cpus = ml_get_cpu_count();
+
+		if (cpus >= 1 && fThreads > (unsigned) cpus) {
+			fThreads = (unsigned) cpus;
+		}
+	}
 	fHelperLock = IOLockAlloc();
 	for (unsigned i = 0; i + 1 < fThreads; i++) {
 		if (kernel_thread_start(&IOMobileFramebuffer::helperMain, this, &thread) != KERN_SUCCESS) {

@@ -151,6 +151,33 @@ static int gr_plan(uint32_t address[GR_COUNT])
         if (address[i]==address[j]) return 0;
     return 1;
 }
+static void gr_dump_slots(void)
+{
+    char line[192];
+    for (unsigned s = 0; s < 3; s++) {
+        uint32_t bank = s * 672u;
+        uint32_t status = gr_mmio(&gr.rsc, 0xd28u + bank);
+        uint32_t enable = gr_mmio(&gr.rsc, 0xd2cu + bank);
+        uint32_t control = gr_mmio(&gr.rsc, 0xd24u + bank);
+        snprintf(line, sizeof(line), "ace5-rpmh-read: pre-slot=%u status=%#x enable=%#x control=%#x\n",
+            s, status, enable, control);
+        gr_log(line);
+        if (enable == UINT32_MAX || !enable) continue;
+        for (unsigned c = 0; c < 16; c++) {
+            if (!(enable & (1u << c))) continue;
+            uint32_t off = 0xd34u + bank + c * 24u;
+            uint32_t msgid = gr_mmio(&gr.rsc, off);
+            uint32_t addr = gr_mmio(&gr.rsc, off + 4u);
+            uint32_t data = gr_mmio(&gr.rsc, off + 8u);
+            uint32_t sts = gr_mmio(&gr.rsc, off + 12u);
+            uint32_t resp = gr_mmio(&gr.rsc, off + 16u);
+            snprintf(line, sizeof(line),
+                "ace5-rpmh-read: pre-cmd slot=%u cmd=%u msgid=%#x addr=%#x data=%#x sts=%#x resp=%#x\n",
+                s, c, msgid, addr, data, sts, resp);
+            gr_log(line);
+        }
+    }
+}
 static void gr_thread(void *arg,__unused wait_result_t wait)
 {
     uint64_t pa=(uint64_t)(uintptr_t)arg;
@@ -171,6 +198,7 @@ static void gr_thread(void *arg,__unused wait_result_t wait)
     quiet=1;
     if (!gr_request(1)) goto release;
     if (!gr_irq_acquire()) { gr_log("ace5-rpmh-read: IRQ37 lease rejected; no request sent\n"); goto release; }
+    gr_dump_slots();
     /* Actual firmware quiet ACK, single XNU CPU/incompatible-driver admission,
      * common RSC token and real IRQ37 mask establish these local conditions.
      * Other firmware masters remain live; no remote resource owner is granted. */
