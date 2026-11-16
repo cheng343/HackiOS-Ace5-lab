@@ -13,7 +13,7 @@ struct mock {
     char trace[256], start_fail, stop_fail;
     unsigned count, external_calls, bad_external_at, persist_external;
     unsigned table_checks, rail_checks, cpu_plans, held_checks, bad_input;
-    unsigned bad_held_at, modes, handoff, keep_pdc, contract_bad, cpu_resumes;
+    unsigned bad_held_at, modes, handoff, keep_pdc, keep_rails, contract_bad, cpu_resumes;
 };
 static struct mock *m;
 static int event(char c)
@@ -65,7 +65,7 @@ static struct giulia_wifi_supply_config setup(struct mock *m0,struct giulia_wifi
 int giulia_wlan_pdc_check(const uint8_t *p,uint32_t bytes,const struct giulia_wlan_pdc_baseline *b,unsigned policy)
 { m->table_checks++;assert(p && bytes==508 && p[0]==0x50);assert(policy==m->keep_pdc);if(!policy)assert(b&&b->known_mask==0x3ff);return m->bad_input==1 ? -21 : 0; }
 int giulia_wlan_rails_check(const uint8_t *p,uint32_t bytes,uint32_t version,const struct giulia_wlan_rail_baseline *b,uint32_t f,enum giulia_wlan_rail_policy policy,unsigned modes)
-{ m->rail_checks++;assert(p==db && bytes==1024 && version==7 && b);flags(f,15);assert(policy==GIULIA_WLAN_RESTORE_BASELINE&&modes==m->modes);return m->bad_input==2 ? -20 : 0; }
+{ m->rail_checks++;assert(p==db && bytes==1024 && version==7 && b);flags(f,15);assert(policy==(m->keep_rails?GIULIA_WLAN_KEEP_VOTES:GIULIA_WLAN_RESTORE_BASELINE)&&modes==m->modes);return m->bad_input==2 ? -20 : 0; }
 int giulia_cpu_noc_plan(const uint8_t *p,uint32_t bytes,uint32_t version,struct giulia_cpu_noc_plan *out)
 { m->cpu_plans++;assert(p==db&&bytes==1024&&version==7&&out);return m->bad_input==3 ? -21 : 0; }
 int giulia_wifi_gpio_begin_with_bt_reset(struct giulia_wifi_gpio *g,uint32_t f,const struct giulia_wifi_gpio_io *io)
@@ -91,13 +91,13 @@ int giulia_wlan_pdc_start(struct giulia_wlan_pdc *p,struct giulia_aop *a,const u
 int giulia_wlan_pdc_stop(struct giulia_wlan_pdc *p,uint32_t f)
 { flags(f,GIULIA_WLAN_PDC_REQUIRED);assert(m->s->gpio.state==GIULIA_WGPIO_HELD&&m->s->rails.state!=GIULIA_WLAN_RAIL_ACTIVE);int rc=event('d');if(rc)return rc;p->aop->pending=0;p->state=p->policy?GIULIA_WLAN_PDC_HELD:GIULIA_WLAN_PDC_STOPPED;return p->policy?GIULIA_WLAN_PDC_RETAINED:0; }
 static int rails_on(struct giulia_wlan_rails *r,struct giulia_rpmh *t,const uint8_t *p,uint32_t bytes,uint32_t version,const struct giulia_wlan_rail_baseline *b,uint32_t f,enum giulia_wlan_rail_policy policy,unsigned modes)
-{ flags(f,GIULIA_WLAN_RAIL_REQUIRED);assert(p==db&&bytes==1024&&version==7&&b==m->s->input_rails&&policy==GIULIA_WLAN_RESTORE_BASELINE&&modes==m->modes);assert(m->s->pdc.state==GIULIA_WLAN_PDC_DELIVERED&&m->s->gpio.state==GIULIA_WGPIO_HELD);int rc=event('V');r->transport=t;r->state=rc?GIULIA_WLAN_RAIL_FAULT:GIULIA_WLAN_RAIL_ACTIVE;r->completed_mask=rc?0:0x7f;return rc; }
+{ flags(f,GIULIA_WLAN_RAIL_REQUIRED);assert(p==db&&bytes==1024&&version==7&&b==m->s->input_rails&&policy==(m->keep_rails?GIULIA_WLAN_KEEP_VOTES:GIULIA_WLAN_RESTORE_BASELINE)&&modes==m->modes);assert(m->s->pdc.state==GIULIA_WLAN_PDC_DELIVERED&&m->s->gpio.state==GIULIA_WGPIO_HELD);int rc=event('V');r->transport=t;r->policy=policy;r->state=rc?GIULIA_WLAN_RAIL_FAULT:GIULIA_WLAN_RAIL_ACTIVE;r->completed_mask=rc?0:0x7f;return rc; }
 int giulia_wlan_rails_start(struct giulia_wlan_rails *r,struct giulia_rpmh *t,const uint8_t *p,uint32_t bytes,uint32_t version,const struct giulia_wlan_rail_baseline *b,uint32_t f,enum giulia_wlan_rail_policy policy)
 { return rails_on(r,t,p,bytes,version,b,f,policy,0); }
 int giulia_wlan_rails_start_with_dt_modes(struct giulia_wlan_rails *r,struct giulia_rpmh *t,const uint8_t *p,uint32_t bytes,uint32_t version,const struct giulia_wlan_rail_baseline *b,uint32_t f,enum giulia_wlan_rail_policy policy)
 { flags(f,GIULIA_WLAN_RAIL_MODE_WRITE_SAFE);return rails_on(r,t,p,bytes,version,b,f,policy,1); }
 int giulia_wlan_rails_stop(struct giulia_wlan_rails *r,int quiet)
-{ assert(quiet&&m->s->gpio.state==GIULIA_WGPIO_HELD&&m->s->cpu_noc.state!=GIULIA_CPU_NOC_ACTIVE&&m->s->cpu_noc.state!=GIULIA_CPU_NOC_FAULT);int rc=event('v');r->state=rc?GIULIA_WLAN_RAIL_FAULT:GIULIA_WLAN_RAIL_STOPPED;return rc; }
+{ assert(quiet&&m->s->gpio.state==GIULIA_WGPIO_HELD&&m->s->cpu_noc.state!=GIULIA_CPU_NOC_ACTIVE&&m->s->cpu_noc.state!=GIULIA_CPU_NOC_FAULT);int rc=event('v');if(rc){r->state=GIULIA_WLAN_RAIL_FAULT;return rc;}r->state=r->policy?GIULIA_WLAN_RAIL_HELD:GIULIA_WLAN_RAIL_STOPPED;return r->policy?GIULIA_WLAN_RAIL_RETAINED:0; }
 int giulia_cpu_noc_start_keep(struct giulia_cpu_noc *p,struct giulia_rpmh *t,const struct giulia_cpu_noc_lease *lease,const uint8_t *db0,uint32_t bytes,uint32_t version,uint32_t f)
 { flags(f,GIULIA_CPU_NOC_REQUIRED);assert(db0==db&&bytes==1024&&version==7&&m->s->rails.state==GIULIA_WLAN_RAIL_ACTIVE);assert(!lease->validate(lease->cookie));int rc=event('C');p->transport=t;p->lease=*lease;p->triggered=1;p->completed=!rc;p->state=rc?GIULIA_CPU_NOC_FAULT:GIULIA_CPU_NOC_ACTIVE;return rc; }
 int giulia_cpu_noc_stop_keep(struct giulia_cpu_noc *p)
@@ -120,7 +120,7 @@ int main(int argc,char **argv)
     if(argc>1&&!strcmp(argv[1],"--start-fail")){assert(argc==3);m->start_fail=argv[2][0];}
     if(argc>1&&!strcmp(argv[1],"--modes")){m->modes=m->handoff=1;c.dt_modes=1;c.conditions|=GIULIA_SUPPLY_DT_MODE_WRITE_SAFE|GIULIA_SUPPLY_RCHNG_HANDOFF;}
     if(argc>1&&!strcmp(argv[1],"--keep-pdc")){m->keep_pdc=1;c.pdc_policy=GIULIA_WLAN_PDC_KEEP_TABLE;}
-    if(argc>1&&!strcmp(argv[1],"--keep-rails")){c.rail_baseline=unk;c.rail_policy=GIULIA_WLAN_KEEP_VOTES;}
+    if(argc>1&&!strcmp(argv[1],"--keep-rails")){m->keep_rails=1;c.rail_baseline=unk;c.rail_policy=GIULIA_WLAN_KEEP_VOTES;}
     if(argc>1&&!strcmp(argv[1],"--contract"))m->contract_bad=1;
     if(argc>1&&!strcmp(argv[1],"--guard")){assert(argc==3);m->bad_held_at=(unsigned)atoi(argv[2]);}
     if(argc>1&&!strcmp(argv[1],"--early-stop-fail")){m->start_fail='I';m->stop_fail='g';}
