@@ -9,6 +9,9 @@ struct stats {
     uint32_t words[7];
     unsigned reads,fail,change;
 };
+/* Independent golden bytes for the decoded firmware mask 0x0180f800. */
+static const uint8_t fixture[24]={0,1,2,3,0,1,2,3,0,1,2,0xfe,
+    0xfe,0xfe,0xfe,0xfe,0,1,2,3,0,1,2,0xfe};
 static int stats_read(void *cookie,uint32_t offset,uint32_t *value)
 {
     struct stats *s=cookie;
@@ -25,7 +28,7 @@ static struct giulia_cx_vote_io prepare(struct stats *s,struct mock *m,struct gi
 {
     borrow(m,p); *s=(struct stats){.aop=m};
     for (unsigned i=0;i<24;i++) {
-        unsigned v=(i==11 || i==19 || i==20) ? 0xfe:i%4;
+        unsigned v=fixture[i];
         s->words[i/4]|=v<<((i%4)*8);
     }
     s->words[6]=0x7f7f7f7f;
@@ -51,7 +54,7 @@ int main(void)
         v=prepare(&s,&m,&p);
         if (row==24) s.words[6]=0;
         else {
-            unsigned shift=(row%4)*8,invalid=(row==11 || row==19 || row==20) ? 0:4;
+            unsigned shift=(row%4)*8,invalid=fixture[row]==0xfe ? 0:4;
             s.words[row/4]=(s.words[row/4]&~(255u<<shift)) | (invalid<<shift);
         }
         assert(giulia_cx_vote_capture(&p,&v,&cx,&result)==GIULIA_CX_VOTE_VALUE && !result.valid);

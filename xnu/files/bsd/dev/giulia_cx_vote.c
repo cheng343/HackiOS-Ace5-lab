@@ -29,7 +29,9 @@ int giulia_cx_vote_capture(struct giulia_aop *aop,const struct giulia_cx_vote_io
     for (unsigned row=0;row<24;row++) {
         unsigned v=(s->words[row/4]>>((row%4)*8))&255u;
         s->selector[row]=(uint8_t)v;
-        if (row==11 || row==19 || row==20) {
+        /* RV32 LUI 0x1810 followed by ADDI -2048 is 0x0180f800,
+         * skipping rows11..15,23,24. Only rows0..23 are returned. */
+        if ((0x0180f800u>>row)&1u) {
             if (v!=0xfeu) return GIULIA_CX_VOTE_VALUE;
         } else if (v>=cx->count) return GIULIA_CX_VOTE_VALUE;
     }

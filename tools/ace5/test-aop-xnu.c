@@ -94,7 +94,7 @@ static void peer_barrier(void)
                 cx_messages++;
                 for (unsigned i=0;i<7;i++) stats_page[(0x1f0+i*4)/4]=0;
                 for (unsigned i=0;i<24;i++) {
-                    unsigned value=(i==11 || i==19 || i==20) ? 0xfe:i%4;
+                    unsigned value=((i>=11 && i<=15) || i==23) ? 0xfe:i%4;
                     stats_page[(0x1f0+(i/4)*4)/4]|=value<<((i%4)*8);
                 }
                 stats_page[0x208/4]=cx_bad ? 0:0x7f7f7f7f;

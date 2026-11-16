@@ -14,7 +14,7 @@ struct giulia_cx_vote_io {
 };
 struct giulia_cx_vote {
     uint32_t words[7],after[7],reads,valid,failed_offset;
-    uint8_t selector[24]; /* Rows11/19/20 are the firmware's 0xfe markers. */
+    uint8_t selector[24]; /* Rows11..15 and23 are firmware 0xfe markers. */
     int callback_error;
 };
 /* Current-device AOP firmware profile must be independently verified.
