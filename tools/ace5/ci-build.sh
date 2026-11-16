@@ -52,7 +52,6 @@ case "${1:-}" in
   dependencies)
     archive=local/ci/iOSToolchain-aarch64.tar.xz
     toolchain_sha=9051e9d531de5e511f0fab40d925d625bc6efe7ed9dce821d179c09de9bc690b
-    sdk_commit=0222fd5413cf4b9af096f37b4621afa2688572f7
     if ! printf '%s  %s\n' "$toolchain_sha" "$archive" | sha256sum -c - >/dev/null 2>&1 || [ ! -x "$THEOS/toolchain/linux/iphone/bin/ld" ]; then
       rm -rf "$THEOS/toolchain"
       curl -fL --retry 3 -o "$archive" \
@@ -63,16 +62,16 @@ case "${1:-}" in
     fi
     sha256sum "$archive" > out/ci/toolchain.sha256
     test -x "$THEOS/toolchain/linux/iphone/bin/ld"
-    if [ "$(git -C "$THEOS/sdks" rev-parse HEAD 2>/dev/null || true)" != "$sdk_commit" ] || [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include" ]; then
+    if [ ! -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include" ]; then
       rm -rf "$THEOS/sdks"
       git init -q "$THEOS/sdks"
       git -C "$THEOS/sdks" remote add origin https://github.com/theos/sdks.git
       git -C "$THEOS/sdks" sparse-checkout init --cone
       git -C "$THEOS/sdks" sparse-checkout set iPhoneOS16.5.sdk
-      git -C "$THEOS/sdks" fetch --depth 1 --filter=blob:none origin "$sdk_commit"
+      git -C "$THEOS/sdks" fetch --depth 1 --filter=blob:none origin 0222fd5413cf4b9af096f37b4621afa2688572f7
       git -C "$THEOS/sdks" -c advice.detachedHead=false checkout --detach FETCH_HEAD
     fi
-    test "$(git -C "$THEOS/sdks" rev-parse HEAD)" = "$sdk_commit"
+    test "$(git -C "$THEOS/sdks" rev-parse HEAD)" = 0222fd5413cf4b9af096f37b4621afa2688572f7
     test -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
     bash xnu-deps/setup.sh --stage1
     bash xnu/apply.sh
