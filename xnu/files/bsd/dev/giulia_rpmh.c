@@ -5,8 +5,11 @@
  * tcs_tx_done and rpmh_rsc_debug_tcs (ISSUED/COMPL diagnostic bits).
  * https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/soc/qcom/cmd-db.c
  * cmd_db_header/rsc_hdr/entry_header layout and slave/address query.
- * The fixed implementation sends WRITE commands; RESP_DATA is not an API to
- * recover preboot per-DRV regulator votes. No invented READ operation here.
+ * Resource READ protocol independently implemented from the public wire facts
+ * in Qualcomm's upstream change, not copied from its Linux implementation:
+ * https://github.com/torvalds/linux/commit/edbafe65eef2b58625db1e113fbbfb1fe10c0291
+ * WRITE bit clear, one command, no DATA write, fresh completion before reading
+ * RESP_DATA. Merely reading a prior TCS buffer is not a resource read request.
  */
 #include "giulia_rpmh.h"
 #define BIT(n) (1u << (n))
@@ -21,6 +24,7 @@
 #define ENABLE (TCS + 0x2cu)
 #define MSG (TCS + 0x34u)
 #define CMD_STATUS (TCS + 0x40u)
+#define RESPONSE (TCS + 0x44u)
 #define AMC BIT(16)
 #define TRIGGER BIT(24)
 
@@ -92,7 +96,7 @@ static int cleanup(struct giulia_rpmh *p)
         if (v == 0xffffffffu || (v & 1u)) return GIULIA_RPMH_READBACK;
     }
     for (i = 0; i < p->count; i++)
-        for (j = 0; j < 3; j++)
+        for (j = 0; j < (p->read_request ? 2u : 3u); j++)
             if ((r = sync_write(p, MSG + i * 24 + j * 4, p->saved_cmd[i][j])))
                 return r;
     if ((r = sync_write(p, WAIT, p->saved_wait)) ||
@@ -144,6 +148,20 @@ int giulia_rpmh_recover(struct giulia_rpmh *p)
     if (p->state == GIULIA_RPMH_IDLE || p->state == GIULIA_RPMH_DONE) return 0;
     if (!giulia_rpmh_bus_owned(p)) return GIULIA_RPMH_STATE;
     if (p->triggered && !p->completed && (r = wait_done(p))) goto fault;
+    if (p->read_request && p->completed && !p->response_valid) {
+        uint32_t first, second;
+        /* Capture before cleanup acknowledges or reprograms this TCS. Keep
+         * the lease on a bad read so recovery can inspect the same response.
+         * Never retrigger a READ merely because result capture failed. */
+        p->io.barrier(p->io.cookie);
+        first = rd(p, RESPONSE);
+        p->io.barrier(p->io.cookie);
+        second = rd(p, RESPONSE);
+        if (first == 0xffffffffu || first != second) {
+            r = GIULIA_RPMH_READBACK; goto fault;
+        }
+        p->response = first; p->response_valid = 1;
+    }
     if ((r = cleanup(p))) goto fault;
     r = giulia_rpmh_bus_release(p);
     if (r) goto fault;
@@ -153,19 +171,20 @@ fault:
     p->cleanup_error = r; p->state = GIULIA_RPMH_FAULT;
     return r;
 }
-int giulia_rpmh_write(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd, unsigned count)
+static int transfer(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd,
+    unsigned count, unsigned is_read)
 {
     unsigned i, j;
     uint32_t v, config;
     int r;
-    if (!p || !cmd || !count || count > GIULIA_RPMH_MAX_COMMANDS)
+    if (!p || !cmd || !count || count > GIULIA_RPMH_MAX_COMMANDS || (is_read && count != 1))
         return GIULIA_RPMH_ARGUMENT;
     if ((p->prerequisites & GIULIA_RPMH_REQUIRED) != GIULIA_RPMH_REQUIRED)
         return GIULIA_RPMH_PREREQUISITE;
     if (p->state != GIULIA_RPMH_IDLE && p->state != GIULIA_RPMH_DONE)
         return GIULIA_RPMH_STATE;
     for (i = 0; i < count; i++) {
-        if (!cmd[i].address || (cmd[i].address & 3u) || cmd[i].data == 0xffffffffu)
+        if (!cmd[i].address || (cmd[i].address & 3u) || (!is_read && cmd[i].data == 0xffffffffu))
             return GIULIA_RPMH_ARGUMENT;
         for (j = 0; j < i; j++)
             if (cmd[i].address == cmd[j].address) return GIULIA_RPMH_ARGUMENT;
@@ -174,6 +193,7 @@ int giulia_rpmh_write(struct giulia_rpmh *p, const struct giulia_rpmh_command *c
      * when it loses the bus lease before touching MMIO.
      */
     p->triggered = p->completed = 0;
+    p->response = p->response_valid = 0; p->read_request = is_read;
     if ((r = giulia_rpmh_bus_claim(p))) return r;
     p->state = GIULIA_RPMH_OWNED; p->count = count;
     p->dirty = p->triggered = p->completed = p->polls = 0;
@@ -201,7 +221,7 @@ int giulia_rpmh_write(struct giulia_rpmh *p, const struct giulia_rpmh_command *c
     if (p->saved_control == 0xffffffffu || p->saved_wait == 0xffffffffu || v == 0xffffffffu)
         { r = GIULIA_RPMH_READBACK; goto failed; }
     p->saved_irq_bit = v & 1u;
-    for (i = 0; i < count; i++) for (j = 0; j < 3; j++) {
+    for (i = 0; i < count; i++) for (j = 0; j < (is_read ? 2u : 3u); j++) {
         p->saved_cmd[i][j] = rd(p, MSG + i * 24 + j * 4);
         if (p->saved_cmd[i][j] == 0xffffffffu) { r = GIULIA_RPMH_READBACK; goto failed; }
     }
@@ -209,9 +229,9 @@ int giulia_rpmh_write(struct giulia_rpmh *p, const struct giulia_rpmh_command *c
     if ((r = sync_write(p, CONTROL, p->saved_control & ~TRIGGER)) ||
         (r = sync_write(p, CONTROL, p->saved_control & ~(TRIGGER | AMC)))) goto failed;
     for (i = 0; i < count; i++) {
-        if ((r = sync_write(p, MSG + i * 24, 0x10108u)) ||
+        if ((r = sync_write(p, MSG + i * 24, is_read ? 0x108u : 0x10108u)) ||
             (r = sync_write(p, MSG + i * 24 + 4, cmd[i].address)) ||
-            (r = sync_write(p, MSG + i * 24 + 8, cmd[i].data))) goto failed;
+            (!is_read && (r = sync_write(p, MSG + i * 24 + 8, cmd[i].data)))) goto failed;
     }
     v = (1u << count) - 1u;
     if ((r = sync_write(p, WAIT, v)) || (r = sync_write(p, ENABLE, v)) ||
@@ -224,6 +244,24 @@ failed:
     p->error = r; p->state = GIULIA_RPMH_FAULT;
     if (!p->triggered) (void)giulia_rpmh_recover(p);
     return r;
+}
+
+int giulia_rpmh_write(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd, unsigned count)
+{ return transfer(p, cmd, count, 0); }
+
+int giulia_rpmh_read(struct giulia_rpmh *p, uint32_t address)
+{
+    const struct giulia_rpmh_command cmd = {address, 0};
+    return transfer(p, &cmd, 1, 1);
+}
+
+int giulia_rpmh_read_result(const struct giulia_rpmh *p, uint32_t *value)
+{
+    if (!p || !value) return GIULIA_RPMH_ARGUMENT;
+    if (p->state != GIULIA_RPMH_DONE || !p->read_request || !p->completed ||
+        !p->response_valid || p->dirty || giulia_rpmh_bus_owned(p)) return GIULIA_RPMH_STATE;
+    *value = p->response;
+    return 0;
 }
 
 static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0] | (uint16_t)p[1] << 8); }

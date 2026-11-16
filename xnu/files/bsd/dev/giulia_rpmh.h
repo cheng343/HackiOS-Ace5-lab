@@ -42,6 +42,7 @@ struct giulia_rpmh {
     uint32_t saved_control, saved_wait, saved_irq_bit;
     uint32_t saved_cmd[GIULIA_RPMH_MAX_COMMANDS][3];
     uint32_t last_irq, last_tcs, last_command, polls;
+    uint32_t read_request, response, response_valid;
     int error, cleanup_error;
 };
 
@@ -68,6 +69,21 @@ int giulia_rpmh_init(struct giulia_rpmh *, const struct giulia_rpmh_io *, uint32
  * At most 200 ms waiting per call, plus bounded posted-write readback polls.
  */
 int giulia_rpmh_write(struct giulia_rpmh *, const struct giulia_rpmh_command *, unsigned);
+/* One ACTIVE_ONLY resource READ, using the upstream RPMh read protocol:
+ * WRITE bit clear, response requested, DATA untouched. Uses the same guarded
+ * TCS/IRQ lease as write; it still programs and triggers an RSC transaction.
+ * No remote resource vote is submitted. A stale RESP_DATA register alone is
+ * never evidence: completion must belong to this newly issued request.
+ * Timeout/response failure retains the transaction; recover does not resend.
+ * No automatic Wi-Fi hook. Support on Ace 5 hardware remains unverified.
+ */
+int giulia_rpmh_read(struct giulia_rpmh *, uint32_t address);
+/* Pure extraction after successful read AND TCS cleanup. Output is untouched
+ * on failure. Data is raw protocol output, not a physical voltage or a lease
+ * on that resource; its per-DRV meaning still needs platform validation.
+ * All-ones/drifting RESP_DATA is rejected by this backend's fault convention.
+ */
+int giulia_rpmh_read_result(const struct giulia_rpmh *, uint32_t *);
 /* Resume an existing transaction/cleanup. Never retriggers it. Success means
  * the TCS lease is recovered; inspect completed to learn whether it issued.
  * On failure retain mapping, object and lease; reboot may be required.

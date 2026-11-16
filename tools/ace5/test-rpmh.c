@@ -15,6 +15,7 @@
 #define ENABLE (TCS + 0x2cu)
 #define MSG (TCS + 0x34u)
 #define CSTATUS (TCS + 0x40u)
+#define RESPONSE (TCS + 0x44u)
 struct mock {
     uint32_t regs[0x2000 / 4], original[0x2000 / 4];
     uint32_t vote[7][3];
@@ -28,6 +29,7 @@ struct mock {
     uint32_t allones, drop, cleanup_block;
     unsigned reads, writes, barriers, elapsed, triggers, pending, hold_at;
     unsigned incomplete, changed_irq, partial_words;
+    unsigned response_reads, response_drift, data_writes, read_commands;
 };
 static void set(struct mock *m, uint32_t o, uint32_t v) { m->regs[o / 4] = v; }
 static uint32_t get(struct mock *m, uint32_t o) { return m->regs[o / 4]; }
@@ -55,8 +57,16 @@ static void execute(struct mock *m, int partial)
     for (i = 0; i < 16; i++) {
         uint32_t addr, value;
         if (!(mask & BIT(i))) continue;
-        assert(get(m, MSG + i * 24) == 0x10108);
         addr = get(m, MSG + i * 24 + 4); value = get(m, MSG + i * 24 + 8);
+        if (get(m, MSG + i * 24) == 0x108) {
+            assert(mask == 1 && i == 0);
+            assert(addr >= 0x40000 && addr <= 0x40068 && !(addr & 3u));
+            assert((addr & 15u) <= 8);
+            assert(value == m->original[(MSG + 8) / 4]);
+            set(m, RESPONSE, m->vote[(addr - 0x40000) / 16][(addr & 15u) / 4]);
+            m->read_commands++;
+        } else {
+        assert(get(m, MSG + i * 24) == 0x10108);
 #ifdef GIULIA_RPMH_GEM_TEST
         if (addr == 0x31000 || addr == 0x31010) {
             assert(value < 16 && i == 0);
@@ -75,6 +85,7 @@ static void execute(struct mock *m, int partial)
             assert((addr & 15u) <= 8);
             m->vote[(addr - 0x40000) / 16][(addr & 15u) / 4] = value;
         }
+        }
         set(m, CSTATUS + i * 24, BIT(8) | (m->incomplete ? 0 : BIT(16)));
         if (partial && i + 1 == m->partial_words) return;
     }
@@ -86,15 +97,18 @@ static uint32_t read32(void *cookie, uint32_t off)
     struct mock *m = cookie;
     assert(off < 0x2000 && !(off & 3));
     assert(++m->reads < 100000);
+    if (off == RESPONSE) m->response_reads++;
     if (off && off == m->allones) return 0xffffffffu;
     if (m->pending && (!m->hold_at || m->triggers != m->hold_at)) execute(m, 0);
-    return get(m, off);
+    return get(m, off) ^ ((off == RESPONSE && m->response_drift &&
+        (m->response_reads & 1u)) ? 1u : 0u);
 }
 static void write32(void *cookie, uint32_t off, uint32_t value)
 {
     struct mock *m = cookie;
     assert(off >= TCS && off < TCS + 672 && !(off & 3));
     m->writes++;
+    if (off == MSG + 8) m->data_writes++;
     if (off == m->drop) return;
     if (m->cleanup_block && m->triggers && off == WAIT && value == m->original[WAIT / 4]) return;
     if (off == TCS + 8) { set(m, TCS + 4, get(m, TCS + 4) & ~value); return; }
@@ -137,7 +151,7 @@ static void restored(struct mock *m, struct giulia_rpmh *p)
     assert(!(get(m, TCS + 4) & 1));
     for (i = 0; i < 16; i++) for (j = 0; j < 3; j++)
         assert(get(m, MSG + i * 24 + j * 4) == m->original[(MSG + i * 24 + j * 4) / 4]);
-    assert(m->writes == m->barriers);
+    assert(m->writes + m->response_reads == m->barriers);
 }
 static void transport_tests(void)
 {
@@ -194,6 +208,74 @@ static void transport_tests(void)
     assert(giulia_rpmh_write(&p, cmd, 2) == GIULIA_RPMH_TIMEOUT);
     set(&m, CSTATUS, BIT(8) | BIT(16)); set(&m, CSTATUS + 24, BIT(8) | BIT(16));
     assert(giulia_rpmh_recover(&p) == 0); restored(&m, &p);
+}
+
+static void read_tests(void)
+{
+    struct mock m; struct giulia_rpmh p;
+    const struct giulia_rpmh_command write = {0x40000, 1800};
+    uint32_t value, prior[7][3];
+    unsigned writes, triggers;
+    int peer;
+    /* Distinct stale register data must not leak into the fresh reply. */
+    setup(&m,&p); memcpy(prior,m.vote,sizeof(prior)); set(&m,RESPONSE,0xdeadbeef);
+    value = 0xdead;
+    assert(giulia_rpmh_read_result(&p,&value) == GIULIA_RPMH_STATE && value == 0xdead);
+    assert(giulia_rpmh_read(&p,0) == GIULIA_RPMH_ARGUMENT);
+    assert(giulia_rpmh_read(&p,0x40001) == GIULIA_RPMH_ARGUMENT && !m.reads && !m.writes);
+    for (unsigned field = 0; field < 3; field++) {
+        assert(!giulia_rpmh_read(&p,0x40000 + field*4));
+        assert(!giulia_rpmh_read_result(&p,&value) && value == prior[0][field]);
+        assert(p.read_request && p.response_valid && m.read_commands == field+1);
+        assert(!m.data_writes && !memcmp(prior,m.vote,sizeof(prior)));
+        restored(&m,&p);
+    }
+    /* A zero reply is valid after completion; a new failed admission must
+     * invalidate the previous success. No output mutation on an error. */
+    m.vote[0][1] = 0;
+    assert(!giulia_rpmh_read(&p,0x40004));
+    assert(!giulia_rpmh_read_result(&p,&value) && !value);
+    assert(!giulia_rpmh_bus_claim(&peer)); writes = m.writes;
+    assert(giulia_rpmh_read(&p,0x40000) == GIULIA_RPMH_BUSY && m.writes == writes);
+    value = 0xdead;
+    assert(giulia_rpmh_read_result(&p,&value) == GIULIA_RPMH_STATE && value == 0xdead);
+    assert(!giulia_rpmh_bus_release(&peer));
+
+    setup(&m,&p); set(&m,RESPONSE,1234); m.hold_at = 1;
+    assert(giulia_rpmh_read(&p,0x40000) == GIULIA_RPMH_TIMEOUT);
+    assert(p.triggered && !p.completed && !p.response_valid && !m.response_reads);
+    value = 0xdead; writes = m.writes;
+    assert(giulia_rpmh_read_result(&p,&value) == GIULIA_RPMH_STATE && value == 0xdead);
+    assert(giulia_rpmh_recover(&p) == GIULIA_RPMH_TIMEOUT && m.writes == writes);
+    assert(giulia_rpmh_read(&p,0x40004) == GIULIA_RPMH_STATE && m.triggers == 1);
+    m.hold_at = 0;
+    assert(!giulia_rpmh_recover(&p) && m.triggers == 1);
+    assert(!giulia_rpmh_read_result(&p,&value) && value == 100);
+    assert(!m.data_writes);
+    restored(&m,&p);
+
+    for (unsigned fault = 0; fault < 3; fault++) {
+        setup(&m,&p); memcpy(prior,m.vote,sizeof(prior));
+        m.allones = fault == 0 ? RESPONSE : 0;
+        m.response_drift = fault == 1; m.cleanup_block = fault == 2;
+        assert(giulia_rpmh_read(&p,0x40008) == GIULIA_RPMH_READBACK);
+        assert(p.completed && giulia_rpmh_bus_owned(&p));
+        value = 0xdead; triggers = m.triggers;
+        assert(giulia_rpmh_read_result(&p,&value) == GIULIA_RPMH_STATE && value == 0xdead);
+        m.allones = m.response_drift = m.cleanup_block = 0;
+        assert(!giulia_rpmh_recover(&p) && m.triggers == triggers);
+        assert(!giulia_rpmh_read_result(&p,&value) && value == 4);
+        assert(!m.data_writes && !memcmp(prior,m.vote,sizeof(prior)));
+        restored(&m,&p);
+    }
+    setup(&m,&p); m.drop = MSG + 4;
+    assert(giulia_rpmh_read(&p,0x40000) == GIULIA_RPMH_READBACK);
+    assert(!p.triggered && !p.response_valid && !m.response_reads && !m.data_writes);
+    restored(&m,&p);
+    setup(&m,&p);
+    assert(!giulia_rpmh_write(&p,&write,1));
+    assert(giulia_rpmh_read_result(&p,&value) == GIULIA_RPMH_STATE);
+    puts("Ace5 RPMh READ: fresh replies, no DATA/vote writes, timeout and capture recovery passed");
 }
 
 static void le16(uint8_t *p, uint32_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
@@ -403,7 +485,7 @@ static void shared_votes(void)
 }
 int main(void)
 {
-    transport_tests(); db_tests(); rail_tests(); mode_tests(); shared_votes(); forward_only_last();
+    transport_tests(); read_tests(); db_tests(); rail_tests(); mode_tests(); shared_votes(); forward_only_last();
     puts("SM8650 RPMh transport and WLAN rail vote tests passed");
     return 0;
 }
