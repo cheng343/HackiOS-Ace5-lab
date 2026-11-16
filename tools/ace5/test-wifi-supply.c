@@ -110,6 +110,7 @@ int giulia_pcie_power_stop(struct giulia_pcie_power *p,uint32_t f)
 int main(int argc,char **argv)
 {
     struct mock mock;struct giulia_wifi_supply s,other={0};
+    struct giulia_wlan_rail_baseline unk[7]={0};
     struct giulia_wifi_supply_config c=setup(&mock,&s);
     assert(!giulia_wifi_supply_cancel(&s));
     for(unsigned i=0;i<13;i++){if(!(GIULIA_SUPPLY_REQUIRED&(1u<<i)))continue;c.conditions=GIULIA_SUPPLY_REQUIRED&~(1u<<i);assert(giulia_wifi_supply_prepare(&s,&c)==GIULIA_SUPPLY_PREREQUISITE);}
@@ -119,6 +120,7 @@ int main(int argc,char **argv)
     if(argc>1&&!strcmp(argv[1],"--start-fail")){assert(argc==3);m->start_fail=argv[2][0];}
     if(argc>1&&!strcmp(argv[1],"--modes")){m->modes=m->handoff=1;c.dt_modes=1;c.conditions|=GIULIA_SUPPLY_DT_MODE_WRITE_SAFE|GIULIA_SUPPLY_RCHNG_HANDOFF;}
     if(argc>1&&!strcmp(argv[1],"--keep-pdc")){m->keep_pdc=1;c.pdc_policy=GIULIA_WLAN_PDC_KEEP_TABLE;}
+    if(argc>1&&!strcmp(argv[1],"--keep-rails")){c.rail_baseline=unk;c.rail_policy=GIULIA_WLAN_KEEP_VOTES;}
     if(argc>1&&!strcmp(argv[1],"--contract"))m->contract_bad=1;
     if(argc>1&&!strcmp(argv[1],"--guard")){assert(argc==3);m->bad_held_at=(unsigned)atoi(argv[2]);}
     if(argc>1&&!strcmp(argv[1],"--early-stop-fail")){m->start_fail='I';m->stop_fail='g';}
@@ -149,8 +151,8 @@ int main(int argc,char **argv)
         if(rc<0){assert(s.state==GIULIA_SUPPLY_FAULT&&s.cleanup_stage!=GIULIA_SUPPLY_NONE);assert(giulia_wifi_supply_cancel(&s)==GIULIA_SUPPLY_RETAINED);}
         else assert(rc==GIULIA_SUPPLY_RETAINED);
         assert(s.state==GIULIA_SUPPLY_HELD&&s.gpio.state==GIULIA_WGPIO_HELD&&s.gpio.bt_owned);
-        assert(s.power.state==GIULIA_POWER_STOPPED&&s.rails.state==GIULIA_WLAN_RAIL_STOPPED&&!s.aop.owned);
-        assert(s.retained==(GIULIA_SUPPLY_RETAINS_CPU_NOC|(m->keep_pdc?GIULIA_SUPPLY_RETAINS_PDC:0)));
+        assert(s.power.state==GIULIA_POWER_STOPPED&&s.rails.state==(c.rail_policy?GIULIA_WLAN_RAIL_HELD:GIULIA_WLAN_RAIL_STOPPED)&&!s.aop.owned);
+        assert(s.retained==(GIULIA_SUPPLY_RETAINS_CPU_NOC|(m->keep_pdc?GIULIA_SUPPLY_RETAINS_PDC:0)|(c.rail_policy?GIULIA_SUPPLY_RETAINS_RAILS:0)));
         unsigned before=m->count;assert(giulia_wifi_supply_cancel(&s)==GIULIA_SUPPLY_RETAINED&&m->count==before);
     }
     puts("Ace5 supply: actual coordinator ordering, preflight, reverse unwind and retained GPIO ownership passed");

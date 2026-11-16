@@ -46,7 +46,8 @@ enum giulia_wifi_supply_condition {
 #define GIULIA_SUPPLY_REQUIRED 0x13ffu
 enum giulia_wifi_supply_retained {
     GIULIA_SUPPLY_RETAINS_CPU_NOC = 1u << 0,
-    GIULIA_SUPPLY_RETAINS_PDC = 1u << 1
+    GIULIA_SUPPLY_RETAINS_PDC = 1u << 1,
+    GIULIA_SUPPLY_RETAINS_RAILS = 1u << 2
 };
 struct giulia_wifi_supply_config {
     struct giulia_wifi_gpio_io gpio;
@@ -58,7 +59,7 @@ struct giulia_wifi_supply_config {
     const struct giulia_wlan_rail_baseline *rail_baseline;
     const struct giulia_wlan_pdc_baseline *pdc_baseline;
     uint32_t conditions, dt_modes;
-    unsigned aop_policy, pdc_policy;
+    unsigned aop_policy, pdc_policy, rail_policy;
     /* Required explicit acknowledgement of the forward-only CPU-NoC floor.
      * Strict rail baseline restoration is always used by this coordinator. */
     unsigned allow_retained_cpu_floor;

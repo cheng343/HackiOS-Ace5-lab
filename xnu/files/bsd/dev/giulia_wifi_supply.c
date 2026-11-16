@@ -69,7 +69,9 @@ int giulia_wifi_supply_cancel(struct giulia_wifi_supply *p)
     if (p->rails.state != GIULIA_WLAN_RAIL_IDLE && p->rails.state != GIULIA_WLAN_RAIL_STOPPED) {
         VALID(GIULIA_SUPPLY_RAIL_STOP);
         CLEAN(giulia_wifi_gpio_check_held(&p->gpio,GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
-        CLEAN(giulia_wlan_rails_stop(&p->rails, p->gpio.state == GIULIA_WGPIO_HELD));
+        rc = giulia_wlan_rails_stop(&p->rails, p->gpio.state == GIULIA_WGPIO_HELD);
+        if (rc == GIULIA_WLAN_RAIL_RETAINED) p->retained |= GIULIA_SUPPLY_RETAINS_RAILS;
+        else if (rc) return bad_cleanup(p,GIULIA_SUPPLY_DRIVER,rc);
     }
     if (p->pdc.state != GIULIA_WLAN_PDC_IDLE && p->pdc.state != GIULIA_WLAN_PDC_STOPPED) {
         VALID(GIULIA_SUPPLY_PDC_STOP);
@@ -128,7 +130,8 @@ int giulia_wifi_supply_prepare(struct giulia_wifi_supply *p, const struct giulia
     uintptr_t expected = 0;
     struct giulia_cpu_noc_plan plan;
     if (!p || !valid_io(c) || !c->rail_baseline || c->pdc_bytes != 508 ||
-        c->dt_modes > 1 || c->aop_policy > GIULIA_AOP_OPEN_ON_INHERITED_LINK)
+        c->dt_modes > 1 || c->aop_policy > GIULIA_AOP_OPEN_ON_INHERITED_LINK ||
+        c->rail_policy > GIULIA_WLAN_KEEP_VOTES)
         return GIULIA_SUPPLY_ARGUMENT;
     if (p->state != GIULIA_SUPPLY_IDLE && p->state != GIULIA_SUPPLY_STOPPED) return GIULIA_SUPPLY_STATE;
     uint32_t need = GIULIA_SUPPLY_REQUIRED | (c->conditions & GIULIA_SUPPLY_RCHNG_HANDOFF) |
@@ -137,7 +140,7 @@ int giulia_wifi_supply_prepare(struct giulia_wifi_supply *p, const struct giulia
     if (c->validate_external(c->owner_cookie,need,GIULIA_SUPPLY_INPUTS)) return GIULIA_SUPPLY_EXTERNAL;
     if ((rc = giulia_wlan_pdc_check(c->pdc_table,c->pdc_bytes,c->pdc_baseline,c->pdc_policy)) ||
         (rc = giulia_wlan_rails_check(c->db,c->db_bytes,c->db_version,c->rail_baseline,
-            rail_flags(c),GIULIA_WLAN_RESTORE_BASELINE,c->dt_modes)) ||
+            rail_flags(c),(enum giulia_wlan_rail_policy)c->rail_policy,c->dt_modes)) ||
         (rc = giulia_cpu_noc_plan(c->db,c->db_bytes,c->db_version,&plan))) {
         p->error = GIULIA_SUPPLY_DRIVER; p->driver_error = rc; p->failed_stage = GIULIA_SUPPLY_INPUTS;
         return GIULIA_SUPPLY_DRIVER;
@@ -177,10 +180,10 @@ int giulia_wifi_supply_prepare(struct giulia_wifi_supply *p, const struct giulia
     CALL(giulia_wifi_gpio_check_held(&p->gpio,GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
     if (c->dt_modes) {
         CALL(giulia_wlan_rails_start_with_dt_modes(&p->rails,&p->rpmh,c->db,c->db_bytes,c->db_version,
-            c->rail_baseline,rail_flags(c),GIULIA_WLAN_RESTORE_BASELINE));
+            c->rail_baseline,rail_flags(c),(enum giulia_wlan_rail_policy)c->rail_policy));
     } else {
         CALL(giulia_wlan_rails_start(&p->rails,&p->rpmh,c->db,c->db_bytes,c->db_version,
-            c->rail_baseline,rail_flags(c),GIULIA_WLAN_RESTORE_BASELINE));
+            c->rail_baseline,rail_flags(c),(enum giulia_wlan_rail_policy)c->rail_policy));
     }
     EXPECT(p->rails.state == GIULIA_WLAN_RAIL_ACTIVE && p->rails.completed_mask == 0x7fu);
     STEP(GIULIA_SUPPLY_CPU_NOC);

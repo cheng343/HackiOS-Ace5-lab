@@ -76,7 +76,7 @@ def main():
                     subprocess.run([str(exe), '--start-fail', stage], check=True, timeout=30)
                 for stage in 'rpwcvda':
                     subprocess.run([str(exe), '--stop-fail', stage], check=True, timeout=30)
-                for scenario in ('--modes','--keep-pdc','--external','--contract','--handoff','--reset-attempted','--early-stop-fail'):
+                for scenario in ('--modes','--keep-pdc','--keep-rails','--external','--contract','--handoff','--reset-attempted','--early-stop-fail'):
                     subprocess.run([str(exe), scenario], check=True, timeout=30)
                 for check in (1,2):
                     subprocess.run([str(exe), '--guard', str(check)], check=True, timeout=30)
