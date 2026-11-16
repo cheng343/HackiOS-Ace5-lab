@@ -34,6 +34,11 @@ CRM ACK 都不能单独替代这些条件。`ACTIVE` 仅表示静态 QoS 字段�
 [GCC 时钟定义](https://github.com/torvalds/linux/blob/v6.12/drivers/clk/qcom/gcc-sm8650.c)。
 云端 fixture 对实际 core 注入读/写/读回/所有权故障，另将真实 GCC 与 QoS
 core 组合，验证主机准备后配置与撤回 QoS 保留原有请求、不触发 BCR。
+源码 [`a207b83`](https://github.com/cheng343/HackiOS-Ace5-lab/commit/a207b83d907a66ccf856312c41efab94bf01065c)
+已通过[云构建 43805279899](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43805279899)：
+新增故障矩阵、7 组真实 GCC/QoS core 组合、全部既有回归、两种 loader 与
+完整 XNU 均成功。七项产物长度与 SHA-256、ZIP CRC、源码提交及测试标记
+均已核验；可缓存编译调用命中 1063/1065（99.81%），2 次未命中。
 本轮保持 Android，不重启、不刷写；没有新的真机结果。
 
 ## 2026-11-16：初始 PCIe 速率与资源配置一致
