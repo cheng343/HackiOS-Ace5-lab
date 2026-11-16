@@ -291,8 +291,8 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         wb.bringup.supply.rails.state, wb.bringup.supply.rails.completed_mask);
     wb_log("ace5-wifi-bringup: gcc votes0=%#x votes1=%#x core_gdsc=%#x phy_gdsc=%#x\n",
         votes0, votes1, core_gdsc, phy_gdsc);
-    wb_log("ace5-wifi-bringup: link stage=%u err=%d clean=%d r32=(%u,%#x,%#x) r16=(%u,%#x,%#x)\n",
-        wb.bringup.link.stage, wb.bringup.link.last_error, wb.bringup.link.cleanup_error,
+    wb_log("ace5-wifi-bringup: link stage=%u fail=%u err=%d r32=(%u,%#x,%#x) r16=(%u,%#x,%#x)\n",
+        wb.bringup.link.stage, wb.bringup.link.failure_stage, wb.bringup.link.error,
         wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2],
         wb_dbg_r16[0], wb_dbg_r16[1], wb_dbg_r16[2]);
     wb_log("ace5-wifi-bringup: root=%#x ep=%#x link_sts=%#x bar0=%#x/%#x\n",
