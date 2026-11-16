@@ -30,6 +30,11 @@ PCIe0（`1c00000`）没有此属性。原厂仅在属性存在时调用 PARF CES
 
 依据：[Linux v6.12 DesignWare 速率/宽度配置](https://github.com/torvalds/linux/blob/v6.12/drivers/pci/controller/dwc/pcie-designware.c)，
 [固定 OnePlus 设备树](https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8650/blob/453d8875f815bf9dfad9035982861226a4823a6c/kernel_platform/qcom/proprietary/devicetree/qcom/pineapple-pcie.dtsi)。
+源码 [`ee32790`](https://github.com/cheng343/HackiOS-Ace5-lab/commit/ee3279017d9e16dc2cbe4c56bb2318d79a90496f)
+已通过[云构建 43804127327](https://github.com/cheng343/HackiOS-Ace5-lab/actions/runs/43804127327)：
+新增 17 个链路场景、全部既有回归、两种 loader 和完整 XNU 均成功。
+七项产物长度与 SHA-256、ZIP CRC、源码提交和测试标记均已核验；
+可缓存编译调用命中 1060/1064（99.62%），4 次未命中。
 本轮只有源码与云端验证，不操作手机。真实七路基线、NoC/CESTA 就绪服务
 和后续供电/链路组合绑定仍未完成；Wi-Fi 尚不能扫描或联网。
 
