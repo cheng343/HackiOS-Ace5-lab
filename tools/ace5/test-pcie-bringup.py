@@ -27,6 +27,7 @@ def main():
         (drivers/'giulia_aop.c', root/'tools/ace5/test-aop-xnu.c'),
         (drivers/'giulia_aop.c', drivers/'giulia_wlan_pdc.c', root/'tools/ace5/test-wlan-pdc.c'),
         (drivers/'giulia_crm.c', root/'tools/ace5/test-crm.c'),
+        (drivers/'giulia_crm.c', root/'tools/ace5/test-crm-xnu.c'),
         (drivers/'giulia_crm.c', drivers/'giulia_bcm.c', root/'tools/ace5/test-bcm.c'),
         (drivers/'giulia_wifi_gpio.c', root/'tools/ace5/test-wifi-gpio.c'),
         (drivers/'giulia_rpmh.c', drivers/'giulia_wlan_rails.c', root/'tools/ace5/test-rpmh.c'),
@@ -52,6 +53,9 @@ def main():
             if test.stem == 'test-crm':
                 for scenario in ('success', 'timeout', 'post-error', 'drift'):
                     subprocess.run([str(exe), '--empty-' + scenario], check=True, timeout=30)
+            if test.stem == 'test-crm-xnu':
+                for scenario in ('--retained', '--timeout'):
+                    subprocess.run([str(exe), scenario], check=True, timeout=30)
 
 
 if __name__ == '__main__':

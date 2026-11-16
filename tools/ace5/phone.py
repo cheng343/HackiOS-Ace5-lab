@@ -31,11 +31,16 @@ def check_loader_result(reply, command, log):
         raise RuntimeError(f'Loader {command} failed: {actual}; saved diagnostic log: {log}')
 
 
-def wait_for_result(command, seconds, bootcpu, live_log, live_interval, log_dir):
+def wait_for_result(command, seconds, bootcpu, live_log, live_interval, log_dir, quiet_until_return=False):
     # The budget starts when launch has been accepted, including the wait while
     # CPU 0 owns USB. Do not grant a second full run duration after that wait.
     deadline = time.monotonic() + seconds + 60
-    if command == 'run' and bootcpu == 0:
+    if command == 'run' and quiet_until_return:
+        print('CRM trial parks firmware USB until kernel return; waiting before result polling.', flush=True)
+        quiet_deadline = time.monotonic() + seconds + 5
+        while time.monotonic() < quiet_deadline:
+            time.sleep(min(5, quiet_deadline - time.monotonic()))
+    elif command == 'run' and bootcpu == 0:
         print('XNU owns the boot core; waiting before asking USB for its result.', flush=True)
         time.sleep(seconds + 5)
     next_live = time.monotonic() + live_interval
@@ -61,9 +66,9 @@ def wait_for_result(command, seconds, bootcpu, live_log, live_interval, log_dir)
         time.sleep(min(2, live_interval))
 
 
-def collect_run_diagnostics(command, seconds, bootcpu, live_log, live_interval, log_dir, log):
+def collect_run_diagnostics(command, seconds, bootcpu, live_log, live_interval, log_dir, log, quiet_until_return=False):
     try:
-        result = wait_for_result(command, seconds, bootcpu, live_log, live_interval, log_dir)
+        result = wait_for_result(command, seconds, bootcpu, live_log, live_interval, log_dir, quiet_until_return)
     except (RuntimeError, subprocess.TimeoutExpired, OSError) as error:
         # Preserve what is already staged without "oem log", which would discard
         # a final kernel log. A failed poll cannot prove this is the final log.
@@ -222,6 +227,14 @@ def ace5_aop_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware):
     return ' ace5_aop_channel_test=1'
 
 
+def ace5_crm_test_arguments(enabled, bootcpu, kernel, seconds, other_hardware, live_log):
+    if not enabled:
+        return ''
+    if not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
+        raise RuntimeError('--crm-channel-test requires --kernel, CPU 1, 10..120 seconds, no live USB polling and no other hardware probes')
+    return ' ace5_crm_channel_test=1'
+
+
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
 sub = ap.add_subparsers(dest='command', required=True)
@@ -240,6 +253,8 @@ run.add_argument('--wifi-probe', type=int, choices=[1, 2, 3, 4],
                  help='Read-only Ace 5 handoff probe: 1 baseline, 2 CESTA/CRM headers, 3 AOP headers, 4 full vendor SM/CRM runtime snapshot; requires --kernel, CPU 1 and a finite run')
 run.add_argument('--aop-channel-test', action='store_true',
                  help='Open/close only the AOP host channel while loader firmware clients are parked; requires CPU 1 and 10..300 seconds')
+run.add_argument('--crm-channel-test', action='store_true',
+                 help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--battery', action='store_true',
                  help='Experimental Ace 5 NFG8011B sampling; requires --kernel and --bootcpu 1')
 run.add_argument('--cpu-khz', type=int, default=0,
@@ -377,7 +392,10 @@ try:
         if args.command == 'run':
             commandline += ace5_wifi_probe_arguments(args.wifi_probe, args.bootcpu, args.kernel, seconds)
             commandline += ace5_aop_test_arguments(args.aop_channel_test, args.bootcpu, args.kernel,
-                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe)
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.crm_channel_test)
+            commandline += ace5_crm_test_arguments(args.crm_channel_test, args.bootcpu, args.kernel,
+                seconds, args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test,
+                args.live_log)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -450,7 +468,8 @@ try:
         result = collect_run_diagnostics(args.command, seconds,
                                          args.bootcpu if args.command == 'run' else 0,
                                          args.live_log if args.command == 'run' else False,
-                                         live_interval, logs, log)
+                                         live_interval, logs, log,
+                                         args.command == 'run' and args.crm_channel_test)
         print(result, log)
         saved_log = log.read_bytes().decode('utf-8', errors='replace')
         for line in saved_log.splitlines():
@@ -461,6 +480,11 @@ try:
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
             if args.aop_channel_test and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:
                 raise RuntimeError(f'AOP channel handshake incomplete; see {log}')
+            if args.crm_channel_test:
+                marker = 'ace5-crm: channel test complete; selected channel and firmware quiet retained until kernel return'
+                if marker not in saved_log or getvar('crm-reset-required') != 'yes':
+                    raise RuntimeError(f'CRM channel test incomplete; preserve {log} and cold reboot before another operation')
+                print('CRM zero-table channel confirmed; cold reboot required before another kernel or payload upload.', flush=True)
         if args.command == 'run' and args.gpu_probe and f'ace5-gpu: stage {args.gpu_probe} complete' not in saved_log:
             raise RuntimeError(f'GPU probe did not complete requested stage {args.gpu_probe}; see {log}')
         if args.command == 'run' and args.gpu_keep and 'ace5-gpu: persistent startup ready=1' not in saved_log:

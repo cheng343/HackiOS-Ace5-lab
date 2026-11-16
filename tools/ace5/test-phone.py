@@ -17,7 +17,8 @@ from unittest.mock import Mock
 SOURCE = Path(__file__).with_name('phone.py')
 FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect_run_diagnostics',
              'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel',
-             'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments'}
+             'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments',
+             'ace5_crm_test_arguments'}
 
 
 class Clock:
@@ -165,6 +166,28 @@ class PhoneTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 args(True, cpu, kernel, seconds, other)
         self.assertEqual(self.commands, [])
+
+    def test_crm_trial_is_explicit_isolated_and_has_no_live_usb(self):
+        args = self.namespace['ace5_crm_test_arguments']
+        self.assertEqual(args(False, 0, None, 0, True, True), '')
+        self.assertEqual(args(True, 1, 'kernel', 60, False, False), ' ace5_crm_channel_test=1')
+        for cpu, kernel, seconds, other, live in ((0, 'kernel', 60, False, False),
+                (1, None, 60, False, False), (1, 'kernel', 0, False, False),
+                (1, 'kernel', 121, False, False), (1, 'kernel', 60, True, False),
+                (1, 'kernel', 60, False, True)):
+            with self.assertRaises(RuntimeError):
+                args(True, cpu, kernel, seconds, other, live)
+        self.assertEqual(self.commands, [])
+
+    def test_crm_trial_waits_for_quiet_return_before_usb_poll(self):
+        polled = []
+        def fb(*command):
+            polled.append((self.clock.now, command))
+            return 'result: returned 0 0\n'
+        self.namespace['fb'] = fb
+        result = self.namespace['wait_for_result']('run', 60, 1, False, 2, self.directory, True)
+        self.assertEqual(result, 'result: returned 0 0\n')
+        self.assertEqual(polled, [(65, ('getvar', 'result'))])
 
     def test_failure_statuses_are_not_success_and_logs_survive(self):
         for status in ('not-started', 'early-exception', 'checkpoint', 'idle', 'other-core-hung', 'selftest-ok'):

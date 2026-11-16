@@ -157,7 +157,7 @@ void giulia_aop_test_init(void)
     if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 || seconds < 10 || seconds > 300) {
         ga_log("ace5-aop: requires cpus=1 bootcpu=1 and a finite 10..300 second run\n"); return;
     }
-    const char *const incompatible[] = {"ace5_wifi_probe", "ace5_touch", "ace5_battery", "ace5_cpu_khz", "ace5_gpu_probe"};
+    const char *const incompatible[] = {"ace5_wifi_probe", "ace5_touch", "ace5_battery", "ace5_cpu_khz", "ace5_gpu_probe", "ace5_crm_channel_test"};
     for (unsigned i = 0; i < sizeof(incompatible)/sizeof(incompatible[0]); i++) {
         uint32_t value = 0;
         if (PE_parse_boot_argn(incompatible[i], &value, sizeof(value)) && value) {

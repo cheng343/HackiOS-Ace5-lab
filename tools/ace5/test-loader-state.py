@@ -65,6 +65,13 @@ def main() -> int:
         (build / "watchdog-budget.inc").write_text(watchdog, encoding="utf-8")
         quiet = section(text, 'static int\nobserver_firmware_quiet(', 'static int64_t\nrun_on_other_cpu(', source)
         (build / 'quiet-observer.inc').write_text(quiet, encoding='utf8')
+        quiet_args = section(text, 'static int\nquiet_flag_present(', 'static int\nobserver_firmware_quiet(', source)
+        (build / 'quiet-args.inc').write_text(quiet_args, encoding='utf8')
+        prefix = section(text, 'static int\nstarts_with(', '/*\n * One command from the host.', source)
+        gate = section(text, 'static int\ncrm_command_allowed(', 'static void\nfb_command(', source)
+        (build / 'crm-command-gate.inc').write_text(prefix + gate, encoding='utf8')
+        if text.index('if (!crm_command_allowed(cmd))') > text.index('if (busy && (starts_with(cmd, "oem ramdisk")'):
+            raise ValueError('CRM retained-lifetime gate must precede all command dispatch')
         if '\twhile (status == 0) {\n        if (observer_firmware_quiet(started, budget, &last_pet)) continue;' not in text:
             raise ValueError('firmware quiet must gate every observer iteration before firmware services')
         for name in ("download", "run", "watchdog", "quiet"):

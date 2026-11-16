@@ -481,3 +481,29 @@ SHA-256 已下载核对，内核为
 `8bd117c0e8b165db6217dd412c9e8642a7b0e629ffc5ae0866d99a0b90a9eae0`。
 ccache 命中 1057/1061（99.62%），四次未命中。这次云端构建与前述 probe 4
 真机采集使用不同提交；首次初始化入口尚未真机执行，仍不能扫描或联网。
+
+## 后续：独立 CRM 通道测试入口
+
+新增 `giulia_crm_xnu.c` 与显式 `--crm-channel-test`，将生产首次初始化核心接到
+XNU MMIO。此测试仅将全零表选到 channel0：不启用 PERF 或 BCM 投票，不写
+rail、GPIO、PHY、PCIe 链路或状态机程序。MMIO adapter 只允许本次声明的
+channel0 表地址写 0，以及 CHN_UPDATE 写 1；禁止写其他通道、header、状态字、
+非零表值或 UPDATE=0。实际测试默认关闭，要求 giulia、CPU1、单 XNU CPU、
+10..120 秒有限会话，且其他实验硬件客户端均关闭。
+
+首次写入前取得 loader firmware-quiet ACK，暂停固件 CPU 的 UEFI/USB/存储等
+服务并屏蔽中断；每次事务与写入还要求 PCIe0 core/PHY GDSC 保持 collapsed /
+down-complete，功能 leaf 票撤销。未接管继承 RCHNG、PLL 或其他 CRM DRV。
+这建立的是本次 APPS 侧独占、无 PCIe0 活动用户的零表通道测试条件，不声称
+CESTA 已停或允许 direct-GCC 接管。控制器仍须通过真实 ACK 才报告通道完成。
+
+请求后保留通道、映射与 quiet 到 XNU 返回；平台资源生命周期由 loader 接续
+保留，必须冷重启结束。loader 设置 `crm-reset-required=yes`，此后只允许查询、
+取回日志／屏幕、停止请求及冷重启，禁止新内核、payload 覆盖、ramdisk 等操作。
+因此没有在一次试验后把未知硬件状态交给下一次启动。quiet 在内核返回前不
+服务 USB，host 相应等待有限会话结束后才取结果，不进行 live-log 轮询。
+
+云端测试直接链接真实 XNU adapter 与 CRM 核心，检查 opt-in、CPU/其他客户端
+隔离、cold-domain 条件、映射、空表、写入白名单、一次 channel ACK 和超时保留。
+另从真实 loader 提取精确参数解析和保留状态命令限制，防止伪前缀／参数值误开。
+此入口是否被硬件确认，必须记录随后真实会话结果；编译成功不能代替它。

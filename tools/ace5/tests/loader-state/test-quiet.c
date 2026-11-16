@@ -2,12 +2,17 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "loader_firmware_quiet.h"
 static struct loader_firmware_quiet firmware_quiet;
 static int firmware_quiet_enabled, wdt_armed, masked, mode;
 static volatile uint64_t other_cpu_done;
 static unsigned flushes, clean_acks, restored, pets;
 static uint64_t ticks;
+static int crm_reset_required;
+static int str_eq(const char *a,const char *b) { return !strcmp(a,b); }
+#include "quiet-args.inc"
+#include "crm-command-gate.inc"
 #define CNTVCT_EL0 0
 #define READ_SYSREG(x) (++ticks)
 static uint64_t seconds_since(uint64_t start) { (void)start; return ticks; }
@@ -52,6 +57,20 @@ static void reset(void)
 int main(void)
 {
     uint64_t last = 0;
+    assert(quiet_flag_present("cpus=1 ace5_crm_channel_test=1 bootcpu=1","ace5_crm_channel_test=1"));
+    assert(quiet_flag_present("ace5_aop_channel_test=1","ace5_aop_channel_test=1"));
+    const char *invalid[]={"ace5_crm_channel_test=10","xace5_crm_channel_test=1",
+        "ace5_crm_channel_test=1x","ace5_crm_channel_test=0",""};
+    for (unsigned i=0;i<sizeof(invalid)/sizeof(invalid[0]);i++)
+        assert(!quiet_flag_present(invalid[i],"ace5_crm_channel_test=1"));
+    crm_reset_required=0; assert(crm_command_allowed("oem run"));
+    crm_reset_required=1;
+    const char *allowed[]={"getvar:result","getvar:crm-reset-required","upload",
+        "oem screenshot","oem stop","reboot"};
+    const char *denied[]={"oem run","oem selftest","download:1000","oem ramdisk",
+        "oem touchprobe","oem live-log","oem memmap","oem clearscreen"};
+    for (unsigned i=0;i<sizeof(allowed)/sizeof(allowed[0]);i++) assert(crm_command_allowed(allowed[i]));
+    for (unsigned i=0;i<sizeof(denied)/sizeof(denied[0]);i++) assert(!crm_command_allowed(denied[i]));
     reset(); firmware_quiet_enabled = 0;
     assert(!observer_firmware_quiet(0, 90, &last) && !flushes);
     reset(); assert(!observer_firmware_quiet(0, 90, &last) && !restored);
@@ -65,5 +84,6 @@ int main(void)
     reset(); firmware_quiet.request = 6; other_cpu_done = 1;
     assert(!observer_firmware_quiet(0, 90, &last) && !restored);
     puts("PASS: actual loader firmware quiet ACK, cancellation, kernel return and interrupt restore");
+    puts("PASS: actual quiet opt-in parser and retained CRM cold-reset command gate");
     return 0;
 }

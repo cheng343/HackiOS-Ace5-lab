@@ -962,6 +962,10 @@ static struct loader_firmware_quiet firmware_quiet = {
     .size = sizeof(struct loader_firmware_quiet)
 };
 static int firmware_quiet_enabled;
+/* A selected first CRM channel has no verified select-none rollback. Keep
+ * the payload/ownership reserved after XNU returns; only inspection/upload
+ * and cold reboot are admitted until the platform reset ends its lifetime. */
+static int crm_reset_required;
 
 static void wdt_pet(void);
 static int wdt_armed;
@@ -2301,6 +2305,17 @@ quiet_interrupts_restore(uint64_t daif, uint64_t group1)
  * A hung borrower instead meets the existing finite-run watchdog budget.
  */
 static int
+quiet_flag_present(const char *cmdline, const char *flag)
+{
+    for (const char *c=cmdline; *c; c++) {
+        if (c!=cmdline && c[-1]!=' ') continue;
+        const char *p=c,*f=flag;
+        while (*f && *p==*f) { p++; f++; }
+        if (!*f && (!*p || *p==' ')) return 1;
+    }
+    return 0;
+}
+static int
 observer_firmware_quiet(uint64_t started, uint64_t budget, uint64_t *last_pet)
 {
     uint64_t daif, group1, base = (uint64_t)(uintptr_t)&firmware_quiet;
@@ -3080,12 +3095,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
     firmware_quiet_enabled = 0;
 #if defined(HACKIOS_GIULIA)
     if (kernel_mpidr != this_mpidr) {
-        for (const char *c = pi.cmdline; *c; c++) {
-            static const char flag[] = "ace5_aop_channel_test=1";
-            if ((c == pi.cmdline || c[-1] == ' ') && starts_with(c, flag) &&
-                (c[sizeof(flag)-1] == 0 || c[sizeof(flag)-1] == ' '))
-                firmware_quiet_enabled = 1;
-        }
+        int crm_test=quiet_flag_present(pi.cmdline,"ace5_crm_channel_test=1");
+        firmware_quiet_enabled=crm_test || quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=1");
+        if (crm_test) crm_reset_required=1;
     }
 #endif
     if (firmware_quiet_enabled) {
@@ -3701,10 +3713,20 @@ starts_with(const char *s, const char *prefix)
  * One command from the host. While a kernel runs on another core (running_live) only what does
  * not disturb it: questions, the screen, the log so far, and "oem stop".
  */
+static int
+crm_command_allowed(const char *cmd)
+{
+    return !crm_reset_required || starts_with(cmd,"getvar:") || starts_with(cmd,"upload") ||
+        starts_with(cmd,"oem screenshot") || str_eq(cmd,"oem stop") || starts_with(cmd,"reboot");
+}
 static void
 fb_command(char *cmd)
 {
 	int busy = running_live != NULL;
+	if (!crm_command_allowed(cmd)) {
+		fb_reply("FAIL","CRM trial retained: cold reboot required before another operation");
+		return;
+	}
 
 	{
 		if (busy && (starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
@@ -3731,6 +3753,8 @@ fb_command(char *cmd)
 #else
 				fb_reply("OKAY", "kernel");
 #endif
+			} else if (str_eq(var, "crm-reset-required")) {
+				fb_reply("OKAY",crm_reset_required ? "yes" : "no");
 			} else if (str_eq(var, "version")) {
 				fb_reply("OKAY", "0.5");
 			} else if (str_eq(var, "max-download-size")) {
