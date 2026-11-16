@@ -230,19 +230,19 @@ static int transfer(struct giulia_rpmh *p, const struct giulia_rpmh_command *cmd
         if (status == 0xffffffffu || enable == 0xffffffffu || control == 0xffffffffu)
             { r = GIULIA_RPMH_READBACK; goto failed; }
         if (!i) { first_status=status; first_enable=enable; first_control=control; }
-        if (!status || (!is_read && (enable || (control & TRIGGER)))) {
+        if (!status) {
             p->busy_reason = GIULIA_RPMH_BUSY_SLOT; p->busy_slot = i;
             p->busy_status = status; p->busy_enable = enable; p->busy_control = control;
             r = GIULIA_RPMH_BUSY; goto failed;
         }
         if (!enable && !(control&TRIGGER) && selected==3) selected=i;
     }
-    if (is_read && selected==3) {
+    if (selected==3) {
         p->busy_reason=GIULIA_RPMH_BUSY_SLOT; p->busy_slot=0;
         p->busy_status=first_status; p->busy_enable=first_enable; p->busy_control=first_control;
         r=GIULIA_RPMH_BUSY; goto failed;
     }
-    if (is_read) p->slot=selected;
+    p->slot=selected;
     p->saved_control = rd(p, CONTROL); p->saved_wait = rd(p, WAIT);
     v = rd(p, IRQ_ENABLE);
     if (p->saved_control == 0xffffffffu || p->saved_wait == 0xffffffffu || v == 0xffffffffu)

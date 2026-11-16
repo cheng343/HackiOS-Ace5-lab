@@ -49,24 +49,25 @@ static void init(struct mock *m)
     }
     m->partial_words = 1;
 }
-static void execute(struct mock *m, int partial)
+static void execute_slot(struct mock *m, unsigned slot, int partial)
 {
-    uint32_t mask = get(m, ENABLE);
+    uint32_t bank = slot * 672u;
+    uint32_t mask = get(m, ENABLE + bank);
     unsigned i;
-    assert((get(m, WAIT) & mask) == mask);
+    assert((get(m, WAIT + bank) & mask) == mask);
     for (i = 0; i < 16; i++) {
         uint32_t addr, value;
         if (!(mask & BIT(i))) continue;
-        addr = get(m, MSG + i * 24 + 4); value = get(m, MSG + i * 24 + 8);
-        if (get(m, MSG + i * 24) == 0x108) {
+        addr = get(m, MSG + bank + i * 24 + 4); value = get(m, MSG + bank + i * 24 + 8);
+        if (get(m, MSG + bank + i * 24) == 0x108) {
             assert(mask == 1 && i == 0);
             assert(addr >= 0x40000 && addr <= 0x40068 && !(addr & 3u));
             assert((addr & 15u) <= 8);
-            assert(value == m->original[(MSG + 8) / 4]);
-            set(m, RESPONSE, m->vote[(addr - 0x40000) / 16][(addr & 15u) / 4]);
+            assert(value == m->original[(MSG + bank + 8) / 4]);
+            set(m, RESPONSE + bank, m->vote[(addr - 0x40000) / 16][(addr & 15u) / 4]);
             m->read_commands++;
         } else {
-        assert(get(m, MSG + i * 24) == 0x10108);
+        assert(get(m, MSG + bank + i * 24) == 0x10108);
 #ifdef GIULIA_RPMH_GEM_TEST
         if (addr == 0x31000 || addr == 0x31010) {
             assert(value < 16 && i == 0);
@@ -86,11 +87,17 @@ static void execute(struct mock *m, int partial)
             m->vote[(addr - 0x40000) / 16][(addr & 15u) / 4] = value;
         }
         }
-        set(m, CSTATUS + i * 24, BIT(8) | (m->incomplete ? 0 : BIT(16)));
+        set(m, CSTATUS + bank + i * 24, BIT(8) | (m->incomplete ? 0 : BIT(16)));
         if (partial && i + 1 == m->partial_words) return;
     }
-    set(m, STATUS, 1); set(m, TCS + 4, get(m, TCS + 4) | 1u);
+    set(m, STATUS + bank, 1); set(m, TCS + 4, get(m, TCS + 4) | BIT(slot));
     m->pending = 0;
+}
+static unsigned active_slot(struct mock *m)
+{
+    for (unsigned s = 0; s < 3; s++)
+        if (get(m, CTRL + s * 672u) & BIT(24)) return s;
+    return 0;
 }
 static uint32_t read32(void *cookie, uint32_t off)
 {
@@ -99,33 +106,36 @@ static uint32_t read32(void *cookie, uint32_t off)
     assert(++m->reads < 100000);
     if (off == RESPONSE) m->response_reads++;
     if (off && off == m->allones) return 0xffffffffu;
-    if (m->pending && (!m->hold_at || m->triggers != m->hold_at)) execute(m, 0);
+    if (m->pending && (!m->hold_at || m->triggers != m->hold_at)) execute_slot(m, active_slot(m), 0);
     return get(m, off) ^ ((off == RESPONSE && m->response_drift &&
         (m->response_reads & 1u)) ? 1u : 0u);
 }
 static void write32(void *cookie, uint32_t off, uint32_t value)
 {
     struct mock *m = cookie;
-    assert(off >= TCS && off < TCS + 672 && !(off & 3));
+    assert(off >= TCS && off < TCS + 3 * 672 && !(off & 3));
     m->writes++;
     if (off == MSG + 8) m->data_writes++;
     if (off == m->drop) return;
     if (m->cleanup_block && m->triggers && off == WAIT && value == m->original[WAIT / 4]) return;
     if (off == TCS + 8) { set(m, TCS + 4, get(m, TCS + 4) & ~value); return; }
     set(m, off, value);
-    if (off == CTRL && (value & BIT(24))) {
-        unsigned n = 0;
-        assert(m->triggers < 32);
-        for (unsigned i = 0; i < 16; i++) if (get(m,ENABLE) & BIT(i)) {
-            assert(n < 3);
-            m->command[m->triggers][n++] = get(m,MSG + i*24 + 4);
+    for (unsigned s = 0; s < 3; s++) {
+        uint32_t bank = s * 672u;
+        if (off == CTRL + bank && (value & BIT(24))) {
+            unsigned n = 0;
+            assert(m->triggers < 32);
+            for (unsigned i = 0; i < 16; i++) if (get(m, ENABLE + bank) & BIT(i)) {
+                assert(n < 3);
+                m->command[m->triggers][n++] = get(m, MSG + bank + i * 24 + 4);
+            }
+            m->count[m->triggers] = n;
+            m->triggers++;
+            if (m->changed_irq) set(m, TCS, get(m, TCS) | BIT(7));
+            set(m, STATUS + bank, 0); m->pending = 1;
+            if (m->triggers == m->hold_at) execute_slot(m, s, 1);
+            else execute_slot(m, s, 0);
         }
-        m->count[m->triggers] = n;
-        m->triggers++;
-        if (m->changed_irq) set(m, TCS, get(m, TCS) | BIT(7));
-        set(m, STATUS, 0); m->pending = 1;
-        if (m->triggers == m->hold_at) execute(m, 1);
-        else execute(m, 0);
     }
 }
 static void barrier(void *cookie) { ((struct mock *)cookie)->barriers++; }
@@ -173,9 +183,16 @@ static void transport_tests(void)
     assert(p.completed && m.triggers == 1 && m.vote[0][0] == 1800 && m.vote[0][1] == 1);
     restored(&m, &p); /* Restored TCS buffers did NOT restore remote votes. */
 
-    setup(&m, &p); set(&m, ENABLE + 672, 1);
+    setup(&m, &p); set(&m, ENABLE, 0x7fu); set(&m, CTRL, 0x1010000u);
+    assert(giulia_rpmh_write(&p, cmd, 2) == 0 && p.slot == 1);
+    assert(get(&m, ENABLE) == 0x7fu && get(&m, CTRL) == 0x1010000u);
+    assert(get(&m, ENABLE + 672) == 0 && get(&m, CTRL + 672) == 0);
+    assert(m.vote[0][0] == 1800 && m.vote[0][1] == 1);
+
+    setup(&m, &p);
+    for (unsigned s = 0; s < 3; s++) set(&m, ENABLE + s * 672u, 1);
     assert(giulia_rpmh_write(&p, cmd, 2) == GIULIA_RPMH_BUSY && m.writes == 0);
-    assert(p.busy_reason==GIULIA_RPMH_BUSY_SLOT && p.busy_slot==1 &&
+    assert(p.busy_reason==GIULIA_RPMH_BUSY_SLOT && p.busy_slot==0 &&
         p.busy_status==1 && p.busy_enable==1 && p.busy_control==0 && !p.triggered);
     assert(!giulia_rpmh_bus_owned(&p));
     setup(&m, &p); set(&m, TCS + 4, 2);
