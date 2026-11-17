@@ -116,7 +116,9 @@ int main(void)
     fail_at=-1;
     for(unsigned ceiling=1;ceiling<=GIULIA_BRINGUP_MHI_SNAP;ceiling++) {
         memset(&b,0,sizeof(b)); memset(trace,0,sizeof(trace)); tlen=0; cfg.max_stage=ceiling;
-        assert(!giulia_wifi_bringup_start(&b,&cfg) && b.stage==ceiling);
+        int rc=giulia_wifi_bringup_start(&b,&cfg);
+        if(rc || b.stage!=ceiling)fprintf(stderr,"ceiling=%u rc=%d actual=%u\n",ceiling,rc,b.stage);
+        assert(!rc && b.stage==ceiling);
         assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_RETAINED && !host_on && !noc_owned);
     }
     cfg.max_stage=0;

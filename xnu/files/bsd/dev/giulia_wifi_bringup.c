@@ -126,6 +126,7 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     b->stage = GIULIA_BRINGUP_MHI_SNAP;
     rc = giulia_mhi_snapshot(&b->cfg.mhi, GIULIA_MHI_SNAPSHOT_REQUIRED, &b->mhi);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_MHI_SNAP, GIULIA_BRINGUP_MHI, rc);
+    if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_READY;
     return GIULIA_BRINGUP_OK;
