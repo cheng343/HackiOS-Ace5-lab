@@ -36,7 +36,7 @@ struct wb_map { uintptr_t allocation, address; vm_size_t size; };
 static struct {
     struct wb_map shared, gcc, tcsr, tlmm, rsc, db, gic, msg, ipcc;
     struct wb_map parf, phy, dbi, atu, cfg, bar0;
-    struct wb_map crm, qos_pcie, qos_gem;
+    struct wb_map crm, qos_pcie, qos_gem, sm;
     volatile struct loader_firmware_quiet *quiet;
     struct giulia_wifi_bringup bringup;
     struct giulia_crm crm_dev;
@@ -196,7 +196,7 @@ static struct wb_map *link_reg(unsigned reg)
     if (reg == GIULIA_LINK_ATU) return &wb.atu;
     return &wb.cfg;
 }
-static uint32_t wb_dbg_r32[3], wb_dbg_r16[3], wb_dbi_snap[36];
+static uint32_t wb_dbg_r32[3], wb_dbg_r16[3], wb_dbi_snap[41];
 static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
 {
     uint32_t v = wb_mmio(link_reg(r), off);
@@ -239,6 +239,11 @@ static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
         wb_dbi_snap[33] = wb_mmio(&wb.parf, 0x230u);
         wb_dbi_snap[34] = wb_mmio(&wb.parf, 0x3c0u);
         wb_dbi_snap[35] = wb_mmio(&wb.parf, 0x630u);
+        wb_dbi_snap[36] = wb_mmio(&wb.cfg, 0x0u);
+        wb_dbi_snap[37] = wb_mmio(&wb.sm, 0x1000u);
+        wb_dbi_snap[38] = wb_mmio(&wb.sm, 0x1040u);
+        wb_dbi_snap[39] = wb_mmio(&wb.sm, 0x1090u);
+        wb_dbi_snap[40] = wb_mmio(&wb.sm, 0x109cu);
     }
     return v;
 }
@@ -412,11 +417,12 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     wb_map(&wb.crm, GIULIA_NOC_CRM_PHYS, GIULIA_NOC_CRM_SIZE, VM_WIMG_IO);
     wb_map(&wb.qos_pcie, GIULIA_QOS_PCIE_PHYS, GIULIA_QOS_PCIE_SIZE, VM_WIMG_IO);
     wb_map(&wb.qos_gem, GIULIA_QOS_GEM_PHYS, GIULIA_QOS_GEM_SIZE, VM_WIMG_IO);
+    wb_map(&wb.sm, GIULIA_NOC_SM_PHYS, 0x2000u, VM_WIMG_IO);
     if (!wb.gcc.address || !wb.tcsr.address || !wb.tlmm.address || !wb.rsc.address ||
         !wb.db.address || !wb.gic.address || !wb.msg.address || !wb.ipcc.address ||
         !wb.parf.address || !wb.phy.address || !wb.dbi.address || !wb.atu.address ||
         !wb.cfg.address || !wb.bar0.address || !wb.crm.address ||
-        !wb.qos_pcie.address || !wb.qos_gem.address) {
+        !wb.qos_pcie.address || !wb.qos_gem.address || !wb.sm.address) {
         wb_log("ace5-wifi-bringup: MMIO mapping failed\n");
         goto done;
     }
@@ -500,9 +506,10 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
             wb_dbi_snap[12], wb_dbi_snap[13], wb_dbi_snap[14], wb_dbi_snap[15], wb_dbi_snap[16], wb_dbi_snap[17],
             wb_dbi_snap[18], wb_dbi_snap[19], wb_dbi_snap[20], wb_dbi_snap[21], wb_dbi_snap[22], wb_dbi_snap[23],
             wb_dbi_snap[24], wb_dbi_snap[25], wb_dbi_snap[26], wb_dbi_snap[27]);
-        wb_log("ace5-wifi-bringup: parf_dbg blk=(%#x,%#x,%#x,%#x) misc=(%#x,%#x,%#x,%#x)\n",
+        wb_log("ace5-wifi-bringup: parf_dbg blk=(%#x,%#x,%#x,%#x) misc=(%#x,%#x,%#x,%#x) sm=(%#x,%#x,%#x,%#x,%#x)\n",
             wb_dbi_snap[28], wb_dbi_snap[29], wb_dbi_snap[30], wb_dbi_snap[31],
-            wb_dbi_snap[32], wb_dbi_snap[33], wb_dbi_snap[34], wb_dbi_snap[35]);
+            wb_dbi_snap[32], wb_dbi_snap[33], wb_dbi_snap[34], wb_dbi_snap[35],
+            wb_dbi_snap[36], wb_dbi_snap[37], wb_dbi_snap[38], wb_dbi_snap[39], wb_dbi_snap[40]);
     }
     if (rc == GIULIA_BRINGUP_OK) {
         if (wb.bringup.stage == GIULIA_BRINGUP_READY) {
@@ -519,7 +526,7 @@ release:
     if (wb_irq_release() && quiet && wb_quiet_req(0))
         wb_log("ace5-wifi-bringup: cleanup complete; firmware resumed (cold reboot required)\n");
 done:
-    wb_unmap(&wb.qos_gem); wb_unmap(&wb.qos_pcie); wb_unmap(&wb.crm);
+    wb_unmap(&wb.sm); wb_unmap(&wb.qos_gem); wb_unmap(&wb.qos_pcie); wb_unmap(&wb.crm);
     wb_unmap(&wb.bar0); wb_unmap(&wb.cfg); wb_unmap(&wb.atu); wb_unmap(&wb.dbi);
     wb_unmap(&wb.phy); wb_unmap(&wb.parf); wb_unmap(&wb.ipcc); wb_unmap(&wb.msg);
     wb_unmap(&wb.gic); wb_unmap(&wb.db); wb_unmap(&wb.rsc); wb_unmap(&wb.tlmm);
