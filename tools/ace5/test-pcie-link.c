@@ -55,7 +55,7 @@ static void access_check(struct fake *f, unsigned r, uint32_t o, unsigned width)
         assert(f->regs[GIULIA_LINK_PARF][0x354 / 4] == 0);
         assert(f->regs[GIULIA_LINK_PARF][0x634 / 4] == GIULIA_PCIE_LINK_ATU_PA);
         assert(f->regs[GIULIA_LINK_PARF][0x638 / 4] == 0);
-        assert(f->regs[GIULIA_LINK_PARF][0x358 / 4] == 0x80000000u);
+        assert(f->regs[GIULIA_LINK_PARF][0x358 / 4] == 0x04000000u);
         assert(f->regs[GIULIA_LINK_PARF][0x35c / 4] == 0);
         assert(!(f->regs[GIULIA_LINK_PARF][0] & BIT(29)));
         assert(f->regs[GIULIA_LINK_PARF][0x174 / 4] & BIT(4));

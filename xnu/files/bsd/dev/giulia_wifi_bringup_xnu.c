@@ -196,7 +196,7 @@ static struct wb_map *link_reg(unsigned reg)
     if (reg == GIULIA_LINK_ATU) return &wb.atu;
     return &wb.cfg;
 }
-static uint32_t wb_dbg_r32[3], wb_dbg_r16[3], wb_dbi_snap[41];
+static uint32_t wb_dbg_r32[3], wb_dbg_r16[3], wb_dbi_snap[48];
 static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
 {
     uint32_t v = wb_mmio(link_reg(r), off);
@@ -244,6 +244,13 @@ static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
         wb_dbi_snap[38] = wb_mmio(&wb.sm, 0x1040u);
         wb_dbi_snap[39] = wb_mmio(&wb.sm, 0x1090u);
         wb_dbi_snap[40] = wb_mmio(&wb.sm, 0x109cu);
+        wb_dbi_snap[41] = wb_mmio(&wb.gcc, 0x10058u);
+        wb_dbi_snap[42] = wb_mmio(&wb.gcc, 0x10064u);
+        wb_dbi_snap[43] = wb_mmio(&wb.gcc, 0x10074u);
+        wb_dbi_snap[44] = wb_mmio(&wb.gcc, 0x6b004u);
+        wb_dbi_snap[45] = wb_mmio(&wb.gcc, 0x6c000u);
+        wb_dbi_snap[46] = wb_mmio(&wb.gcc, 0x6b044u);
+        wb_dbi_snap[47] = wb_mmio(&wb.tcsr, 0x31100u);
     }
     return v;
 }
@@ -506,10 +513,11 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
             wb_dbi_snap[12], wb_dbi_snap[13], wb_dbi_snap[14], wb_dbi_snap[15], wb_dbi_snap[16], wb_dbi_snap[17],
             wb_dbi_snap[18], wb_dbi_snap[19], wb_dbi_snap[20], wb_dbi_snap[21], wb_dbi_snap[22], wb_dbi_snap[23],
             wb_dbi_snap[24], wb_dbi_snap[25], wb_dbi_snap[26], wb_dbi_snap[27]);
-        wb_log("ace5-wifi-bringup: parf_dbg blk=(%#x,%#x,%#x,%#x) misc=(%#x,%#x,%#x,%#x) sm=(%#x,%#x,%#x,%#x,%#x)\n",
+        wb_log("ace5-wifi-bringup: parf_dbg blk=(%#x,%#x,%#x,%#x) misc=(%#x,%#x,%#x,%#x) sm=(%#x,%#x,%#x,%#x,%#x) noc_clk=(%#x,%#x,%#x,%#x,%#x,%#x,%#x)\n",
             wb_dbi_snap[28], wb_dbi_snap[29], wb_dbi_snap[30], wb_dbi_snap[31],
             wb_dbi_snap[32], wb_dbi_snap[33], wb_dbi_snap[34], wb_dbi_snap[35],
-            wb_dbi_snap[36], wb_dbi_snap[37], wb_dbi_snap[38], wb_dbi_snap[39], wb_dbi_snap[40]);
+            wb_dbi_snap[36], wb_dbi_snap[37], wb_dbi_snap[38], wb_dbi_snap[39], wb_dbi_snap[40],
+            wb_dbi_snap[41], wb_dbi_snap[42], wb_dbi_snap[43], wb_dbi_snap[44], wb_dbi_snap[45], wb_dbi_snap[46], wb_dbi_snap[47]);
     }
     if (rc == GIULIA_BRINGUP_OK) {
         if (wb.bringup.stage == GIULIA_BRINGUP_READY) {
