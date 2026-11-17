@@ -274,7 +274,7 @@ static int configure_parf(struct giulia_pcie_link *s)
         put32(s, GIULIA_LINK_PARF, PARF_DBI_HI, 0, 0xffffffffu) &&
         put32(s, GIULIA_LINK_PARF, PARF_ATU_LO, GIULIA_PCIE_LINK_ATU_PA, 0xffffffffu) &&
         put32(s, GIULIA_LINK_PARF, PARF_ATU_HI, 0, 0xffffffffu) &&
-        put32(s, GIULIA_LINK_PARF, PARF_SLV_LO, 0x04000000u, 0xffffffffu) &&
+        put32(s, GIULIA_LINK_PARF, PARF_SLV_LO, 0x80000000u, 0xffffffffu) &&
         put32(s, GIULIA_LINK_PARF, PARF_SLV_HI, 0, 0xffffffffu) &&
         change32(s, GIULIA_LINK_PARF, PARF_SYS, BIT(29), 0, BIT(29)) &&
         change32(s, GIULIA_LINK_PARF, PARF_MHI, 0, BIT(4), BIT(4)) &&
