@@ -54,6 +54,10 @@ struct giulia_wifi_bringup_config {
     /* Optional hook invoked after HOST_PREPARED (e.g. CESTA/CRM/QoS setup)
      * before finishing PCIe BCR reset. Zero means NoC/QoS is ready. */
     int (*prepare_noc)(void *cookie, struct giulia_wifi_supply *supply);
+    /* Runs while host clocks/domains are still owned, after link/PHY stop.
+     * Restore QoS before its clocks. Return OK only after managed resources
+     * are withdrawn; RETAINED keeps host power, supplies and platform leases
+     * until cold reset. A negative result keeps all lower dependencies. */
     int (*release_noc)(void *cookie);
     /* Optional diagnostic stop ceiling (enum giulia_wifi_bringup_stage, 0 = full). */
     unsigned max_stage;
@@ -66,7 +70,7 @@ struct giulia_wifi_bringup {
     struct giulia_pcie_phy phy;
     struct giulia_kiwi_soc_info soc;
     struct giulia_mhi_snapshot mhi;
-    uint32_t stage, failed_stage;
+    uint32_t stage, failed_stage, noc_started;
     int error, sub_error, cleanup_error;
 };
 

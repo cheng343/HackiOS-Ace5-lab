@@ -30,7 +30,6 @@ static int fail_stop(struct giulia_wifi_bringup *b, uint32_t stage, int err, int
     b->sub_error = sub;
     ce = giulia_wifi_bringup_stop(b);
     if (ce < 0) b->cleanup_error = ce;
-    b->stage = (ce == GIULIA_BRINGUP_RETAINED) ? GIULIA_BRINGUP_HELD : GIULIA_BRINGUP_FAULT;
     return err;
 }
 
@@ -49,8 +48,13 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
         !cfg->link.write16 || !cfg->link.barrier || !cfg->link.delay_us)
         return GIULIA_BRINGUP_ARGUMENT;
 
+    if (b->stage != GIULIA_BRINGUP_IDLE && b->stage != GIULIA_BRINGUP_STOPPED)
+        return GIULIA_BRINGUP_STATE;
+    if (!!cfg->prepare_noc != !!cfg->release_noc || cfg->max_stage > GIULIA_BRINGUP_MHI_SNAP)
+        return GIULIA_BRINGUP_ARGUMENT;
+    struct giulia_wifi_bringup_config copy = *cfg;
     *b = (struct giulia_wifi_bringup){0};
-    b->cfg = *cfg;
+    b->cfg = copy;
 
     b->stage = GIULIA_BRINGUP_SUPPLY_STAGE;
     rc = giulia_wifi_supply_prepare(&b->supply, &b->cfg.supply);
@@ -59,6 +63,7 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
 
     if (b->cfg.prepare_noc) {
         b->stage = GIULIA_BRINGUP_NOC_STAGE;
+        b->noc_started = 1; /* A failed callback may have published requests. */
         rc = b->cfg.prepare_noc(b->cfg.noc_cookie, &b->supply);
         if (rc) return fail_stop(b, GIULIA_BRINGUP_NOC_STAGE, GIULIA_BRINGUP_PREREQUISITE, rc);
         if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
@@ -132,48 +137,62 @@ int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b)
     uint32_t link_base = GIULIA_LINK_EXCLUSIVE | GIULIA_LINK_RAILS_NOC_READY |
         GIULIA_LINK_CLOCKS_RC_RESET_READY;
     if (!b) return GIULIA_BRINGUP_ARGUMENT;
+    if (b->stage == GIULIA_BRINGUP_IDLE || b->stage == GIULIA_BRINGUP_STOPPED)
+        return GIULIA_BRINGUP_OK;
+    if (b->stage == GIULIA_BRINGUP_HELD) return GIULIA_BRINGUP_RETAINED;
     b->stage = GIULIA_BRINGUP_STOPPING;
+    b->cleanup_error = 0;
+#define STOP_FAILED(e) do { b->cleanup_error = (e); b->stage = GIULIA_BRINGUP_FAULT; return (e); } while (0)
 
     if (b->link.memory_enabled) {
         rc = giulia_pcie_link_mem_disable(&b->link,
             link_base | GIULIA_LINK_PHY_READY | GIULIA_LINK_PERST_RELEASED_SETTLED |
             GIULIA_LINK_USERS_QUIESCED);
-        if (rc) return GIULIA_BRINGUP_LINK;
+        if (rc) STOP_FAILED(GIULIA_BRINGUP_LINK);
     }
     if (b->supply.gpio.state == GIULIA_WGPIO_ON ||
         b->supply.gpio.state == GIULIA_WGPIO_RELEASED) {
         rc = giulia_wifi_gpio_perst_assert(&b->supply.gpio,
             GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
-        if (rc) return GIULIA_BRINGUP_GPIO;
+        if (rc) STOP_FAILED(GIULIA_BRINGUP_GPIO);
     }
     if (b->link.state != GIULIA_LINK_IDLE && b->link.state != GIULIA_LINK_STOPPED) {
         rc = giulia_pcie_link_quiesce(&b->link, GIULIA_LINK_QUIESCE_REQUIRED);
-        if (rc) return GIULIA_BRINGUP_LINK;
+        if (rc) STOP_FAILED(GIULIA_BRINGUP_LINK);
     }
     if (b->phy.state != GIULIA_PHY_IDLE && b->phy.state != GIULIA_PHY_STOPPED) {
         rc = giulia_pcie_phy_stop(&b->phy, GIULIA_PHY_STOP_REQUIRED);
-        if (rc) return GIULIA_BRINGUP_PHY;
+        if (rc) STOP_FAILED(GIULIA_BRINGUP_PHY);
     }
     if (b->link.state == GIULIA_LINK_QUIESCED) {
         rc = giulia_pcie_link_stop(&b->link, GIULIA_LINK_STOP_REQUIRED);
-        if (rc) return GIULIA_BRINGUP_LINK;
+        if (rc) STOP_FAILED(GIULIA_BRINGUP_LINK);
+    }
+    /* QoS needs the PCIe/GEM configuration clocks. In particular, power_stop
+     * restores GCC vote12: doing that first can strand the QoS owner. Never
+     * claim CESTA_RESOURCES_QUIET when the callback retained a CRM channel. */
+    if (b->noc_started) {
+        rc = b->cfg.release_noc(b->cfg.noc_cookie);
+        if (rc == GIULIA_BRINGUP_RETAINED) {
+            b->stage = GIULIA_BRINGUP_HELD;
+            return rc;
+        }
+        if (rc) STOP_FAILED(GIULIA_BRINGUP_PREREQUISITE);
+        b->noc_started = 0;
     }
     if (b->supply.power.state != GIULIA_POWER_IDLE &&
         b->supply.power.state != GIULIA_POWER_STOPPED) {
         rc = giulia_pcie_power_stop(&b->supply.power,
             GIULIA_POWER_STOP_REQUIRED | GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET);
-        if (rc) return GIULIA_BRINGUP_POWER;
-    }
-    if (b->cfg.release_noc) {
-        rc = b->cfg.release_noc(b->cfg.noc_cookie);
-        if (rc) return GIULIA_BRINGUP_PREREQUISITE;
+        if (rc) STOP_FAILED(GIULIA_BRINGUP_POWER);
     }
     rc = giulia_wifi_supply_cancel(&b->supply);
     if (rc == GIULIA_SUPPLY_RETAINED) {
         b->stage = GIULIA_BRINGUP_HELD;
         return GIULIA_BRINGUP_RETAINED;
     }
-    if (rc) return GIULIA_BRINGUP_SUPPLY;
+    if (rc) STOP_FAILED(GIULIA_BRINGUP_SUPPLY);
     b->stage = GIULIA_BRINGUP_STOPPED;
     return GIULIA_BRINGUP_OK;
+#undef STOP_FAILED
 }

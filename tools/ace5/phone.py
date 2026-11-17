@@ -305,6 +305,28 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
     return ' ace5_wifi_bringup=1' + (f' ace5_wifi_bringup_stage={stage}' if stage else '')
 
 
+def check_wifi_bringup_log(enabled, stage, text, reset_required, log):
+    if not enabled:
+        return
+    expected = stage or 11  # READY follows the ten hardware stages.
+    starts = re.findall(r'ace5-wifi-bringup: start rc=(-?\d+) stage=(\d+) max=(\d+) '
+                        r'failed=(\d+) err=(-?\d+) sub=(-?\d+) cleanup=(-?\d+)', text)
+    stops = re.findall(r'ace5-wifi-bringup: stop rc=(-?\d+) stage=(\d+)', text)
+    complete = f'ace5-wifi-bringup: requested stage complete; stage={expected} max={stage}'
+    clean = 'ace5-wifi-bringup: cleanup complete; IRQ37 restored and firmware resumed (cold reboot required)'
+    held = 'ace5-wifi-bringup: resources retained; firmware quiet and IRQ37 isolation retained until cold reboot'
+    start_ok = starts and all(tuple(map(int, row)) == (0, expected, stage, 0, 0, 0, 0) for row in starts)
+    stop_ok = stops and all(tuple(map(int, row)) in ((0, 13), (1, 14)) for row in stops)
+    # Captured logs may contain duplicate console/loader copies. Every copy
+    # must agree. A normal timed return or the old cleanup marker is not proof.
+    terminal_ok = stops and len(set(stops)) == 1 and (
+        (int(stops[0][0]) == 0 and clean in text and held not in text) or
+        (int(stops[0][0]) == 1 and held in text and clean not in text))
+    if (reset_required != 'yes' or not start_ok or not stop_ok or not terminal_ok or
+            complete not in text or 'ace5-wifi-bringup: cleanup FAILED' in text):
+        raise RuntimeError(f'Wi-Fi bringup stage/cleanup unconfirmed; preserve {log} and cold reboot before another operation')
+
+
 ap = argparse.ArgumentParser(description=__doc__)
 ap.add_argument('--serial', required=True, help='Original ADB/bootloader serial')
 sub = ap.add_subparsers(dest='command', required=True)
@@ -595,6 +617,8 @@ try:
         check_kernel_log(saved_log, log)
         if args.command == 'run':
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
+            check_wifi_bringup_log(args.wifi_bringup_test, args.wifi_bringup_stage, saved_log,
+                getvar('power-reset-required') if args.wifi_bringup_test else None, log)
             check_rpmh_read_log(args.rpmh_read_test,saved_log,
                 getvar('power-reset-required') if args.rpmh_read_test else None,log)
             if (args.aop_channel_test or args.aop_cx_vote_test) and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:

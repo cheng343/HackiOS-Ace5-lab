@@ -146,6 +146,11 @@ int main(int argc,char **argv)
             s.power.reset_attempted=1;s.power.state=GIULIA_POWER_FAULT;unsigned before=m->count;
             assert(giulia_wifi_supply_cancel(&s)==GIULIA_SUPPLY_STATE&&m->count==before);puts("Ace5 supply: unexpected later reset/owner cannot be cancelled as phase one");return 0;
         }
+        if(argc>1&&!strcmp(argv[1],"--reset-stopped")){
+            /* The board owner already stopped a later reset/PHY lifecycle.
+             * Do not re-enter power_stop or reject its historical marker. */
+            s.power.reset_attempted=1;s.power.state=GIULIA_POWER_STOPPED;
+        }
         if(argc>1&&!strcmp(argv[1],"--stop-fail")){assert(argc==3);m->stop_fail=argv[2][0];}
         rc=giulia_wifi_supply_cancel(&s);
         if(rc<0){assert(s.state==GIULIA_SUPPLY_FAULT&&s.cleanup_stage!=GIULIA_SUPPLY_NONE);assert(giulia_wifi_supply_cancel(&s)==GIULIA_SUPPLY_RETAINED);}

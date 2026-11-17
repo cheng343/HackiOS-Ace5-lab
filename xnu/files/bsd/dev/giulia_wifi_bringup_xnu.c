@@ -5,6 +5,7 @@
  * Explicitly gated behind ace5_wifi_bringup=1, cpus=1, bootcpu=1, finite timer,
  * loader firmware-quiet and IRQ37 isolation; cold reboot required afterwards.
  */
+#ifndef GIULIA_WIFI_BRINGUP_XNU_HOST_TEST
 #include <kern/clock.h>
 #include <kern/thread.h>
 #include <libkern/libkern.h>
@@ -17,6 +18,7 @@
 #include <sys/loader_firmware_quiet.h>
 #include <sys/systm.h>
 #include <vm/memory_types.h>
+#endif
 
 #include "giulia_wifi_bringup.h"
 #include "giulia_arc.h"
@@ -36,7 +38,7 @@ struct wb_map { uintptr_t allocation, address; vm_size_t size; };
 static struct {
     struct wb_map shared, gcc, tcsr, tlmm, rsc, db, gic, msg, ipcc;
     struct wb_map parf, phy, dbi, atu, cfg, bar0;
-    struct wb_map crm, qos_pcie, qos_gem, sm;
+    struct wb_map crm, qos_pcie, qos_gem;
     volatile struct loader_firmware_quiet *quiet;
     struct giulia_wifi_bringup bringup;
     struct giulia_crm crm_dev;
@@ -65,7 +67,11 @@ static void wb_log(const char *fmt, ...)
 
 static void wb_barrier(__unused void *cookie)
 {
+#ifdef GIULIA_WIFI_BRINGUP_XNU_HOST_TEST
+    wb_test_barrier();
+#else
     __asm__ volatile("dsb sy" ::: "memory");
+#endif
 }
 
 static void wb_delay(__unused void *cookie, uint32_t us) { delay(us); }
@@ -196,62 +202,20 @@ static struct wb_map *link_reg(unsigned reg)
     if (reg == GIULIA_LINK_ATU) return &wb.atu;
     return &wb.cfg;
 }
-static uint32_t wb_dbg_r32[3], wb_dbg_r16[3], wb_dbi_snap[48];
+static uint32_t wb_dbg_r32[3], wb_dbg_r16[3];
 static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
 {
-    uint32_t v = wb_mmio(link_reg(r), off);
+    uint32_t v;
     (void)c;
+    /* Only the core's requested access is allowed here. No diagnostic reads
+     * of iATU/CFG/SM before admission, even when DBI returns all ones. A CPU
+     * load can stall the bus, so record the checkpoint BEFORE issuing it. */
+    if (r == GIULIA_LINK_DBI && off == 0)
+        wb_log("ace5-wifi-bringup: DBI+0 access begin\n");
+    v = wb_mmio(link_reg(r), off);
     wb_dbg_r32[0] = r; wb_dbg_r32[1] = off; wb_dbg_r32[2] = v;
-    if (r == GIULIA_LINK_DBI && off == 0 && !wb_dbi_snap[0]) {
-        wb_dbi_snap[0] = 1;
-        wb_dbi_snap[1] = v;
-        wb_dbi_snap[2] = wb_mmio(&wb.parf, 0x350u);
-        wb_dbi_snap[3] = wb_mmio(&wb.parf, 0x358u);
-        wb_dbi_snap[4] = wb_mmio(&wb.parf, 0x634u);
-        wb_dbi_snap[5] = wb_mmio(&wb.parf, 0x000u);
-        wb_dbi_snap[6] = wb_mmio(&wb.gcc, 0x6b03cu);
-        wb_dbi_snap[7] = wb_mmio(&wb.gcc, 0x6b040u);
-        wb_dbi_snap[8] = wb_mmio(&wb.gcc, 0x6b054u);
-        wb_dbi_snap[9] = wb_mmio(&wb.gcc, 0x6b070u);
-        wb_dbi_snap[10] = wb_mmio(&wb.gcc, 0x52000u);
-        wb_dbi_snap[11] = wb_mmio(&wb.gcc, 0x52008u);
-        wb_dbi_snap[12] = wb_mmio(&wb.parf, 0x020u);
-        wb_dbi_snap[13] = wb_mmio(&wb.parf, 0x040u);
-        wb_dbi_snap[14] = wb_mmio(&wb.parf, 0x174u);
-        wb_dbi_snap[15] = wb_mmio(&wb.parf, 0x1a8u);
-        wb_dbi_snap[16] = wb_mmio(&wb.parf, 0x1b0u);
-        wb_dbi_snap[17] = wb_mmio(&wb.parf, 0x1000u);
-        wb_dbi_snap[18] = wb_mmio(&wb.gcc, 0x6b000u);
-        wb_dbi_snap[19] = wb_mmio(&wb.gcc, 0x6b01cu);
-        wb_dbi_snap[20] = wb_mmio(&wb.gcc, 0x6b020u);
-        wb_dbi_snap[21] = wb_mmio(&wb.gcc, 0x6b02cu);
-        wb_dbi_snap[22] = wb_mmio(&wb.gcc, 0x6b038u);
-        wb_dbi_snap[23] = wb_mmio(&wb.phy, 0x214u);
-        wb_dbi_snap[24] = wb_mmio(&wb.dbi, 0xf20u);
-        wb_dbi_snap[25] = wb_mmio(&wb.atu, 0x0u);
-        wb_dbi_snap[26] = wb_mmio(&wb.parf, 0x168u);
-        wb_dbi_snap[27] = wb_mmio(&wb.parf, 0x16cu);
-        wb_dbi_snap[28] = wb_mmio(&wb.parf, 0x360u);
-        wb_dbi_snap[29] = wb_mmio(&wb.parf, 0x368u);
-        wb_dbi_snap[30] = wb_mmio(&wb.parf, 0x370u);
-        wb_dbi_snap[31] = wb_mmio(&wb.parf, 0x378u);
-        wb_dbi_snap[32] = wb_mmio(&wb.parf, 0x224u);
-        wb_dbi_snap[33] = wb_mmio(&wb.parf, 0x230u);
-        wb_dbi_snap[34] = wb_mmio(&wb.parf, 0x3c0u);
-        wb_dbi_snap[35] = wb_mmio(&wb.parf, 0x630u);
-        wb_dbi_snap[36] = wb_mmio(&wb.cfg, 0x0u);
-        wb_dbi_snap[37] = wb_mmio(&wb.sm, 0x1000u);
-        wb_dbi_snap[38] = wb_mmio(&wb.sm, 0x1040u);
-        wb_dbi_snap[39] = wb_mmio(&wb.sm, 0x1090u);
-        wb_dbi_snap[40] = wb_mmio(&wb.sm, 0x109cu);
-        wb_dbi_snap[41] = wb_mmio(&wb.gcc, 0x10058u);
-        wb_dbi_snap[42] = wb_mmio(&wb.gcc, 0x10064u);
-        wb_dbi_snap[43] = wb_mmio(&wb.gcc, 0x10074u);
-        wb_dbi_snap[44] = wb_mmio(&wb.gcc, 0x6b004u);
-        wb_dbi_snap[45] = wb_mmio(&wb.gcc, 0x6c000u);
-        wb_dbi_snap[46] = wb_mmio(&wb.gcc, 0x6b044u);
-        wb_dbi_snap[47] = wb_mmio(&wb.tcsr, 0x31100u);
-    }
+    if (r == GIULIA_LINK_DBI && off == 0)
+        wb_log("ace5-wifi-bringup: DBI+0 access returned %#x\n", v);
     return v;
 }
 static void wb_link_w32(void *c, unsigned r, uint32_t off, uint32_t v) { (void)c; wb_store(link_reg(r), off, v); }
@@ -319,21 +283,21 @@ static int wb_qos_w(__unused void *c, unsigned blk, uint32_t off, uint32_t val)
 
 static int wb_release_noc(__unused void *cookie)
 {
-    int rc = 0, r;
-    if ((wb.qos.state == GIULIA_QOS_ACTIVE || wb.qos.state == GIULIA_QOS_FAULT) &&
-        (wb_mmio(&wb.gcc, 0x52000u) & (1u << 12))) {
-        r = giulia_pcie_qos_stop(&wb.qos);
-        if (r) rc = r;
+    int rc;
+    if (wb.qos.state != GIULIA_QOS_IDLE && wb.qos.state != GIULIA_QOS_STOPPED) {
+        rc = giulia_pcie_qos_stop(&wb.qos);
+        if (rc) return rc; /* Keep GEM/CRM and host clocks for a retry. */
     }
-    if (wb.gem_clk.state == GIULIA_GEM_ACTIVE || wb.gem_clk.state == GIULIA_GEM_FAULT) {
-        r = giulia_gem_clock_stop(&wb.gem_clk);
-        if (r && !rc) rc = r;
+    if (wb.gem_clk.state != GIULIA_GEM_IDLE && wb.gem_clk.state != GIULIA_GEM_STOPPED) {
+        rc = giulia_gem_clock_stop(&wb.gem_clk);
+        if (rc) return rc;
     }
     if (wb.crm_dev.state != GIULIA_CRM_IDLE && wb.crm_dev.state != GIULIA_CRM_STOPPED) {
-        r = giulia_crm_stop(&wb.crm_dev);
-        if (r < 0 && !rc) rc = r;
+        rc = giulia_crm_stop(&wb.crm_dev);
+        if (rc == GIULIA_CRM_RETAINED) return GIULIA_BRINGUP_RETAINED;
+        if (rc) return rc;
     }
-    return rc;
+    return GIULIA_BRINGUP_OK;
 }
 
 static int wb_prepare_noc(__unused void *cookie, struct giulia_wifi_supply *supply)
@@ -387,7 +351,7 @@ static int wb_prepare_noc(__unused void *cookie, struct giulia_wifi_supply *supp
     wb.noc_step = 5;
     rc = giulia_pcie_qos_start(&wb.qos, &qos_io, GIULIA_QOS_REQUIRED);
     wb.qos_rc = rc;
-    if (rc) { wb.noc_rc = rc; (void)wb_release_noc(cookie); return rc; }
+    if (rc) { wb.noc_rc = rc; return rc; }
 
     wb.noc_step = 0; wb.noc_rc = 0;
     return 0;
@@ -424,12 +388,11 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     wb_map(&wb.crm, GIULIA_NOC_CRM_PHYS, GIULIA_NOC_CRM_SIZE, VM_WIMG_IO);
     wb_map(&wb.qos_pcie, GIULIA_QOS_PCIE_PHYS, GIULIA_QOS_PCIE_SIZE, VM_WIMG_IO);
     wb_map(&wb.qos_gem, GIULIA_QOS_GEM_PHYS, GIULIA_QOS_GEM_SIZE, VM_WIMG_IO);
-    wb_map(&wb.sm, GIULIA_NOC_SM_PHYS, 0x2000u, VM_WIMG_IO);
     if (!wb.gcc.address || !wb.tcsr.address || !wb.tlmm.address || !wb.rsc.address ||
         !wb.db.address || !wb.gic.address || !wb.msg.address || !wb.ipcc.address ||
         !wb.parf.address || !wb.phy.address || !wb.dbi.address || !wb.atu.address ||
         !wb.cfg.address || !wb.bar0.address || !wb.crm.address ||
-        !wb.qos_pcie.address || !wb.qos_gem.address || !wb.sm.address) {
+        !wb.qos_pcie.address || !wb.qos_gem.address) {
         wb_log("ace5-wifi-bringup: MMIO mapping failed\n");
         goto done;
     }
@@ -490,36 +453,12 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         wb.bringup.link.stage, wb.bringup.link.failure_stage, wb.bringup.link.error,
         wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2],
         wb_dbg_r16[0], wb_dbg_r16[1], wb_dbg_r16[2]);
-    if (wb.bringup.stage >= GIULIA_BRINGUP_PHY_START && wb.bringup.stage <= GIULIA_BRINGUP_READY) {
-        wb_log("ace5-wifi-bringup: parf sys=%#x pm=%#x phy=%#x mhi=%#x halt=%#x ltssm=%#x mask=%#x type=%#x\n",
-            wb_mmio(&wb.parf, 0x000u), wb_mmio(&wb.parf, 0x020u), wb_mmio(&wb.parf, 0x040u),
-            wb_mmio(&wb.parf, 0x174u), wb_mmio(&wb.parf, 0x1a8u), wb_mmio(&wb.parf, 0x1b0u),
-            wb_mmio(&wb.parf, 0x22cu), wb_mmio(&wb.parf, 0x1000u));
-        wb_log("ace5-wifi-bringup: parf dbi=%#x/%#x slv=%#x/%#x atu=%#x/%#x gcc_axi=%#x/%#x/%#x/%#x\n",
-            wb_mmio(&wb.parf, 0x350u), wb_mmio(&wb.parf, 0x354u),
-            wb_mmio(&wb.parf, 0x358u), wb_mmio(&wb.parf, 0x35cu),
-            wb_mmio(&wb.parf, 0x634u), wb_mmio(&wb.parf, 0x638u),
-            wb_mmio(&wb.gcc, 0x6b020u), wb_mmio(&wb.gcc, 0x6b02cu),
-            wb_mmio(&wb.gcc, 0x6b038u), wb_mmio(&wb.gcc, 0x6b01cu));
-    }
     wb_log("ace5-wifi-bringup: root=%#x ep=%#x link_sts=%#x bar0=%#x/%#x\n",
         wb.bringup.link.root_id, wb.bringup.link.endpoint_id,
         wb.bringup.link.link_status, wb.bringup.link.bar0_mask, wb.bringup.link.bar0_mask_hi);
-    if (wb_dbi_snap[0]) {
-        wb_log("ace5-wifi-bringup: dbi0=%#x parf=(%#x,%#x,%#x,%#x) gcc=(%#x,%#x,%#x,%#x,%#x,%#x)\n",
-            wb_dbi_snap[1], wb_dbi_snap[2], wb_dbi_snap[3], wb_dbi_snap[4], wb_dbi_snap[5],
-            wb_dbi_snap[6], wb_dbi_snap[7], wb_dbi_snap[8], wb_dbi_snap[9], wb_dbi_snap[10], wb_dbi_snap[11]);
-        wb_log("ace5-wifi-bringup: dbi_extra parf2=(%#x,%#x,%#x,%#x,%#x,%#x) gcc2=(%#x,%#x,%#x,%#x,%#x) phy=%#x win=(%#x,%#x,%#x,%#x)\n",
-            wb_dbi_snap[12], wb_dbi_snap[13], wb_dbi_snap[14], wb_dbi_snap[15], wb_dbi_snap[16], wb_dbi_snap[17],
-            wb_dbi_snap[18], wb_dbi_snap[19], wb_dbi_snap[20], wb_dbi_snap[21], wb_dbi_snap[22], wb_dbi_snap[23],
-            wb_dbi_snap[24], wb_dbi_snap[25], wb_dbi_snap[26], wb_dbi_snap[27]);
-        wb_log("ace5-wifi-bringup: parf_dbg blk=(%#x,%#x,%#x,%#x) misc=(%#x,%#x,%#x,%#x) sm=(%#x,%#x,%#x,%#x,%#x) noc_clk=(%#x,%#x,%#x,%#x,%#x,%#x,%#x)\n",
-            wb_dbi_snap[28], wb_dbi_snap[29], wb_dbi_snap[30], wb_dbi_snap[31],
-            wb_dbi_snap[32], wb_dbi_snap[33], wb_dbi_snap[34], wb_dbi_snap[35],
-            wb_dbi_snap[36], wb_dbi_snap[37], wb_dbi_snap[38], wb_dbi_snap[39], wb_dbi_snap[40],
-            wb_dbi_snap[41], wb_dbi_snap[42], wb_dbi_snap[43], wb_dbi_snap[44], wb_dbi_snap[45], wb_dbi_snap[46], wb_dbi_snap[47]);
-    }
     if (rc == GIULIA_BRINGUP_OK) {
+        wb_log("ace5-wifi-bringup: requested stage complete; stage=%u max=%u\n",
+            wb.bringup.stage, wb.max_stage);
         if (wb.bringup.stage == GIULIA_BRINGUP_READY) {
             wb_log("ace5-wifi-bringup: soc raw=%#x fam=%u dev=%#x maj=%u min=%u fw=%s mhi_valid=%#x\n",
                 wb.bringup.soc.raw, wb.bringup.soc.family, wb.bringup.soc.device,
@@ -531,14 +470,27 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     }
 
 release:
-    if (wb_irq_release() && quiet && wb_quiet_req(0))
-        wb_log("ace5-wifi-bringup: cleanup complete; firmware resumed (cold reboot required)\n");
+    if (wb.guard_failed || wb.bringup.cleanup_error ||
+        wb.bringup.stage == GIULIA_BRINGUP_FAULT) {
+        wb_log("ace5-wifi-bringup: cleanup FAILED; resources/IRQ37/firmware quiet retained until cold reboot\n");
+        goto retained;
+    }
+    if (wb.bringup.stage == GIULIA_BRINGUP_HELD) {
+        wb_log("ace5-wifi-bringup: resources retained; firmware quiet and IRQ37 isolation retained until cold reboot\n");
+        goto retained;
+    }
+    if (!wb_irq_release() || (quiet && !wb_quiet_req(0))) {
+        wb_log("ace5-wifi-bringup: cleanup FAILED; IRQ/firmware restoration unconfirmed, mappings retained until cold reboot\n");
+        goto retained;
+    }
+    wb_log("ace5-wifi-bringup: cleanup complete; IRQ37 restored and firmware resumed (cold reboot required)\n");
 done:
-    wb_unmap(&wb.sm); wb_unmap(&wb.qos_gem); wb_unmap(&wb.qos_pcie); wb_unmap(&wb.crm);
+    wb_unmap(&wb.qos_gem); wb_unmap(&wb.qos_pcie); wb_unmap(&wb.crm);
     wb_unmap(&wb.bar0); wb_unmap(&wb.cfg); wb_unmap(&wb.atu); wb_unmap(&wb.dbi);
     wb_unmap(&wb.phy); wb_unmap(&wb.parf); wb_unmap(&wb.ipcc); wb_unmap(&wb.msg);
     wb_unmap(&wb.gic); wb_unmap(&wb.db); wb_unmap(&wb.rsc); wb_unmap(&wb.tlmm);
     wb_unmap(&wb.tcsr); wb_unmap(&wb.gcc); wb_unmap(&wb.shared);
+retained:
     thread_terminate(current_thread());
 }
 
@@ -557,7 +509,8 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("bootcpu", &cpu, sizeof(cpu));
     PE_parse_boot_argn("loader_return_after", &seconds, sizeof(seconds));
     PE_parse_boot_argn("ace5_wifi_bringup_stage", &wb.max_stage, sizeof(wb.max_stage));
-    if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 || seconds < 10 || seconds > 120) {
+    if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 ||
+        seconds < 10 || seconds > 120 || wb.max_stage > GIULIA_BRINGUP_MHI_SNAP) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
         return;
     }

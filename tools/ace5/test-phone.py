@@ -19,7 +19,8 @@ FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect
              'validate_run_timing', 'check_kernel_log', 'observe_persistent_startup', 'stop_running_kernel',
              'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments',
              'ace5_crm_test_arguments', 'ace5_pdc_test_arguments', 'ace5_cx_vote_arguments',
-             'ace5_rpmh_read_arguments', 'check_rpmh_read_log', 'check_rpmh_read_profile'}
+             'ace5_rpmh_read_arguments', 'check_rpmh_read_log', 'check_rpmh_read_profile',
+             'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log'}
 
 
 class Clock:
@@ -37,6 +38,46 @@ class Clock:
 
 
 class PhoneTests(unittest.TestCase):
+    def test_wifi_bringup_result_requires_stage_and_actual_cleanup(self):
+        check = self.namespace['check_wifi_bringup_log']
+        def report(stage=4, ceiling=4, rc=0, stop=1, end=14):
+            return (f'ace5-wifi-bringup: start rc={rc} stage={stage} max={ceiling} failed=0 err=0 sub=0 cleanup=0\n'
+                    f'ace5-wifi-bringup: requested stage complete; stage={stage} max={ceiling}\n'
+                    f'ace5-wifi-bringup: stop rc={stop} stage={end}\n')
+        held = 'ace5-wifi-bringup: resources retained; firmware quiet and IRQ37 isolation retained until cold reboot'
+        clean = 'ace5-wifi-bringup: cleanup complete; IRQ37 restored and firmware resumed (cold reboot required)'
+        good = report() + held
+        check(True, 4, good, 'yes', self.log)
+        check(True, 4, good + '\n' + good, 'yes', self.log)
+        check(True, 0, report(11, 0, stop=0, end=13) + clean, 'yes', self.log)
+        check(False, 4, '', None, self.log)
+        for text, reset in ((good, 'no'), ('', 'yes'), (held, 'yes'),
+                (report(), 'yes'), (report(stop=-4, end=12) + clean, 'yes'),
+                (report(rc=-6) + held, 'yes'), (report(3) + held, 'yes'),
+                (report(4, 0) + held, 'yes'), (report() + clean, 'yes'),
+                (report(stop=0, end=13) + held, 'yes'), (good + clean, 'yes'),
+                (good + '\nace5-wifi-bringup: cleanup FAILED; retained', 'yes'),
+                (good + '\n' + report(rc=-6), 'yes'),
+                (report() + 'ace5-wifi-bringup: cleanup complete; firmware resumed (cold reboot required)', 'yes')):
+            with self.subTest(text=text, reset=reset), self.assertRaises(RuntimeError):
+                check(True, 4, text, reset, self.log)
+
+    def test_wifi_bringup_profile_is_explicit_and_isolated(self):
+        fn = self.namespace['ace5_wifi_bringup_arguments']
+        table = self.directory / 'pdc.bin'
+        table.write_bytes(bytes(508))
+        self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4),
+                         ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4')
+        self.assertEqual(fn(False, None, 0, None, 0, True, True), '')
+        for cpu, kernel, seconds, other, live in ((0, 'kernel', 30, False, False),
+                (1, None, 30, False, False), (1, 'kernel', 0, False, False),
+                (1, 'kernel', 121, False, False), (1, 'kernel', 30, True, False),
+                (1, 'kernel', 30, False, True)):
+            with self.assertRaises(RuntimeError): fn(True, table, cpu, kernel, seconds, other, live)
+        with self.assertRaises(RuntimeError): fn(False, None, 1, 'kernel', 30, False, False, 4)
+        table.write_bytes(bytes(507))
+        with self.assertRaises(RuntimeError): fn(True, table, 1, 'kernel', 30, False, False)
+
     def test_rpmh_read_profile_uses_current_dt(self):
         fn=self.namespace['check_rpmh_read_profile']
         nodes={'/rsc':{'compatible':b'qcom,rpmh-rsc\0','reg':bytes.fromhex('17a000000001000017a100000001000017a2000000010000'),

@@ -23,6 +23,7 @@ def main():
     cases = [(drivers/f'giulia_pcie_{name}.c', root/f'tools/ace5/test-pcie-{name}.c')
              for name in ('phy', 'link', 'noc', 'qos')]
     cases += [
+        (root/'tools/ace5/test-wifi-bringup-xnu.c',),
         (drivers/'giulia_rpmh.c',drivers/'giulia_arc.c',root/'tools/ace5/test-rpmh-probe.c'),
         (drivers/'giulia_arc.c', drivers/'giulia_gem_power.c', drivers/'giulia_gem_clock.c',
          drivers/'giulia_pcie_qos.c', drivers/'giulia_rpmh.c', drivers/'giulia_wlan_rails.c',
@@ -76,7 +77,7 @@ def main():
                     subprocess.run([str(exe), '--start-fail', stage], check=True, timeout=30)
                 for stage in 'rpwcvda':
                     subprocess.run([str(exe), '--stop-fail', stage], check=True, timeout=30)
-                for scenario in ('--modes','--keep-pdc','--keep-rails','--external','--contract','--handoff','--reset-attempted','--early-stop-fail'):
+                for scenario in ('--modes','--keep-pdc','--keep-rails','--external','--contract','--handoff','--reset-attempted','--reset-stopped','--early-stop-fail'):
                     subprocess.run([str(exe), scenario], check=True, timeout=30)
                 for check in (1,2):
                     subprocess.run([str(exe), '--guard', str(check)], check=True, timeout=30)

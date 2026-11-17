@@ -4,6 +4,31 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-17：阶段 5 黑屏后的诊断与清理修正
+
+`deb7de7` 的阶段 5 临时测试未正常返回，loader 结果与日志获取均超时；
+没有本轮精确故障地址，不能确定首次 DBI load 或后续诊断 load 谁先卡住。
+阶段 5、链路训练、无线固件和联网仍未通过验证。
+
+删除首次 `DBI+0` 访问附带的 PARF/PHY/iATU/CFG/SM 等整批快照，以及
+启动返回后的额外硬件快照。回调只执行 core 请求的一笔访问，DBI+0
+访问前后分别记录检查点；返回全 F 时立即交还 core 拒绝，不追加硬件读取。
+这些改动减少了诊断引入的访问，不保证原始 DBI load 不再总线挂死。
+
+停止顺序改为链路/PHY -> NoC QoS/GEM/CRM -> host power -> supply。
+NoC 清理遇到第一个失败即保留下面的依赖；QoS 不因 vote12 消失而被跳过。
+CRM empty-start 的 RETAINED 必须向上传递，保留 host power、供电、映射、
+IRQ37 隔离和 firmware-quiet 到冷重启，不宣称 CESTA 请求已撤销。
+仅已完成 power_stop 的历史 reset_attempted 才允许继续 supply cancel；
+仍活跃或故障的 later reset 继续阻止下层清理。
+
+清理失败不再恢复固件或解除映射，并记录 `cleanup FAILED`。正常恢复与
+有意保留资源分别有独立终止标记。CLI 必须核对请求阶段、start/stop 返回值、
+对应终止标记及 loader 冷重启门控；仅定时返回或旧的 cleanup 提示不算通过。
+新回归覆盖真实 XNU 入口的单次 DBI 读取、资源保留、IRQ/quiet 恢复失败、
+NoC 清理顺序，以及 coordinator 的阶段停止、保留 CRM 和失败恢复。
+C 回归与完整 XNU 编译在云端执行，源码修改本身不代表真机修复成功。
+
 ## 2026-11-17：阶段 5 的下游 PARF 地址配置候选修正（未实机验证）
 
 对照固定版本的[一加原厂 `msm_pcie_enable_link`](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/pci/controller/pci-msm.c#L6056)，
@@ -33,7 +58,7 @@ XNU 云编译以及真机阶段 5 结果仍待执行。
 
 ## 2026-11-17：Wi-Fi Bring-up 阶段 1–4 真机通过与阶段 5（DBI+0）卡点排查记录
 
-本阶段在真机 `PKG110`（SM8650 / `giulia`）上以临时 RAM boot（`--wifi-bringup-test --wifi-bringup-stage N`）推进硬件上电序列，当前**阶段 1–4 已真机验证通过**，**阶段 5（`LINK_PREPARE`，读取 `DBI 0x60000000 + 0`）仍未通过**，代码已恢复到不会触发总线卡死的安全默认值（`PARF_SLV_LO = 0x04000000`）并暂停修改。
+本阶段在真机 `PKG110`（SM8650 / `giulia`）上以临时 RAM boot（`--wifi-bringup-test --wifi-bringup-stage N`）推进硬件上电序列。**阶段 1–4 曾到达启动检查点，完整清理并未通过**：阶段 4 日志在 `start rc=0 stage=4` 后有 `stop rc=-4`，旧的 cleanup 提示不足以证明恢复成功。**阶段 5（`LINK_PREPARE`，读取 `DBI 0x60000000 + 0`）仍未通过**；64 MiB slave window 的旧完整地址组合曾返回全 F，后续局部 decoder 候选也已发生超时，不能把窗口大小本身称为防挂死保证。
 
 ### 1. 已真机通过的阶段（Stage 1–4）
 - **Stage 1（Supply，`904c362`）**：`giulia_wifi_bringup_xnu.c` 自动识别继承的 `VOTES0 & (1u << 22)`（`RCHNG_HANDOFF`）并传入 `GIULIA_SUPPLY_RCHNG_HANDOFF`。`supply`（GPIO + AOP + PDC 10/10 + 7 路 VRM 电源轨 + `CPU_NOC` + `WLAN_ON` + `giulia_pcie_power_prepare_host`）与 `giulia_pcie_power_finish_reset` 真机通过（`20261116-185947-run.log`：`supply state=2 failed=0 err=0`）。

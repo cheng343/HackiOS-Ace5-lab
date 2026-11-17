@@ -43,9 +43,11 @@ int giulia_wifi_supply_cancel(struct giulia_wifi_supply *p)
     if (__atomic_load_n(&supply_owner, __ATOMIC_ACQUIRE) != (uintptr_t)p) return GIULIA_SUPPLY_STATE;
     if (p->state == GIULIA_SUPPLY_HELD) return GIULIA_SUPPLY_RETAINED;
     if (p->state == GIULIA_SUPPLY_HANDED_OFF) return GIULIA_SUPPLY_STATE;
-    /* This entry never finishes reset/starts PHY. Refuse an unexpected later
-     * user rather than claiming it is safe to remove its supplies. */
-    if (p->power.reset_attempted || p->power.state == GIULIA_POWER_READY || p->power.state == GIULIA_POWER_PIPE_ON)
+    /* This entry never finishes reset/starts PHY. A later board owner must
+     * stop that lifecycle first; reset_attempted alone is historical once
+     * power_stop completed. Never cancel a live/failed later power user. */
+    if ((p->power.reset_attempted && p->power.state != GIULIA_POWER_STOPPED) ||
+        p->power.state == GIULIA_POWER_READY || p->power.state == GIULIA_POWER_PIPE_ON)
         return GIULIA_SUPPLY_STATE;
     p->state = GIULIA_SUPPLY_STOPPING; p->cleanup_error = p->cleanup_driver_error = 0;
 #define VALID(s) do { if ((err = external(p,(s)))) return bad_cleanup(p,err,0); } while (0)
