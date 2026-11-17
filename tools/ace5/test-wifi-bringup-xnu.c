@@ -75,7 +75,10 @@ static void wb_test_barrier(void)
     }
     if(wb.gic.address) {
         uint32_t *g=(void *)wb.gic.address;
-        if(g[0x184/4]) { assert(g[0x184/4]==WB_IRQ);gic_enabled&=~WB_IRQ;g[0x184/4]=0; }
+        if(g[0x184/4]) {
+            assert(g[0x184/4]==WB_IRQ);gic_enabled&=~WB_IRQ;
+            g[0x184/4]=0;g[0x104/4]=gic_enabled;
+        }
         if(g[0x104/4]!=gic_enabled) { assert(g[0x104/4]==WB_IRQ);gic_enabled|=WB_IRQ; }
         g[0x104/4]=gic_enabled;
     }
