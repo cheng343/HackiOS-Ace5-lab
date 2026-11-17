@@ -1,8 +1,38 @@
 # Ace 5 Wi-Fi 移植状态
 
-核对日期：2026-11-16。本文记录源码和 Android 只读采集所得证据；不表示
+核对日期：2026-11-17。本文记录源码和 Android 只读采集所得证据；不表示
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
+
+## 2026-11-17：Wi-Fi Bring-up 阶段 1–4 真机通过与阶段 5（DBI+0）卡点排查记录
+
+本阶段在真机 `PKG110`（SM8650 / `giulia`）上以临时 RAM boot（`--wifi-bringup-test --wifi-bringup-stage N`）推进硬件上电序列，当前**阶段 1–4 已真机验证通过**，**阶段 5（`LINK_PREPARE`，读取 `DBI 0x60000000 + 0`）仍未通过**，代码已恢复到不会触发总线卡死的安全默认值（`PARF_SLV_LO = 0x04000000`）并暂停修改。
+
+### 1. 已真机通过的阶段（Stage 1–4）
+- **Stage 1（Supply，`904c362`）**：`giulia_wifi_bringup_xnu.c` 自动识别继承的 `VOTES0 & (1u << 22)`（`RCHNG_HANDOFF`）并传入 `GIULIA_SUPPLY_RCHNG_HANDOFF`。`supply`（GPIO + AOP + PDC 10/10 + 7 路 VRM 电源轨 + `CPU_NOC` + `WLAN_ON` + `giulia_pcie_power_prepare_host`）与 `giulia_pcie_power_finish_reset` 真机通过（`20261116-185947-run.log`：`supply state=2 failed=0 err=0`）。
+- **Stage 2（NoC / CRM / ARC / GEM / QoS，`88a5844`）**：接入 `wb_prepare_noc`（`CRM FIXED_500_800` + `xo.lvl=3, cx.lvl=2` + `giulia_gem_clock_start` + `giulia_pcie_qos_start`）和 `--wifi-bringup-stage`，stage 2 真机通过（`20261116-193754-run.log`：`noc step=0 rc=0 crm=0 arc=0 gem=0 qos=0(1,0xb008,0x30)`）。
+- **Stage 4（QMP PHY + PIPE 时钟，`b2af74a`）**：BCR 复位后清 `PARF_INT_MASK (0x22c)` 与 `PARF_PHY (0x040 bit 0)`，并**将 `PHY_START`（stage 4，开启 `PIPE_CLK`）调整到 `LINK_PREPARE`（stage 5，访问 `DBI 0x60000000`）之前**；stage 4 真机通过（`20261117-122214-run.log` / `20261117-123547-run.log`：`start rc=0 stage=4 max=4`）。
+
+### 2. Stage 5（`DBI+0`）真机快照与已排除项
+- **已验证正常的状态（`20261117-133356-run.log`、`20261117-135307-run.log`、`20261117-140631-run.log`、`20261117-194651-run.log`）**：
+  - `CORE_GDSC (0x6b004) = 0xf8282801`、`PHY_GDSC (0x6c000) = 0xf8282801`（均已上电）；
+  - `GCC_PCIE_0_BCR (0x6b000) = 0`（已解复位）；
+  - `GCC_PCIE_0` 分支时钟全部 `CLK_OFF=0`：`Q2A (0x6b01c)=0`、`SLV_AXI (0x6b020)=0`、`MSTR_AXI (0x6b02c)=0x200000`、`CFG_AHB (0x6b038)=0`、`AUX (0x6b03c)=0`、`PIPE (0x6b040)=0x10c00`、`PIPE_DIV2 (0x6b044)=0x3c82020`、`RCHNG (0x6b054)=0`、`PIPE_MUX (0x6b070)=0`；
+  - `VOTES0 (0x52000) = 0xf8357f`、`VOTES1 (0x52008) = 0x423c027f`、`TCSR clkref (0x31100) = 0x1`、`PHY_STATUS (0x214) = 0x86`（`BIT(6)=0`）；
+  - `PARF` 已写入并读回：`PARF_TYPE (0x1000)=0x4`、`PARF_DBI_LO (0x350)=0x60000000`、`PARF_ATU_LO (0x634)=0x60001000`、`PARF_SYS (0x000)=0x361c`、`PARF_PM (0x020)=0`、`PARF_PHY (0x040)=0x900`、`PARF_MHI (0x174)=0x13`、`PARF_HALT (0x1a8)=0x80000014`、`PARF_BLOCK_SLV_AXI_* (0x360/0x368/0x370/0x378) = 0`。
+- **关键对比现象**：
+  - `PARF_SLV_LO/HI (0x358/0x35c) = 0x04000000 / 0`（匹配本机 DT `qcom,slv-addr-space-size = <0x4000000>`）时**不卡死**，但 `DBI (0x60000000)`、`ELBI (0x60000f20)`、`ATU (0x60001000)`、`CFG (0x60100000)` 全部返回 `0xffffffff`；
+  - `PARF_SLV_LO/HI = 0 / 0x80000000`（`b2af74a`、`4692da9`）或 `0x80000000 / 0`（`2dbec91`，run `44029344041`）时，读 `DBI+0 (0x60000000)` **直接触发 AXI 总线挂死**；
+  - 在 `PARF_SYS_CTRL` 补设 `CORE_CLK_CGC_DIS (BIT(6))` 后测试 `0 / 0x80000000`（`4692da9`，run `44078172530`）依然挂死。
+
+### 3. 踩坑与要点记录
+1. **绝对不要在 `cleanup` 之后读 PCIe/PHY MMIO**：`giulia_wifi_bringup_start()` 失败返回前会先执行 `cleanup` 关掉 `GDSC` 和时钟。`6bb934c`（run `44022698316`）在失败后读取 `ELBI/ATU/PARF/PHY` 导致直接挂死；必须像 `13048e7` 那样把快照采集放在 `wb_link_r32` 首次读 `DBI+0` 时（`cleanup` 前）。
+2. **总线挂死后的硬重启方式**：出现 AXI 卡死黑屏后，单按电源键可能无法唤醒，需**同时长按「电源键 + 音量上键」15–20 秒**触发 PMIC 硬复位回到 Android。
+3. **`PARF_SLV_ADDR_SPACE_SIZE_V2` 的门控/路由行为**：`0x04000000`（64 MB）疑似未把 `0x60000000` 转发到 DWC（或 DWC 未响应而 PARF 返回全 F），而扩大窗口到 `0x80000000` 会让访问真正打进 DWC 并挂死。
+4. **后续继续排查的三个切入点**：
+   - **`pcie_sm (0x1d07000)` 未初始化**：本机 DT `/soc/qcom,pcie@1c00000` 包含 `qcom,pcie-sm-seq` / `qcom,pcie-sm-branch-seq`（`compatible = "qcom,pci-msm"`），而实测 `0x1d07000 + 0x1000/0x1040/0x1090/0x109c` 全为 `0`（`20261117-140631-run.log`）；
+   - **NoC AXI 时钟分支处于 `HW_CTL=1, CLK_OFF=1`**：`0x10058`（`GCC_CNOC_PCIE_SF_AXI_CLK = 0x80000002`）、`0x10064`（`GCC_AGGRE_NOC_PCIE_AXI_CLK = 0x80000002`）、`0x10074`（`GCC_DDRSS_PCIE_SF_QTB_CLK = 0x80300002`）；
+   - **其他复位/权限**：核对 `GCC_PCIE_0_LINK_DOWN_BCR` 状态，以及 `0x60000000` 是否受 QHEE/TZ 访问控制限制。
 
 ## 2026-11-16：补充正式 RPMh 读请求
 
