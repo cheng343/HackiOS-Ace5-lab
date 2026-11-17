@@ -439,6 +439,18 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         wb.bringup.link.stage, wb.bringup.link.failure_stage, wb.bringup.link.error,
         wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2],
         wb_dbg_r16[0], wb_dbg_r16[1], wb_dbg_r16[2]);
+    if (wb.bringup.stage >= GIULIA_BRINGUP_PHY_START && wb.bringup.stage <= GIULIA_BRINGUP_READY) {
+        wb_log("ace5-wifi-bringup: parf sys=%#x pm=%#x phy=%#x mhi=%#x halt=%#x ltssm=%#x mask=%#x type=%#x\n",
+            wb_mmio(&wb.parf, 0x000u), wb_mmio(&wb.parf, 0x020u), wb_mmio(&wb.parf, 0x040u),
+            wb_mmio(&wb.parf, 0x174u), wb_mmio(&wb.parf, 0x1a8u), wb_mmio(&wb.parf, 0x1b0u),
+            wb_mmio(&wb.parf, 0x22cu), wb_mmio(&wb.parf, 0x1000u));
+        wb_log("ace5-wifi-bringup: parf dbi=%#x/%#x slv=%#x/%#x atu=%#x/%#x gcc_axi=%#x/%#x/%#x/%#x\n",
+            wb_mmio(&wb.parf, 0x350u), wb_mmio(&wb.parf, 0x354u),
+            wb_mmio(&wb.parf, 0x358u), wb_mmio(&wb.parf, 0x35cu),
+            wb_mmio(&wb.parf, 0x634u), wb_mmio(&wb.parf, 0x638u),
+            wb_mmio(&wb.gcc, 0x6b020u), wb_mmio(&wb.gcc, 0x6b02cu),
+            wb_mmio(&wb.gcc, 0x6b038u), wb_mmio(&wb.gcc, 0x6b01cu));
+    }
     wb_log("ace5-wifi-bringup: root=%#x ep=%#x link_sts=%#x bar0=%#x/%#x\n",
         wb.bringup.link.root_id, wb.bringup.link.endpoint_id,
         wb.bringup.link.link_status, wb.bringup.link.bar0_mask, wb.bringup.link.bar0_mask_hi);
