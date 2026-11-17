@@ -196,12 +196,26 @@ static struct wb_map *link_reg(unsigned reg)
     if (reg == GIULIA_LINK_ATU) return &wb.atu;
     return &wb.cfg;
 }
-static uint32_t wb_dbg_r32[3], wb_dbg_r16[3];
+static uint32_t wb_dbg_r32[3], wb_dbg_r16[3], wb_dbi_snap[12];
 static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
 {
     uint32_t v = wb_mmio(link_reg(r), off);
     (void)c;
     wb_dbg_r32[0] = r; wb_dbg_r32[1] = off; wb_dbg_r32[2] = v;
+    if (r == GIULIA_LINK_DBI && off == 0 && !wb_dbi_snap[0]) {
+        wb_dbi_snap[0] = 1;
+        wb_dbi_snap[1] = v;
+        wb_dbi_snap[2] = wb_mmio(&wb.parf, 0x350u);
+        wb_dbi_snap[3] = wb_mmio(&wb.parf, 0x358u);
+        wb_dbi_snap[4] = wb_mmio(&wb.parf, 0x634u);
+        wb_dbi_snap[5] = wb_mmio(&wb.parf, 0x000u);
+        wb_dbi_snap[6] = wb_mmio(&wb.gcc, 0x6b03cu);
+        wb_dbi_snap[7] = wb_mmio(&wb.gcc, 0x6b040u);
+        wb_dbi_snap[8] = wb_mmio(&wb.gcc, 0x6b054u);
+        wb_dbi_snap[9] = wb_mmio(&wb.gcc, 0x6b070u);
+        wb_dbi_snap[10] = wb_mmio(&wb.gcc, 0x52000u);
+        wb_dbi_snap[11] = wb_mmio(&wb.gcc, 0x52008u);
+    }
     return v;
 }
 static void wb_link_w32(void *c, unsigned r, uint32_t off, uint32_t v) { (void)c; wb_store(link_reg(r), off, v); }
@@ -454,6 +468,11 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     wb_log("ace5-wifi-bringup: root=%#x ep=%#x link_sts=%#x bar0=%#x/%#x\n",
         wb.bringup.link.root_id, wb.bringup.link.endpoint_id,
         wb.bringup.link.link_status, wb.bringup.link.bar0_mask, wb.bringup.link.bar0_mask_hi);
+    if (wb_dbi_snap[0]) {
+        wb_log("ace5-wifi-bringup: dbi0=%#x parf=(%#x,%#x,%#x,%#x) gcc=(%#x,%#x,%#x,%#x,%#x,%#x)\n",
+            wb_dbi_snap[1], wb_dbi_snap[2], wb_dbi_snap[3], wb_dbi_snap[4], wb_dbi_snap[5],
+            wb_dbi_snap[6], wb_dbi_snap[7], wb_dbi_snap[8], wb_dbi_snap[9], wb_dbi_snap[10], wb_dbi_snap[11]);
+    }
     if (rc == GIULIA_BRINGUP_OK) {
         if (wb.bringup.stage == GIULIA_BRINGUP_READY) {
             wb_log("ace5-wifi-bringup: soc raw=%#x fam=%u dev=%#x maj=%u min=%u fw=%s mhi_valid=%#x\n",
