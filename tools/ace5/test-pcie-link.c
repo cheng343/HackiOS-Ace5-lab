@@ -41,6 +41,25 @@ static int up(struct fake *f)
     return (f->regs[GIULIA_LINK_PARF][0x1b0 / 4] & BIT(8)) &&
         !f->never_link && !f->lost_link && f->link_reads >= f->link_after;
 }
+/* Model the candidate downstream aperture separately from its setup code.
+ * The CPU view starts at 0x60000000; PARF uses offsets within that aperture.
+ * A mismatched decoder produces an unmapped read, rather than magically
+ * exposing the fake register array. This model is not silicon evidence.
+ */
+static int aperture_decodes(struct fake *f, unsigned r, uint32_t o, unsigned width)
+{
+    uint64_t size, decoder, local;
+    unsigned base;
+    if (!f->cold_aperture || r == GIULIA_LINK_PARF) return 1;
+    size = ((uint64_t)f->regs[GIULIA_LINK_PARF][0x35c / 4] << 32) |
+        f->regs[GIULIA_LINK_PARF][0x358 / 4];
+    if (r == GIULIA_LINK_CFG) return 0x00100000ull + o + width <= size;
+    base = r == GIULIA_LINK_DBI ? 0x350u : 0x634u;
+    decoder = ((uint64_t)f->regs[GIULIA_LINK_PARF][(base + 4u) / 4] << 32) |
+        f->regs[GIULIA_LINK_PARF][base / 4];
+    local = (r == GIULIA_LINK_DBI ? 0ull : 0x1000ull) + o;
+    return decoder + o == local && local + width <= size;
+}
 static void access_check(struct fake *f, unsigned r, uint32_t o, unsigned width)
 {
     assert(r < 4 && o + width <= (r == GIULIA_LINK_PARF ? 0x3000u : 0x1000u));
@@ -51,10 +70,6 @@ static void access_check(struct fake *f, unsigned r, uint32_t o, unsigned width)
         /* Cold RC reset leaves DBI/ATU inaccessible until PARF setup. */
         assert(f->regs[GIULIA_LINK_PARF][0x1000 / 4] == 4);
         assert(!(f->regs[GIULIA_LINK_PARF][0x40 / 4] & 1));
-        assert(f->regs[GIULIA_LINK_PARF][0x350 / 4] == GIULIA_PCIE_LINK_DBI_PA);
-        assert(f->regs[GIULIA_LINK_PARF][0x354 / 4] == 0);
-        assert(f->regs[GIULIA_LINK_PARF][0x634 / 4] == GIULIA_PCIE_LINK_ATU_PA);
-        assert(f->regs[GIULIA_LINK_PARF][0x638 / 4] == 0);
         assert(f->regs[GIULIA_LINK_PARF][0x358 / 4] == 0x04000000u);
         assert(f->regs[GIULIA_LINK_PARF][0x35c / 4] == 0);
         assert(!(f->regs[GIULIA_LINK_PARF][0] & BIT(29)));
@@ -89,6 +104,7 @@ static uint32_t read32(void *p, unsigned r, uint32_t o)
     access_check(f, r, o, 4);
     f->reads++;
     if (r != GIULIA_LINK_PARF) f->core_reads++;
+    if (!aperture_decodes(f, r, o, 4)) return 0xffffffffu;
     v = f->regs[r][o / 4];
     if (r == GIULIA_LINK_CFG && o == 0 && f->crs_reads) {
         f->crs_reads--;
@@ -107,6 +123,7 @@ static uint16_t read16(void *p, unsigned r, uint32_t o)
     access_check(f, r, o, 2);
     f->reads++;
     if (r != GIULIA_LINK_PARF) f->core_reads++;
+    if (!aperture_decodes(f, r, o, 2)) return 0xffffu;
     v = raw16(f, r, o);
     if (r == GIULIA_LINK_DBI && o == 0x82) {
         if (f->regs[GIULIA_LINK_PARF][0x1b0 / 4] & BIT(8)) f->link_reads++;
@@ -129,6 +146,7 @@ static void write32(void *p, unsigned r, uint32_t o, uint32_t v)
     struct fake *f = p;
     access_check(f, r, o, 4);
     f->writes++;
+    assert(aperture_decodes(f, r, o, 4));
     if (r != GIULIA_LINK_PARF) f->core_writes++;
     /* A 32-bit command/status write would acknowledge W1C status bits. */
     assert(!((r == GIULIA_LINK_DBI || r == GIULIA_LINK_CFG) && o == 4));
@@ -141,7 +159,7 @@ static void write32(void *p, unsigned r, uint32_t o, uint32_t v)
     f->regs[r][o / 4] = v;
     if (r == GIULIA_LINK_DBI && o == 0x80c) f->regs[r][o / 4] &= ~BIT(17);
     if (r == GIULIA_LINK_PARF && o == 0x350 && f->check_decoders)
-        f->old_decoder = v != GIULIA_PCIE_LINK_DBI_PA;
+        f->old_decoder = v != 0;
     after_cfg(f, r);
 }
 static void write16(void *p, unsigned r, uint32_t o, uint16_t v)
@@ -149,6 +167,7 @@ static void write16(void *p, unsigned r, uint32_t o, uint16_t v)
     struct fake *f = p;
     access_check(f, r, o, 2);
     f->writes++;
+    assert(aperture_decodes(f, r, o, 2));
     if (r != GIULIA_LINK_PARF) f->core_writes++;
     if ((r == GIULIA_LINK_DBI || r == GIULIA_LINK_CFG) && o == 4) {
         assert((v & 5u) == 0); /* No IO or BME, including failures. */
@@ -183,6 +202,10 @@ static void init(struct fake *f, struct giulia_pcie_link *s)
     f->regs[GIULIA_LINK_PARF][0] = BIT(29) | 0x365eu;
     f->regs[GIULIA_LINK_PARF][0x40 / 4] = 1;
     f->regs[GIULIA_LINK_PARF][0x20 / 4] = BIT(5);
+    /* Deliberately inherit a different decoder so restore/retry tests detect
+     * any access after returning to the previous address convention. */
+    f->regs[GIULIA_LINK_PARF][0x350 / 4] = 0x60000000u;
+    f->regs[GIULIA_LINK_PARF][0x634 / 4] = 0x60001000u;
     f->regs[GIULIA_LINK_DBI][0] = 0x011317cbu;
     seed16(f, GIULIA_LINK_DBI, 4, BIT(10));
     seed16(f, GIULIA_LINK_DBI, 6, 0xa510u);
@@ -235,6 +258,29 @@ static void stop(struct fake *f, struct giulia_pcie_link *s)
         sizeof(f->regs[GIULIA_LINK_ATU])) == 0);
 }
 
+static void test_downstream_aperture(void)
+{
+    struct fake f; struct giulia_pcie_link s;
+    init(&f, &s);
+    f.regs[GIULIA_LINK_PARF][0x358 / 4] = 0x04000000u;
+    f.original[GIULIA_LINK_PARF][0x358 / 4] = 0x04000000u;
+    assert(!aperture_decodes(&f, GIULIA_LINK_DBI, 0, 4));
+    assert(!aperture_decodes(&f, GIULIA_LINK_ATU, 0, 4));
+    prepare(&f, &s);
+    assert(read32(&f, GIULIA_LINK_DBI, 0) == 0x011317cbu);
+    assert(read32(&f, GIULIA_LINK_ATU, 0) == 0);
+    /* Reproduce the previous mixed CPU-address/64 MiB profile: the model
+     * must reject it rather than return a fake working root complex. */
+    f.regs[GIULIA_LINK_PARF][0x350 / 4] = 0x60000000u;
+    f.regs[GIULIA_LINK_PARF][0x634 / 4] = 0x60001000u;
+    assert(read32(&f, GIULIA_LINK_DBI, 0) == 0xffffffffu);
+    assert(read16(&f, GIULIA_LINK_DBI, 0xe) == 0xffffu);
+    assert(read32(&f, GIULIA_LINK_ATU, 0) == 0xffffffffu);
+    f.regs[GIULIA_LINK_PARF][0x350 / 4] = 0;
+    f.regs[GIULIA_LINK_PARF][0x634 / 4] = 0x1000;
+    stop(&f, &s);
+    puts("Ace5 PCIe local aperture: mixed address profiles rejected and inherited decoder restored");
+}
 static void test_default_and_gates(void)
 {
     struct fake f; struct giulia_pcie_link s; struct giulia_pcie_link_io io;
@@ -665,6 +711,7 @@ static void test_boot_profile(void)
 
 int main(void)
 {
+    test_downstream_aperture();
     test_default_and_gates();
     test_success();
     test_busy();

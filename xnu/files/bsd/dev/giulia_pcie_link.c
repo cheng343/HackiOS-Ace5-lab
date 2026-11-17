@@ -11,6 +11,14 @@
  *   link capability, target speed and negotiated status fields.
  * arch/arm64/boot/dts/qcom/sm8650.dtsi: PCIe0 PA/ranges, x2 controller.
  * https://github.com/torvalds/linux/tree/v6.12/drivers/pci/controller/dwc
+ * The PARF decoder profile follows the downstream OnePlus PCIe0 convention:
+ * OnePlusOSS/android_kernel_oneplus_sm8650@
+ * 66305c56af1fcd7299c906c3257e585be93d93ed:
+ * drivers/pci/controller/pci-msm.c:msm_pcie_enable_link sets DBI base to zero;
+ * pineapple-pcie.dtsi supplies the 64 MiB slave aperture. CPU mappings remain
+ * at 0x60000000/0x60001000. The local iATU decoder offset is inferred from
+ * that layout; this candidate profile still requires a device test. Do not
+ * mix these local offsets with mainline's full-address/large-window profile.
  * This independently implemented probe deliberately omits Linux's DMA,
  * bus-master enable, interrupt enable and SID configuration. It supports only
  * this fixed PCIe0 layout, not an arbitrary PCI host or active OS handoff.
@@ -30,6 +38,9 @@
 #define PARF_ATU_LO 0x634u
 #define PARF_ATU_HI 0x638u
 #define PARF_TYPE 0x1000u
+#define PARF_LOCAL_DBI 0u
+#define PARF_LOCAL_ATU 0x1000u
+#define PARF_SLAVE_SIZE 0x04000000u
 #define PCI_COMMAND 0x04u
 #define PCI_STATUS 0x06u
 #define PCI_CLASS 0x0au
@@ -270,11 +281,11 @@ static int configure_parf(struct giulia_pcie_link *s)
 {
     return put32(s, GIULIA_LINK_PARF, PARF_TYPE, 4, 0xffffffffu) &&
         change32(s, GIULIA_LINK_PARF, PARF_PHY, BIT(0), 0, BIT(0)) &&
-        put32(s, GIULIA_LINK_PARF, PARF_DBI_LO, GIULIA_PCIE_LINK_DBI_PA, 0xffffffffu) &&
+        put32(s, GIULIA_LINK_PARF, PARF_DBI_LO, PARF_LOCAL_DBI, 0xffffffffu) &&
         put32(s, GIULIA_LINK_PARF, PARF_DBI_HI, 0, 0xffffffffu) &&
-        put32(s, GIULIA_LINK_PARF, PARF_ATU_LO, GIULIA_PCIE_LINK_ATU_PA, 0xffffffffu) &&
+        put32(s, GIULIA_LINK_PARF, PARF_ATU_LO, PARF_LOCAL_ATU, 0xffffffffu) &&
         put32(s, GIULIA_LINK_PARF, PARF_ATU_HI, 0, 0xffffffffu) &&
-        put32(s, GIULIA_LINK_PARF, PARF_SLV_LO, 0x04000000u, 0xffffffffu) &&
+        put32(s, GIULIA_LINK_PARF, PARF_SLV_LO, PARF_SLAVE_SIZE, 0xffffffffu) &&
         put32(s, GIULIA_LINK_PARF, PARF_SLV_HI, 0, 0xffffffffu) &&
         change32(s, GIULIA_LINK_PARF, PARF_SYS, BIT(29), 0, BIT(29)) &&
         change32(s, GIULIA_LINK_PARF, PARF_MHI, 0, BIT(4), BIT(4)) &&

@@ -4,6 +4,33 @@
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
 
+## 2026-11-17：阶段 5 的下游 PARF 地址配置候选修正（未实机验证）
+
+对照固定版本的[一加原厂 `msm_pcie_enable_link`](https://github.com/OnePlusOSS/android_kernel_oneplus_sm8650/blob/66305c56af1fcd7299c906c3257e585be93d93ed/drivers/pci/controller/pci-msm.c#L6056)，
+原厂将 `PARF_DBI_BASE_ADDR (0x350)` 写为 `0`，而本项目前一版将其写为
+CPU 物理地址 `0x60000000`，同时保留本机 DT 的 64 MiB slave window。
+这与主线 Linux 同时采用完整 CPU 地址和大窗口的配置也不一致，构成需要
+单独验证的地址模式差异；尚不能据此确认它就是总线故障的唯一原因。
+
+候选改动将 PARF 的 DBI/iATU decoder 设为 aperture 内偏移 `0/0x1000`，
+slave window 保留 `0x04000000/0`，CPU 映射仍是 `0x60000000/0x60001000`。
+DBI 的零值有原厂明确写入依据；iATU 的 `0x1000` 是依据该资源布局推导的
+候选偏移，原厂该函数没有显式编程 `PARF_ATU`，所以仍须真机读回验证。
+outbound iATU 的 host 地址不随此改动变为局部偏移：原厂
+`msm_pcie_cfg_bdf` 同样传入 CPU resource start。保留原来的只读 admission、
+IRQ/DMA 禁用、失败恢复与 `0xffffffff` 拒绝逻辑。
+
+回归夹具增加独立的候选地址解码模型，旧的“完整 CPU decoder + 64 MiB”
+组合会返回全 F；同时检查候选组合可访问夹具、stop 恢复旧 decoder，以及
+原有的写回失败和重试路径。该模型只检查候选协议和生命周期，不构成硬件
+地址行为的独立证明。提交时仅完成本地源码/非编译检查；新增 C 用例、完整
+XNU 云编译以及真机阶段 5 结果仍待执行。
+
+本轮 Android 只读核对观察到 root port `17cb:0113`、端点 PCIe 链路
+`5.0 GT/s`、宽度 `2`，系统启动完成；这些是 Android 自己的驱动状态，
+不能代替 XNU 的候选配置验证。下一次临时测试应先只到阶段 5，确认 root ID、
+能力链、DBI/iATU 读回、清理和返回 Android；通过后再推进链路训练。
+
 ## 2026-11-17：Wi-Fi Bring-up 阶段 1–4 真机通过与阶段 5（DBI+0）卡点排查记录
 
 本阶段在真机 `PKG110`（SM8650 / `giulia`）上以临时 RAM boot（`--wifi-bringup-test --wifi-bringup-stage N`）推进硬件上电序列，当前**阶段 1–4 已真机验证通过**，**阶段 5（`LINK_PREPARE`，读取 `DBI 0x60000000 + 0`）仍未通过**，代码已恢复到不会触发总线卡死的安全默认值（`PARF_SLV_LO = 0x04000000`）并暂停修改。

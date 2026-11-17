@@ -104,7 +104,11 @@ struct giulia_pcie_link {
  * for owning/enabling supplies, NoC and clocks. This is not a firmware-handoff
  * path: PERST# is asserted and the controller has been exclusively reset.
  * Admission starts with PARF-only LTSSM/IRQ checks and a PARF snapshot. It
- * establishes CPU DBI/ATU decoding before the first DBI/ATU transaction.
+ * establishes DBI/ATU decoding before the first DBI/ATU transaction. The CPU
+ * physical mappings above are distinct from the downstream PARF decoder's
+ * aperture-local offsets (DBI=0, iATU=0x1000, slave size=64 MiB). The latter
+ * profile is a candidate based on the vendor DBI convention, not a measured
+ * guarantee that a core read will complete in every handoff state.
  * A later busy/unreadable-core rejection restores only owned PARF registers;
  * it never modifies a foreign DBI/ATU. Partial PARF restoration failure keeps
  * FAULT/ownership for stop retry. This does not borrow a running link.
