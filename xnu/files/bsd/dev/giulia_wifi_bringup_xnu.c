@@ -454,7 +454,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2],
         wb_dbg_r16[0], wb_dbg_r16[1], wb_dbg_r16[2]);
     if ((wb.bringup.stage >= GIULIA_BRINGUP_PHY_START && wb.bringup.stage <= GIULIA_BRINGUP_READY) ||
-        wb.bringup.failed >= GIULIA_BRINGUP_PHY_START) {
+        wb.bringup.failed_stage >= GIULIA_BRINGUP_PHY_START) {
         wb_log("ace5-wifi-bringup: parf sys=%#x pm=%#x phy=%#x mhi=%#x halt=%#x ltssm=%#x mask=%#x type=%#x\n",
             wb_mmio(&wb.parf, 0x000u), wb_mmio(&wb.parf, 0x020u), wb_mmio(&wb.parf, 0x040u),
             wb_mmio(&wb.parf, 0x174u), wb_mmio(&wb.parf, 0x1a8u), wb_mmio(&wb.parf, 0x1b0u),
