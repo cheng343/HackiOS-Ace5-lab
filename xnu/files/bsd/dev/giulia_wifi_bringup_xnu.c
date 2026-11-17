@@ -196,7 +196,7 @@ static struct wb_map *link_reg(unsigned reg)
     if (reg == GIULIA_LINK_ATU) return &wb.atu;
     return &wb.cfg;
 }
-static uint32_t wb_dbg_r32[3], wb_dbg_r16[3], wb_dbi_snap[28];
+static uint32_t wb_dbg_r32[3], wb_dbg_r16[3], wb_dbi_snap[36];
 static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
 {
     uint32_t v = wb_mmio(link_reg(r), off);
@@ -231,6 +231,14 @@ static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
         wb_dbi_snap[25] = wb_mmio(&wb.atu, 0x0u);
         wb_dbi_snap[26] = wb_mmio(&wb.parf, 0x168u);
         wb_dbi_snap[27] = wb_mmio(&wb.parf, 0x16cu);
+        wb_dbi_snap[28] = wb_mmio(&wb.parf, 0x360u);
+        wb_dbi_snap[29] = wb_mmio(&wb.parf, 0x368u);
+        wb_dbi_snap[30] = wb_mmio(&wb.parf, 0x370u);
+        wb_dbi_snap[31] = wb_mmio(&wb.parf, 0x378u);
+        wb_dbi_snap[32] = wb_mmio(&wb.parf, 0x224u);
+        wb_dbi_snap[33] = wb_mmio(&wb.parf, 0x230u);
+        wb_dbi_snap[34] = wb_mmio(&wb.parf, 0x3c0u);
+        wb_dbi_snap[35] = wb_mmio(&wb.parf, 0x630u);
     }
     return v;
 }
@@ -492,6 +500,9 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
             wb_dbi_snap[12], wb_dbi_snap[13], wb_dbi_snap[14], wb_dbi_snap[15], wb_dbi_snap[16], wb_dbi_snap[17],
             wb_dbi_snap[18], wb_dbi_snap[19], wb_dbi_snap[20], wb_dbi_snap[21], wb_dbi_snap[22], wb_dbi_snap[23],
             wb_dbi_snap[24], wb_dbi_snap[25], wb_dbi_snap[26], wb_dbi_snap[27]);
+        wb_log("ace5-wifi-bringup: parf_dbg blk=(%#x,%#x,%#x,%#x) misc=(%#x,%#x,%#x,%#x)\n",
+            wb_dbi_snap[28], wb_dbi_snap[29], wb_dbi_snap[30], wb_dbi_snap[31],
+            wb_dbi_snap[32], wb_dbi_snap[33], wb_dbi_snap[34], wb_dbi_snap[35]);
     }
     if (rc == GIULIA_BRINGUP_OK) {
         if (wb.bringup.stage == GIULIA_BRINGUP_READY) {
