@@ -708,6 +708,12 @@ static void test_split_prepare(void)
     assert(giulia_pcie_link_stop(&s, GIULIA_LINK_STOP_REQUIRED) == 0 && f.core_reads == 1);
     assert(!memcmp(f.regs[GIULIA_LINK_PARF], f.original[GIULIA_LINK_PARF],
         sizeof(f.regs[GIULIA_LINK_PARF])));
+    init(&f, &s); io = io_for(&f);
+    assert(giulia_pcie_link_prepare_parf(&s, GIULIA_LINK_PARF_REQUIRED, &io) == 0);
+    writes = f.writes;
+    assert(giulia_pcie_link_read_root_id(&s, GIULIA_LINK_PREPARE_REQUIRED) == 0);
+    assert(s.root_id == 0x011317cbu && s.state == GIULIA_LINK_PARF_READY);
+    assert(f.core_reads == 1 && f.writes == writes && !s.core_owned);
     puts("Ace5 PCIe PARF-before-PHY / DBI-after-PIPE and PARF-only shutdown passed");
 }
 

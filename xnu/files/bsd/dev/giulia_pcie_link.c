@@ -385,7 +385,7 @@ int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *s, uint32_t flags,
     return GIULIA_LINK_OK;
 }
 
-int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
+int giulia_pcie_link_read_root_id(struct giulia_pcie_link *s, uint32_t flags)
 {
     static const struct { uint32_t offset, mask, expected; } decoder[] = {
         {PARF_TYPE, UINT32_MAX, 4u},
@@ -398,7 +398,6 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
         {PARF_SLV_HI, UINT32_MAX, 0u},
         {PARF_SYS, BIT(29), 0u}
     };
-    uint16_t unused_msi, unused_msix;
     uint32_t v;
     if (!s) return GIULIA_LINK_ARGUMENT;
     if ((flags & GIULIA_LINK_PREPARE_REQUIRED) != GIULIA_LINK_PREPARE_REQUIRED ||
@@ -421,8 +420,18 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     s->stage = GIULIA_LINK_STAGE_ADMISSION;
     s->root_id = r32(s, GIULIA_LINK_DBI, 0);
     if (s->root_id == 0xffffffffu) return record_failure(s, GIULIA_LINK_READBACK);
-    if ((s->root_id & 0xffffu) != 0x17cbu ||
-        (r16(s, GIULIA_LINK_DBI, PCI_HEADER) & 0x7fu) != 1u)
+    if ((s->root_id & 0xffffu) != 0x17cbu)
+        return record_failure(s, GIULIA_LINK_ENDPOINT);
+    return GIULIA_LINK_OK;
+}
+
+int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
+{
+    uint16_t unused_msi, unused_msix;
+    uint32_t v;
+    int rc = giulia_pcie_link_read_root_id(s, flags);
+    if (rc) return rc;
+    if ((r16(s, GIULIA_LINK_DBI, PCI_HEADER) & 0x7fu) != 1u)
         return record_failure(s, GIULIA_LINK_ENDPOINT);
     if (!capabilities(s, GIULIA_LINK_DBI, &s->root_pcie_cap,
         &unused_msi, &unused_msix)) return record_failure(s, GIULIA_LINK_CAPABILITY);

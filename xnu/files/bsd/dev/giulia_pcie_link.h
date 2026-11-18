@@ -117,6 +117,9 @@ struct giulia_pcie_link {
  */
 int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *, uint32_t prerequisites,
     const struct giulia_pcie_link_io *);
+/* Recheck the PARF decoder and perform exactly one read of DBI+0. Caller
+ * keeps the PHY/PIPE and PARF lease, and provides independent reset. */
+int giulia_pcie_link_read_root_id(struct giulia_pcie_link *, uint32_t prerequisites);
 /* Enter DBI/ATU only after the PHY and PIPE clock are ready. A busy or
  * unreadable core leaves PARF owned until the PHY is stopped.
  */

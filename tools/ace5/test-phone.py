@@ -77,6 +77,14 @@ class PhoneTests(unittest.TestCase):
                  'ace5-wifi-bringup: cesta execution sample=1 start=0x1\n'
                  'ace5-wifi-bringup: cesta START result=1 observe=0; retained until reset\n')
         check(True, 4, start, 'yes', self.log, sm_diag=4, cold_reset=True)
+        perf = (start + 'ace5-wifi-bringup: CESTA perf current=0x2 aggregate=0x2\n'
+                'ace5-wifi-bringup: CESTA follow-up rc=0\n')
+        check(True, 4, perf, 'yes', self.log, sm_diag=5, cold_reset=True)
+        dbi = (perf + 'ace5-wifi-bringup: DBI+0 access returned 0x11317cb\n'
+               'ace5-wifi-bringup: DBI root id rc=0 id=0x11317cb\n')
+        check(True, 4, dbi, 'yes', self.log, sm_diag=6, cold_reset=True)
+        with self.assertRaisesRegex(RuntimeError, 'PCIe0 root identity'):
+            check(True, 4, perf, 'yes', self.log, sm_diag=6, cold_reset=True)
         with self.assertRaisesRegex(RuntimeError, 'Guarded CESTA START'):
             check(True, 4, start + 'DBI+0 access begin', 'yes', self.log, sm_diag=4, cold_reset=True)
         with self.assertRaisesRegex(RuntimeError, 'Independent cold reset did not occur'):

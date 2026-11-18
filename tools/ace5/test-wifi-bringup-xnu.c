@@ -46,6 +46,7 @@ static uint32_t gic_enabled;
 static uint64_t watchdog_ctl;
 static unsigned watchdog_reads, watchdog_writes, watchdog_cannot_cancel;
 static unsigned cold_reset, mock_reset_response, loader_returns;
+static unsigned root_id_reads;
 static char messages[16384];
 static struct { uintptr_t va; vm_size_t size; } allocation[24];
 static void wb_test_barrier(void);
@@ -149,14 +150,26 @@ kern_return_t thread_terminate(thread_t thread) { assert(thread==current_thread(
 void loader_log_line(const char *s)
 { assert(strlen(messages)+strlen(s)<sizeof(messages));strcat(messages,s); }
 void loader_return(void) { loader_returns++; }
+int giulia_pcie_power_pipe_ready(struct giulia_pcie_power *p, uint32_t *cbcr)
+{ assert(p == &wb.bringup.supply.power); *cbcr = 0x10c00; return GIULIA_POWER_OK; }
+int giulia_pcie_link_read_root_id(struct giulia_pcie_link *s, uint32_t flags)
+{
+    assert(flags == GIULIA_LINK_PREPARE_REQUIRED && s == &wb.bringup.link);
+    assert(!wb.atu.address && !wb.cfg.address && !wb.bar0.address);
+    root_id_reads++;
+    s->root_id = wb_link_r32(0, GIULIA_LINK_DBI, 0);
+    return GIULIA_LINK_OK;
+}
 
 /* The adapter must propagate retained/failed core cleanup, independently of
  * whether its own IRQ and quiet handshakes would have succeeded. */
 int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,const struct giulia_wifi_bringup_config *cfg)
 {
     assert(wb_guard());b->cfg=*cfg;b->stage=cfg->max_stage?cfg->max_stage:GIULIA_BRINGUP_READY;
-    if (sm_diag >= WB_SM_TABLES || watchdog)
-        assert(!wb.dbi.address && !wb.atu.address && !wb.cfg.address && !wb.bar0.address);
+    if (sm_diag >= WB_SM_TABLES || watchdog) {
+        assert(!wb.atu.address && !wb.cfg.address && !wb.bar0.address);
+        assert(!!wb.dbi.address == (sm_diag == WB_SM_DBI_ID));
+    }
     if(start_rc){b->stage=GIULIA_BRINGUP_FAULT;b->cleanup_error=GIULIA_BRINGUP_SUPPLY;}
     return start_rc;
 }
@@ -228,6 +241,7 @@ static void setup(void)
     no_ack=no_resume_ack=pending_irq=lost_guard=0;gic_enabled=WB_IRQ|1;
     watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
     cold_reset=mock_reset_response=loader_returns=0;
+    root_id_reads=0;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
     allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=cx_nominal_unavailable=0;
 }
@@ -242,7 +256,7 @@ static void admission(void)
     setup();sm_diag=1;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=1;crm_all=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=2;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
-    setup();sm_diag=5;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=7;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=4;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();cold_reset=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=3;giulia_wifi_bringup_init();assert(!maps && !creates);
@@ -404,6 +418,19 @@ static void noc_after_phy(void)
     assert(sm[0] == 1 && sm[GIULIA_CESTA_START_OFFSET / 4] == 1);
     assert(strstr(messages, "cesta START result=1 observe=0; retained until reset"));
     wb.guard_failed = 0;
+    wb_map(&wb.crm_c, WB_CRM_C_PHYS, WB_CRM_C_SIZE, VM_WIMG_IO);
+    uint32_t *perf = (void *)wb.crm_c.address;
+    uint32_t *parf = (void *)wb.parf.address;
+    parf[0] = 0x361c;
+    wb.sm_diag = WB_SM_PERF;
+    assert(wb_cesta_pre_dbi() == 0 && !root_id_reads && parf[0] == 0x361c);
+    wb_map(&wb.dbi, GIULIA_PCIE_LINK_DBI_PA, 0x1000u, VM_WIMG_IO);
+    *(uint32_t *)wb.dbi.address = 0x011317cbu;
+    wb.sm_diag = WB_SM_DBI_ID;
+    assert(wb_cesta_pre_dbi() == GIULIA_LINK_PREREQUISITE && !root_id_reads);
+    perf[0xc / 4] = GIULIA_PCIE_BOOT_PERF;
+    assert(wb_cesta_pre_dbi() == 0 && root_id_reads == 1 && parf[0] == 0x365e);
+    assert(wb.bringup.link.root_id == 0x011317cbu);
     perst[1] = 2;
     assert(wb_cesta_read_cold() == GIULIA_CESTA_LEASE && wb.guard_failed);
     wb.guard_failed = 0;
@@ -426,5 +453,6 @@ int main(void)
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");
     puts("Wi-Fi XNU adapter: quiet watchdog read-only status, bounded expiry and disarm passed");
+    puts("Wi-Fi XNU adapter: CESTA current PERF gate, PARF clock bits and single DBI read passed");
     return 0;
 }
