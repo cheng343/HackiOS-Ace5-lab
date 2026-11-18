@@ -115,6 +115,7 @@ int main(void)
     assert(strcmp(trace, "SNPAYECLRTrqyelnps") == 0);
 
     tlen = 0; memset(trace, 0, sizeof(trace)); memset(&b,0,sizeof(b));
+    fail_at = -1;
     stop_fail = 'C';
     assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_POWER);
     assert(b.failed_stage == GIULIA_BRINGUP_PHY_START && b.sub_error == GIULIA_POWER_TIMEOUT);
