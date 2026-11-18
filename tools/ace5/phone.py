@@ -310,7 +310,7 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
                      (watchdog == 2 and seconds < 75)):
         raise RuntimeError('Watchdog diagnostic requires isolated Stage 4 and at least 75 seconds for expiry')
     if (cold_reset and (stage != 4 or crm_all_states or watchdog or seconds < 60 or
-                       (sm_diag, bool(sm_profile)) not in ((0, False), (4, True), (5, True), (6, True)))) or (
+                       (sm_diag, bool(sm_profile)) not in ((0, False), (4, True), (5, True), (6, True), (7, True)))) or (
                        sm_diag >= 4 and not cold_reset):
         raise RuntimeError('Cold-reset profile requires isolated Stage 4 and 60..120 seconds')
     out = ' ace5_wifi_bringup=1'
@@ -372,18 +372,25 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
                 any(row != ('1', '0') for row in results) or samples != {'0', '1'} or
                 'ace5-wifi-bringup: loader cold reset armed' not in text or
                 'ace5-wifi-bringup: cesta START write returned' not in text or
-                (sm_diag != 6 and 'DBI+0 access begin' in text)):
+                (sm_diag < 6 and 'DBI+0 access begin' in text)):
             raise RuntimeError(f'Guarded CESTA START or samples unconfirmed; preserve {log} and cold reboot')
         if sm_diag >= 5:
             followed = re.findall(r'ace5-wifi-bringup: CESTA follow-up rc=(-?\d+)', text)
             if (not followed or any(rc != '0' for rc in followed) or
                     'ace5-wifi-bringup: CESTA perf current=' not in text):
                 raise RuntimeError(f'CESTA performance or DBI check unconfirmed; preserve {log} and cold reboot')
-        if sm_diag == 6:
+        if sm_diag >= 6:
             identities = re.findall(r'ace5-wifi-bringup: DBI root id rc=(-?\d+) id=([0-9a-fx]+)', text)
             if (not identities or any(rc != '0' or int(value, 16) != 0x011317cb
                                       for rc, value in identities) or 'DBI+0 access returned' not in text):
                 raise RuntimeError(f'PCIe0 root identity unconfirmed; preserve {log} and cold reboot')
+        if sm_diag == 7:
+            endpoint = re.findall(r'PCIe endpoint identify rc=(-?\d+) id=([0-9a-fx]+) lnk=([0-9a-fx]+)', text)
+            held = re.findall(r'PCIe endpoint reset reassert rc=(-?\d+)', text)
+            if (not endpoint or any(rc != '0' or int(value, 16) != 0x110717cb or
+                                    (int(link, 16) & 0x23ff) != 0x2011 for rc, value, link in endpoint) or
+                    not held or any(rc != '0' for rc in held)):
+                raise RuntimeError(f'WCN7850 identity or reset unconfirmed; preserve {log} and cold reboot')
         return
     stop_ok = stops and all(tuple(map(int, row)) in ((0, 13), (1, 14)) for row in stops)
     # Captured logs may contain duplicate console/loader copies. Every copy
@@ -447,6 +454,8 @@ sm.add_argument('--wifi-cesta-perf', type=Path,
                 help='Sample actual PCIe0 CRM performance after guarded CESTA START; no DBI')
 sm.add_argument('--wifi-cesta-dbi-id', type=Path,
                 help='If guarded CESTA and actual CRM performance agree, read DBI+0 once')
+sm.add_argument('--wifi-cesta-endpoint', type=Path,
+                help='Train Gen1 x1 under the reset deadline and read the WCN7850 ID through CFG0')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -594,8 +603,9 @@ try:
         commandline = (f'cpus={cpus} loader_return_after={seconds} epoch={int(time.time())} sb_delay=8 '
                        'touchscreen=0 buttons=0 cpufreq=0 gpu=0 wifi=0 adsp=0')
         if args.command == 'run':
-            cesta_profile = args.wifi_cesta_dbi_id or args.wifi_cesta_perf or args.wifi_cesta_start or args.wifi_sm_stage
-            sm_mode = (6 if args.wifi_cesta_dbi_id else 5 if args.wifi_cesta_perf else
+            cesta_profile = (args.wifi_cesta_endpoint or args.wifi_cesta_dbi_id or
+                             args.wifi_cesta_perf or args.wifi_cesta_start or args.wifi_sm_stage)
+            sm_mode = (7 if args.wifi_cesta_endpoint else 6 if args.wifi_cesta_dbi_id else 5 if args.wifi_cesta_perf else
                        4 if args.wifi_cesta_start else 3 if args.wifi_sm_stage else args.wifi_sm_diag)
             cold_reset = args.wifi_cold_reset_test or sm_mode >= 4
             if args.crm_channel_test and args.crm_bandwidth_test:

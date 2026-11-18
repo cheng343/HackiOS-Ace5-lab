@@ -45,6 +45,7 @@ extern void loader_return(void);
 #define WB_SM_START 4u
 #define WB_SM_PERF 5u
 #define WB_SM_DBI_ID 6u
+#define WB_SM_ENDPOINT 7u
 #define WB_CRM_C_PHYS 0x01d05000u
 #define WB_CRM_C_SIZE 0x2000u
 #define WB_SM_PROFILE_BYTES (4u * GIULIA_CESTA_WORDS)
@@ -65,7 +66,7 @@ static struct {
     struct giulia_pcie_qos qos;
     uint8_t pdc_table[508];
     uint8_t cesta_profile[WB_SM_PROFILE_BYTES];
-    uint32_t irq_dirty, irq_prior, guard_failed, db_version, max_stage;
+    uint32_t irq_dirty, irq_prior, guard_failed, endpoint_reset_unconfirmed, db_version, max_stage;
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
     uint32_t noc_step;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
@@ -462,7 +463,9 @@ static int wb_stage4_reset_lease(void)
         return -1;
     }
     if (wb.bringup.stage != GIULIA_BRINGUP_PHY_START ||
-        !wb.bringup.pipe_checked || wb.bringup.link.state != GIULIA_LINK_PARF_READY ||
+        !wb.bringup.pipe_checked ||
+        (wb.bringup.link.state != GIULIA_LINK_PARF_READY &&
+         !(wb.sm_diag == WB_SM_ENDPOINT && wb.bringup.link.state == GIULIA_LINK_PREPARED)) ||
         !wb.bringup.link.parf_owned ||
         wb.bringup.supply.gpio.state != GIULIA_WGPIO_ON)
         return -1;
@@ -572,6 +575,40 @@ static int wb_cesta_observe(void)
     return GIULIA_CESTA_OK;
 }
 
+static int wb_pcie_identify_endpoint(void)
+{
+    struct giulia_pcie_link *link = &wb.bringup.link;
+    struct giulia_wifi_gpio *gpio = &wb.bringup.supply.gpio;
+    int rc = giulia_pcie_link_prepare(link, GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID);
+    wb_log("ace5-wifi-bringup: DBI root id rc=%d id=%#x; prepare stage=%u fail=%u last=%u/%#x/%#x\n",
+        rc, link->root_id, link->stage, link->failure_stage, wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2]);
+    if (rc) return rc;
+    if (wb_stage4_reset_lease() || wb.quiet->reset_ack != LOADER_QUIET_RESET_ARMED)
+        return GIULIA_LINK_PREREQUISITE;
+
+    wb.endpoint_reset_unconfirmed = 1;
+    int release = giulia_wifi_gpio_perst_release(gpio,
+        GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
+    wb_log("ace5-wifi-bringup: PCIe endpoint reset release rc=%d\n", release);
+    if (!release && wb_guard() && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED) {
+        rc = giulia_pcie_link_identify(link, GIULIA_LINK_TRAIN_REQUIRED);
+        wb_log("ace5-wifi-bringup: PCIe endpoint identify rc=%d id=%#x lnk=%#x stage=%u fail=%u polls=%u debug=%#x/%#x\n",
+            rc, link->endpoint_id, link->link_status, link->stage, link->failure_stage,
+            link->polls, link->debug0, link->debug1);
+    } else {
+        rc = GIULIA_LINK_PREREQUISITE;
+    }
+    if (!wb_guard())
+        return GIULIA_LINK_PREREQUISITE;
+    int held = giulia_wifi_gpio_perst_assert(gpio,
+        GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
+    if (!held && (wb_mmio(&wb.tlmm, 94u * 0x1000u + 4u) & 3u))
+        held = GIULIA_WGPIO_READBACK;
+    wb_log("ace5-wifi-bringup: PCIe endpoint reset reassert rc=%d\n", held);
+    if (!held) wb.endpoint_reset_unconfirmed = 0;
+    return held ? held : rc;
+}
+
 static int wb_cesta_pre_dbi(void)
 {
     uint32_t pipe = 0;
@@ -609,6 +646,8 @@ static int wb_cesta_pre_dbi(void)
             return GIULIA_LINK_READBACK;
     }
     wb_log("ace5-wifi-bringup: DBI clock guard sys=%#x\n", sys | keep_clk);
+    if (wb.sm_diag == WB_SM_ENDPOINT)
+        return wb_pcie_identify_endpoint();
     int rc = giulia_pcie_link_read_root_id(&wb.bringup.link, GIULIA_LINK_PREPARE_REQUIRED);
     wb_log("ace5-wifi-bringup: DBI root id rc=%d id=%#x\n", rc, wb.bringup.link.root_id);
     return rc;
@@ -634,7 +673,8 @@ static int wb_cesta_stage_and_discard(void)
                 wb_log("ace5-wifi-bringup: CESTA follow-up rc=%d\n", rc);
             }
             wb.guard_failed = 1;
-            loader_return();
+            if (!wb.endpoint_reset_unconfirmed)
+                loader_return();
             return GIULIA_CESTA_RETAINED;
         }
         staged = start;
@@ -777,8 +817,12 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
         wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
         wb_map(&wb.bar0, GIULIA_PCIE_LINK_BAR0_PA, GIULIA_PCIE_LINK_BAR0_SIZE, VM_WIMG_IO);
-    } else if (wb.sm_diag == WB_SM_DBI_ID) {
+    } else if (wb.sm_diag >= WB_SM_DBI_ID) {
         wb_map(&wb.dbi, GIULIA_PCIE_LINK_DBI_PA, 0x1000u, VM_WIMG_IO);
+        if (wb.sm_diag == WB_SM_ENDPOINT) {
+            wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
+            wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
+        }
     }
     wb_map(&wb.crm, GIULIA_NOC_CRM_PHYS, GIULIA_NOC_CRM_SIZE, VM_WIMG_IO);
     if (wb.sm_diag >= WB_SM_PERF)
@@ -792,7 +836,8 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         !wb.parf.address || !wb.phy.address || !wb.crm.address ||
         (link_access && (!wb.dbi.address || !wb.atu.address ||
         !wb.cfg.address || !wb.bar0.address)) ||
-        (wb.sm_diag == WB_SM_DBI_ID && !wb.dbi.address) ||
+        (wb.sm_diag >= WB_SM_DBI_ID && !wb.dbi.address) ||
+        (wb.sm_diag == WB_SM_ENDPOINT && (!wb.atu.address || !wb.cfg.address)) ||
         (wb.sm_diag >= WB_SM_PERF && !wb.crm_c.address) ||
         !wb.qos_pcie.address || !wb.qos_gem.address ||
         (wb.sm_diag && !wb.pcie_sm.address)) {
@@ -943,7 +988,7 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("ace5_wifi_cold_reset", &wb.cold_reset, sizeof(wb.cold_reset));
     if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 ||
         seconds < 10 || seconds > 120 || wb.max_stage > GIULIA_BRINGUP_MHI_SNAP ||
-        wb.crm_all_states > 1 || wb.sm_diag > WB_SM_DBI_ID || wb.watchdog_trial > WB_WATCHDOG_EXPIRY ||
+        wb.crm_all_states > 1 || wb.sm_diag > WB_SM_ENDPOINT || wb.watchdog_trial > WB_WATCHDOG_EXPIRY ||
         wb.cold_reset > 1) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
         return;

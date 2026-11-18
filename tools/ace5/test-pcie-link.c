@@ -333,6 +333,13 @@ static void test_success(void)
 {
     struct fake f; struct giulia_pcie_link s;
     init(&f, &s); prepare(&f, &s);
+    assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == 0);
+    assert(s.state == GIULIA_LINK_IDENTIFIED && s.endpoint_id == GIULIA_PCIE_LINK_EP_ID);
+    assert(!f.bar_probes && !s.memory_enabled && f.cfg_accesses == 1);
+    assert(!memcmp(f.regs[GIULIA_LINK_CFG], f.original[GIULIA_LINK_CFG], sizeof(f.regs[0])));
+    assert(!f.regs[GIULIA_LINK_ATU][0x204 / 4]);
+    stop(&f, &s);
+    init(&f, &s); prepare(&f, &s);
     f.crs_reads = 3;
     assert(giulia_pcie_link_train(&s, GIULIA_LINK_TRAIN_REQUIRED) == 0);
     assert(s.state == GIULIA_LINK_READY && s.stage == GIULIA_LINK_STAGE_READY);

@@ -47,6 +47,7 @@ static uint64_t watchdog_ctl;
 static unsigned watchdog_reads, watchdog_writes, watchdog_cannot_cancel;
 static unsigned cold_reset, mock_reset_response, loader_returns;
 static unsigned root_id_reads;
+static unsigned endpoint_identifies;
 static char messages[16384];
 static struct { uintptr_t va; vm_size_t size; } allocation[24];
 static void wb_test_barrier(void);
@@ -160,6 +161,40 @@ int giulia_pcie_link_read_root_id(struct giulia_pcie_link *s, uint32_t flags)
     s->root_id = wb_link_r32(0, GIULIA_LINK_DBI, 0);
     return GIULIA_LINK_OK;
 }
+int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
+{
+    assert(wb.sm_diag == WB_SM_ENDPOINT && flags ==
+        (GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID));
+    assert(wb.dbi.address && wb.atu.address && wb.cfg.address && !wb.bar0.address);
+    s->root_id = wb_link_r32(0, GIULIA_LINK_DBI, 0);
+    s->state = GIULIA_LINK_PREPARED;
+    return 0;
+}
+int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *g, uint32_t flags)
+{
+    assert(flags == (GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
+    assert(g->state == GIULIA_WGPIO_ON && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED);
+    *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u) = 2;
+    g->state = GIULIA_WGPIO_RELEASED;
+    return 0;
+}
+int giulia_wifi_gpio_perst_assert(struct giulia_wifi_gpio *g, uint32_t flags)
+{
+    assert(flags == (GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
+    assert(g->state == GIULIA_WGPIO_RELEASED && wb.endpoint_reset_unconfirmed);
+    *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u) = 0;
+    g->state = GIULIA_WGPIO_ON;
+    return 0;
+}
+int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
+{
+    assert(flags == GIULIA_LINK_TRAIN_REQUIRED && wb.bringup.supply.gpio.state == GIULIA_WGPIO_RELEASED);
+    assert(wb.endpoint_reset_unconfirmed);
+    endpoint_identifies++;
+    s->endpoint_id = GIULIA_PCIE_LINK_EP_ID;
+    s->link_status = 0x2011;
+    return 0;
+}
 
 /* The adapter must propagate retained/failed core cleanup, independently of
  * whether its own IRQ and quiet handshakes would have succeeded. */
@@ -167,8 +202,10 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,const struct giulia_
 {
     assert(wb_guard());b->cfg=*cfg;b->stage=cfg->max_stage?cfg->max_stage:GIULIA_BRINGUP_READY;
     if (sm_diag >= WB_SM_TABLES || watchdog) {
-        assert(!wb.atu.address && !wb.cfg.address && !wb.bar0.address);
-        assert(!!wb.dbi.address == (sm_diag == WB_SM_DBI_ID));
+        assert(!wb.bar0.address);
+        assert(!!wb.atu.address == (sm_diag == WB_SM_ENDPOINT));
+        assert(!!wb.cfg.address == (sm_diag == WB_SM_ENDPOINT));
+        assert(!!wb.dbi.address == (sm_diag >= WB_SM_DBI_ID));
     }
     if(start_rc){b->stage=GIULIA_BRINGUP_FAULT;b->cleanup_error=GIULIA_BRINGUP_SUPPLY;}
     return start_rc;
@@ -242,6 +279,7 @@ static void setup(void)
     watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
     cold_reset=mock_reset_response=loader_returns=0;
     root_id_reads=0;
+    endpoint_identifies=0;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
     allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=cx_nominal_unavailable=0;
 }
@@ -256,7 +294,7 @@ static void admission(void)
     setup();sm_diag=1;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=1;crm_all=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=2;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
-    setup();sm_diag=7;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=8;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=4;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();cold_reset=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=3;giulia_wifi_bringup_init();assert(!maps && !creates);
@@ -431,6 +469,12 @@ static void noc_after_phy(void)
     perf[0xc / 4] = GIULIA_PCIE_BOOT_PERF;
     assert(wb_cesta_pre_dbi() == 0 && root_id_reads == 1 && parf[0] == 0x365e);
     assert(wb.bringup.link.root_id == 0x011317cbu);
+    wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
+    wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
+    wb.sm_diag = WB_SM_ENDPOINT;
+    assert(wb_cesta_pre_dbi() == 0 && endpoint_identifies == 1);
+    assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
+    assert(wb.bringup.link.endpoint_id == GIULIA_PCIE_LINK_EP_ID);
     perst[1] = 2;
     assert(wb_cesta_read_cold() == GIULIA_CESTA_LEASE && wb.guard_failed);
     wb.guard_failed = 0;
@@ -454,5 +498,6 @@ int main(void)
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");
     puts("Wi-Fi XNU adapter: quiet watchdog read-only status, bounded expiry and disarm passed");
     puts("Wi-Fi XNU adapter: CESTA current PERF gate, PARF clock bits and single DBI read passed");
+    puts("Wi-Fi XNU adapter: guarded Gen1 endpoint read and PERST restoration passed");
     return 0;
 }

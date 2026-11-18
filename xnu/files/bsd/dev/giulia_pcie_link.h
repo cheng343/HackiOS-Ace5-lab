@@ -16,6 +16,7 @@
 #define GIULIA_PCIE_LINK_CFG_SIZE 0x00100000u
 #define GIULIA_PCIE_LINK_BAR0_PA 0x60400000u
 #define GIULIA_PCIE_LINK_BAR0_SIZE 0x00200000u
+#define GIULIA_PCIE_LINK_ROOT_ID 0x011317cbu
 #define GIULIA_PCIE_LINK_EP_ID 0x110717cbu
 
 enum giulia_pcie_link_region {
@@ -32,7 +33,7 @@ enum giulia_pcie_link_result {
 enum giulia_pcie_link_state {
     GIULIA_LINK_IDLE, GIULIA_LINK_PREPARED, GIULIA_LINK_READY,
     GIULIA_LINK_FAULT, GIULIA_LINK_STOPPED, GIULIA_LINK_QUIESCED,
-    GIULIA_LINK_PARF_READY
+    GIULIA_LINK_PARF_READY, GIULIA_LINK_IDENTIFIED
 };
 enum giulia_pcie_link_stage {
     GIULIA_LINK_STAGE_IDLE, GIULIA_LINK_STAGE_ADMISSION,
@@ -58,7 +59,8 @@ enum giulia_pcie_link_prerequisite {
     /* Caller just completed an exclusive GCC_PCIE_0_BCR cold reset: SM8650
      * resets PARF_INT_MASK (0x22c) non-zero. Snapshot and explicitly clear it
      * to 0 in configure_parf() instead of rejecting as a foreign active IRQ. */
-    GIULIA_LINK_COLD_RESET_MASK = 1u << 8
+    GIULIA_LINK_COLD_RESET_MASK = 1u << 8,
+    GIULIA_LINK_EXACT_ROOT_ID = 1u << 9
 };
 #define GIULIA_LINK_PARF_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
     GIULIA_LINK_RAILS_NOC_READY | GIULIA_LINK_CLOCKS_RC_RESET_READY | \
@@ -124,6 +126,9 @@ int giulia_pcie_link_read_root_id(struct giulia_pcie_link *, uint32_t prerequisi
  * unreadable core leaves PARF owned until the PHY is stopped.
  */
 int giulia_pcie_link_prepare(struct giulia_pcie_link *, uint32_t prerequisites);
+/* Start the link and read the expected endpoint ID through CFG0. Retains the
+ * root and CFG0 owner; performs no endpoint writes or BAR/MEM programming. */
+int giulia_pcie_link_identify(struct giulia_pcie_link *, uint32_t prerequisites);
 /* prepare fixes both target/max speed and all RC width controls to Gen1 x1,
  * matching the initial CRM resource profile. It requires a PCIe v2 root
  * capability with Link Control 2 in bounds. The x2 PHY can remain initialized;

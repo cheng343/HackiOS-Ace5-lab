@@ -420,7 +420,8 @@ int giulia_pcie_link_read_root_id(struct giulia_pcie_link *s, uint32_t flags)
     s->stage = GIULIA_LINK_STAGE_ADMISSION;
     s->root_id = r32(s, GIULIA_LINK_DBI, 0);
     if (s->root_id == 0xffffffffu) return record_failure(s, GIULIA_LINK_READBACK);
-    if ((s->root_id & 0xffffu) != 0x17cbu)
+    if ((s->root_id & 0xffffu) != 0x17cbu ||
+        ((flags & GIULIA_LINK_EXACT_ROOT_ID) && s->root_id != GIULIA_PCIE_LINK_ROOT_ID))
         return record_failure(s, GIULIA_LINK_ENDPOINT);
     return GIULIA_LINK_OK;
 }
@@ -569,10 +570,8 @@ static int probe_bar(struct giulia_pcie_link *s)
     return GIULIA_LINK_OK;
 }
 
-int giulia_pcie_link_train(struct giulia_pcie_link *s, uint32_t flags)
+int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
 {
-    uint16_t header;
-    int error;
     if (!s) return GIULIA_LINK_ARGUMENT;
     if ((flags & GIULIA_LINK_TRAIN_REQUIRED) != GIULIA_LINK_TRAIN_REQUIRED ||
         (flags & GIULIA_LINK_PERST_ASSERTED)) return GIULIA_LINK_PREREQUISITE;
@@ -604,6 +603,15 @@ int giulia_pcie_link_train(struct giulia_pcie_link *s, uint32_t flags)
         if (i == 100) return fail(s, GIULIA_LINK_ENDPOINT);
         delay(s, 1000);
     }
+    s->state = GIULIA_LINK_IDENTIFIED;
+    return GIULIA_LINK_OK;
+}
+
+int giulia_pcie_link_train(struct giulia_pcie_link *s, uint32_t flags)
+{
+    uint16_t header;
+    int error = giulia_pcie_link_identify(s, flags);
+    if (error) return error;
     if (!cr16(s, PCI_HEADER, &header) || (header & 0x7fu) != 0)
         return fail(s, GIULIA_LINK_ENDPOINT);
     if (!capabilities(s, GIULIA_LINK_CFG, &s->endpoint_pcie_cap,
@@ -778,7 +786,7 @@ int giulia_pcie_link_quiesce(struct giulia_pcie_link *s, uint32_t flags)
         return GIULIA_LINK_PREREQUISITE;
     if (s->state != GIULIA_LINK_PREPARED && s->state != GIULIA_LINK_READY &&
         s->state != GIULIA_LINK_FAULT && s->state != GIULIA_LINK_QUIESCED &&
-        s->state != GIULIA_LINK_PARF_READY)
+        s->state != GIULIA_LINK_PARF_READY && s->state != GIULIA_LINK_IDENTIFIED)
         return GIULIA_LINK_STATE;
     if (s->state == GIULIA_LINK_QUIESCED) return GIULIA_LINK_OK;
     if (s->core_owned && (!(flags & GIULIA_LINK_PHY_READY) ||
