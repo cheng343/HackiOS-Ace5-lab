@@ -24,6 +24,7 @@
 #include "giulia_arc.h"
 #include "giulia_bcm.h"
 #include "giulia_gem_clock.h"
+#include "giulia_pcie_cesta.h"
 #include "giulia_pcie_noc.h"
 #include "giulia_pcie_qos.h"
 
@@ -36,6 +37,7 @@ extern void loader_log_line(const char *);
 /* Observed Ace 5 HLOS DRV2 CX handoff is selector 5 (corner 256 = Nominal).
  * Never overwrite DRV2 with LOWER (64) and undervolt VDD_CX across the SoC. */
 #define WB_CX_NOMINAL_LEVEL 256u
+#define WB_SM_TABLES 2u
 
 struct wb_map { uintptr_t allocation, address; vm_size_t size; };
 static struct {
@@ -439,6 +441,51 @@ static int wb_verify_noc(__unused void *cookie)
     return GIULIA_BRINGUP_OK;
 }
 
+static int wb_cesta_table_lease(__unused void *cookie)
+{
+    if (!wb_guard()) {
+        wb.guard_failed = 1;
+        return -1;
+    }
+    if (!wb.pcie_sm.address || wb.bringup.stage != GIULIA_BRINGUP_PHY_START ||
+        !wb.bringup.pipe_checked || wb.bringup.link.state != GIULIA_LINK_PARF_READY ||
+        !wb.bringup.link.parf_owned ||
+        wb.bringup.supply.gpio.state != GIULIA_WGPIO_ON)
+        return -1;
+    /* GPIO94 remains an AP-controlled GPIO output and drives PERST# low. */
+    uint32_t cfg = wb_mmio(&wb.tlmm, 94u * 0x1000u);
+    uint32_t io = wb_mmio(&wb.tlmm, 94u * 0x1000u + 4u);
+    uint32_t ltssm = wb_mmio(&wb.parf, 0x1b0u);
+    if ((cfg & ((1u << 12) | (1u << 9) | (15u << 2))) != (1u << 9) ||
+        (io & 3u) || (ltssm & (1u << 8))) {
+        wb.guard_failed = 1;
+        return -1;
+    }
+    return 0;
+}
+
+static int wb_cesta_table_read(__unused void *cookie, uint32_t off, uint32_t *value)
+{
+    if ((off & 3u) || off >= GIULIA_NOC_SM_SIZE) return -1;
+    wb_log("ace5-wifi-bringup: cesta read begin off=%#x\n", off);
+    *value = wb_mmio(&wb.pcie_sm, off);
+    if (*value)
+        wb_log("ace5-wifi-bringup: cesta read off=%#x value=%#x\n", off, *value);
+    return 0;
+}
+
+static int wb_cesta_read_cold(void)
+{
+    const struct giulia_cesta_io io = {
+        .read = wb_cesta_table_read, .validate_lease = wb_cesta_table_lease
+    };
+    int rc = giulia_cesta_check_cold(&io);
+    if (rc == GIULIA_CESTA_OK && wb_cesta_table_lease(0))
+        rc = GIULIA_CESTA_LEASE;
+    wb_log("ace5-wifi-bringup: cesta cold-check rc=%d\n", rc);
+    return rc;
+}
+
 static void wb_thread(void *arg, __unused wait_result_t wait)
 {
     uint64_t pa = (uint64_t)(uintptr_t)arg;
@@ -463,10 +510,12 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     wb_map(&wb.ipcc, 0x00406000u, 0x1000u, VM_WIMG_IO);
     wb_map(&wb.parf, 0x01c00000u, 0x3000u, VM_WIMG_IO);
     wb_map(&wb.phy, 0x01c06000u, 0x2000u, VM_WIMG_IO);
-    wb_map(&wb.dbi, GIULIA_PCIE_LINK_DBI_PA, 0x1000u, VM_WIMG_IO);
-    wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
-    wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
-    wb_map(&wb.bar0, GIULIA_PCIE_LINK_BAR0_PA, GIULIA_PCIE_LINK_BAR0_SIZE, VM_WIMG_IO);
+    if (wb.sm_diag != WB_SM_TABLES) {
+        wb_map(&wb.dbi, GIULIA_PCIE_LINK_DBI_PA, 0x1000u, VM_WIMG_IO);
+        wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
+        wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
+        wb_map(&wb.bar0, GIULIA_PCIE_LINK_BAR0_PA, GIULIA_PCIE_LINK_BAR0_SIZE, VM_WIMG_IO);
+    }
     wb_map(&wb.crm, GIULIA_NOC_CRM_PHYS, GIULIA_NOC_CRM_SIZE, VM_WIMG_IO);
     wb_map(&wb.qos_pcie, GIULIA_QOS_PCIE_PHYS, GIULIA_QOS_PCIE_SIZE, VM_WIMG_IO);
     wb_map(&wb.qos_gem, GIULIA_QOS_GEM_PHYS, GIULIA_QOS_GEM_SIZE, VM_WIMG_IO);
@@ -474,8 +523,9 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         wb_map(&wb.pcie_sm, GIULIA_NOC_SM_PHYS, GIULIA_NOC_SM_SIZE, VM_WIMG_IO);
     if (!wb.gcc.address || !wb.tcsr.address || !wb.tlmm.address || !wb.rsc.address ||
         !wb.db.address || !wb.gic.address || !wb.msg.address || !wb.ipcc.address ||
-        !wb.parf.address || !wb.phy.address || !wb.dbi.address || !wb.atu.address ||
-        !wb.cfg.address || !wb.bar0.address || !wb.crm.address ||
+        !wb.parf.address || !wb.phy.address || !wb.crm.address ||
+        (wb.sm_diag != WB_SM_TABLES && (!wb.dbi.address || !wb.atu.address ||
+        !wb.cfg.address || !wb.bar0.address)) ||
         !wb.qos_pcie.address || !wb.qos_gem.address ||
         (wb.sm_diag && !wb.pcie_sm.address)) {
         wb_log("ace5-wifi-bringup: MMIO mapping failed\n");
@@ -545,6 +595,11 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     if (wb.bringup.pipe_checked)
         wb_log("ace5-wifi-bringup: post-phy pipe_cbcr=%#x\n", wb.bringup.pipe_cbcr);
     if (rc == GIULIA_BRINGUP_OK) {
+        if (wb.sm_diag == WB_SM_TABLES) {
+            int sm_rc = wb_cesta_read_cold();
+            if (wb.guard_failed) goto release;
+            if (sm_rc != GIULIA_CESTA_OK) goto stop;
+        }
         wb_log("ace5-wifi-bringup: requested stage complete; stage=%u max=%u\n",
             wb.bringup.stage, wb.max_stage);
         if (wb.bringup.stage == GIULIA_BRINGUP_READY) {
@@ -553,6 +608,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
                 wb.bringup.soc.major, wb.bringup.soc.minor,
                 giulia_kiwi_fw_name(&wb.bringup.soc), wb.bringup.mhi.valid);
         }
+stop:
         stop_rc = giulia_wifi_bringup_stop(&wb.bringup);
         wb_log("ace5-wifi-bringup: stop rc=%d stage=%u\n", stop_rc, wb.bringup.stage);
     }
@@ -601,7 +657,7 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("ace5_wifi_sm_diag", &wb.sm_diag, sizeof(wb.sm_diag));
     if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 ||
         seconds < 10 || seconds > 120 || wb.max_stage > GIULIA_BRINGUP_MHI_SNAP ||
-        wb.crm_all_states > 1 || wb.sm_diag > 1) {
+        wb.crm_all_states > 1 || wb.sm_diag > WB_SM_TABLES) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
         return;
     }

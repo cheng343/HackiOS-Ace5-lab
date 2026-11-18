@@ -65,7 +65,7 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index 44274016a4cf..09871102847f 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,71 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,72 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -85,6 +85,7 @@ index 44274016a4cf..09871102847f 100644
 +bsd/dev/giulia_pcie_link.c	standard
 +bsd/dev/giulia_pcie_noc.c	standard
 +bsd/dev/giulia_pcie_qos.c	standard
++bsd/dev/giulia_pcie_cesta.c	standard
 +bsd/dev/giulia_gem_clock.c	standard
 +bsd/dev/giulia_arc.c	standard
 +bsd/dev/giulia_arc_votes.c	standard

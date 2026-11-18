@@ -38,6 +38,9 @@ struct giulia_cesta {
     enum giulia_cesta_state state;
 };
 
+/* Read-only admission for the cold register image. */
+int giulia_cesta_check_cold(const struct giulia_cesta_io *);
+
 /* Offsets are relative to the verified giulia PCIe0 SM resource. A zero
  * lease result requires exclusive SM ownership, ordered accessible MMIO,
  * endpoint reset and no active PCIe users. Validate the exact board/vendor

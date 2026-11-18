@@ -46,6 +46,21 @@ write_word(struct giulia_cesta *sm, uint32_t offset, uint32_t value)
 }
 
 int
+giulia_cesta_check_cold(const struct giulia_cesta_io *io)
+{
+    if (!io || !io->read || !io->validate_lease) return GIULIA_CESTA_ARGUMENT;
+    int rc = idle(io);
+    if (rc) return rc;
+    for (unsigned index = 0; index < GIULIA_CESTA_WORDS; index++) {
+        uint32_t value;
+        rc = read_word(io, word_offset(index), &value);
+        if (rc) return rc;
+        if (value != 0) return GIULIA_CESTA_BUSY;
+    }
+    return GIULIA_CESTA_OK;
+}
+
+int
 giulia_cesta_stage(struct giulia_cesta *sm, const struct giulia_cesta_io *io,
     const uint8_t *sequence, uint32_t sequence_bytes, const uint8_t *branches,
     uint32_t branch_bytes, uint32_t branch_offset, uint32_t start_offset)
@@ -70,14 +85,8 @@ giulia_cesta_stage(struct giulia_cesta *sm, const struct giulia_cesta_io *io,
     }
     if (!next.image[0] || !next.image[GIULIA_CESTA_SEQUENCE_WORDS])
         return GIULIA_CESTA_ARGUMENT;
-    int rc = idle(io);
+    int rc = giulia_cesta_check_cold(io);
     if (rc) return rc;
-    for (unsigned index = 0; index < GIULIA_CESTA_WORDS; index++) {
-        uint32_t value;
-        rc = read_word(io, word_offset(index), &value);
-        if (rc) return rc;
-        if (value != 0) return GIULIA_CESTA_BUSY;
-    }
     *sm = next;
     sm->state = GIULIA_CESTA_PARTIAL;
     for (unsigned index = 0; index < GIULIA_CESTA_WORDS; index++) {

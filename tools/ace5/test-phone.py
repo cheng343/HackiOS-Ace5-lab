@@ -52,6 +52,13 @@ class PhoneTests(unittest.TestCase):
             check(True, 4, good, 'yes', self.log, True)
         check(True, 4, good + '\nace5-wifi-bringup: post-phy cesta start=0 branch0=0 override=0 clkreq=0',
               'yes', self.log, True)
+        snapshot = good + '\nace5-wifi-bringup: post-phy cesta start=0 branch0=0 override=0 clkreq=0'
+        with self.assertRaisesRegex(RuntimeError, 'Empty CESTA tables unconfirmed'):
+            check(True, 4, snapshot, 'yes', self.log, 2)
+        cold = snapshot + '\nace5-wifi-bringup: cesta cold-check rc=0\n'
+        check(True, 4, cold, 'yes', self.log, 2)
+        with self.assertRaisesRegex(RuntimeError, 'Empty CESTA tables unconfirmed'):
+            check(True, 4, cold + '[   22.243792]: ace5-wifi-bringup: cesta cold-check rc=-5\n', 'yes', self.log, 2)
         check(True, 4, good + '\n' + good, 'yes', self.log)
         check(True, 0, report(11, 0, stop=0, end=13) + clean, 'yes', self.log)
         check(False, 4, '', None, self.log)
@@ -74,6 +81,8 @@ class PhoneTests(unittest.TestCase):
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4')
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, False, True),
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_sm_diag=1')
+        self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, False, 2),
+                         ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_sm_diag=2')
         with self.assertRaises(RuntimeError): fn(True, table, 1, 'kernel', 30, False, False, 5, False, True)
         with self.assertRaises(RuntimeError): fn(True, table, 1, 'kernel', 30, False, False, 4, True, True)
         self.assertEqual(fn(False, None, 0, None, 0, True, True), '')

@@ -117,6 +117,8 @@ void loader_log_line(const char *s)
 int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,const struct giulia_wifi_bringup_config *cfg)
 {
     assert(wb_guard());b->cfg=*cfg;b->stage=cfg->max_stage?cfg->max_stage:GIULIA_BRINGUP_READY;
+    if (sm_diag == WB_SM_TABLES)
+        assert(wb.pcie_sm.address && !wb.dbi.address && !wb.atu.address && !wb.cfg.address && !wb.bar0.address);
     if(start_rc){b->stage=GIULIA_BRINGUP_FAULT;b->cleanup_error=GIULIA_BRINGUP_SUPPLY;}
     return start_rc;
 }
@@ -199,6 +201,11 @@ static void admission(void)
     setup();ceiling=11;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=1;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=1;crm_all=1;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=2;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=3;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=2;giulia_wifi_bringup_init();
+    assert(stop_calls == 1 && maps == unmaps && strstr(messages, "cesta cold-check rc=-3"));
+    assert(!strstr(messages, "requested stage complete"));
     setup();other=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();no_ack=1;giulia_wifi_bringup_init();assert(maps==unmaps && !stop_calls);
     setup();fail_map=1;giulia_wifi_bringup_init();assert(!maps && exits==1);
@@ -297,6 +304,27 @@ static void noc_after_phy(void)
     assert(strstr(messages, "post-phy cesta start=0x1 branch0=0x4 override=0 clkreq=0"));
     sm[0x1090 / 4] = UINT32_MAX;
     assert(wb_verify_noc(0) == GIULIA_CRM_IO);
+    wb_map(&wb.tlmm, GIULIA_WIFI_GPIO_PA, GIULIA_WIFI_GPIO_SIZE, VM_WIMG_IO);
+    wb_map(&wb.parf, 0x01c00000u, 0x3000u, VM_WIMG_IO);
+    uint32_t *perst = (void *)(wb.tlmm.address + 94u * 0x1000u);
+    wb.bringup.stage = GIULIA_BRINGUP_PHY_START;
+    wb.bringup.pipe_checked = 1;
+    wb.bringup.link.state = GIULIA_LINK_PARF_READY;
+    wb.bringup.link.parf_owned = 1;
+    wb.bringup.supply.gpio.state = GIULIA_WGPIO_ON;
+    perst[0] = (1u << 9);
+    sm[0x1090 / 4] = 0;
+    sm[0x1000 / 4] = 0;
+    assert(wb_cesta_read_cold() == GIULIA_CESTA_OK);
+    assert(strstr(messages, "cesta read begin off=0x30"));
+    assert(strstr(messages, "cesta read begin off=0x1018"));
+    sm[0x1018 / 4] = 4;
+    assert(wb_cesta_read_cold() == GIULIA_CESTA_BUSY && sm[0x1018 / 4] == 4);
+    sm[0x1018 / 4] = UINT32_MAX;
+    assert(wb_cesta_read_cold() == GIULIA_CESTA_IO && sm[0x1018 / 4] == UINT32_MAX);
+    perst[1] = 2;
+    assert(wb_cesta_read_cold() == GIULIA_CESTA_LEASE && wb.guard_failed);
+    wb.guard_failed = 0;
     wb.sm_diag = 0;
     crm[0x1000 / 4] = 2;
     assert(wb_verify_noc(0) == GIULIA_CRM_DRIFT);
@@ -314,5 +342,6 @@ int main(void)
 {
     admission();cleanup();single_access();noc_cleanup();noc_prepare();noc_after_phy();setup();
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
+    puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");
     return 0;
 }
