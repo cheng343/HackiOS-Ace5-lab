@@ -387,6 +387,50 @@ static int wb_prepare_noc(__unused void *cookie, struct giulia_wifi_supply *supp
     return 0;
 }
 
+static int wb_verify_noc(__unused void *cookie)
+{
+    const uint32_t required0 = (1u << 12) | (1u << 19) | (1u << 22);
+    const uint32_t required1 = 0x7fu;
+    uint32_t before_busy, before_update, after_busy, after_update, pwr_idx;
+    uint32_t votes0, votes1, cnoc, aggregate, ddr;
+
+    if (!wb_guard()) {
+        wb.guard_failed = 1;
+        return GIULIA_CRM_LEASE;
+    }
+    if (wb.crm_dev.state != GIULIA_CRM_ACTIVE || wb.crm_dev.target > 1u)
+        return GIULIA_CRM_STATE;
+    if (wb_crm_r(0, 0x1000u, &before_busy) || wb_crm_r(0, 0x1020u, &before_update) ||
+        wb_crm_r(0, 0x3f0u, &pwr_idx))
+        return GIULIA_CRM_IO;
+    votes0 = wb_mmio(&wb.gcc, 0x52000u);
+    votes1 = wb_mmio(&wb.gcc, 0x52008u);
+    cnoc = wb_mmio(&wb.gcc, 0x10058u);
+    aggregate = wb_mmio(&wb.gcc, 0x10064u);
+    ddr = wb_mmio(&wb.gcc, 0x10074u);
+    if (wb_crm_r(0, 0x1000u, &after_busy) || wb_crm_r(0, 0x1020u, &after_update))
+        return GIULIA_CRM_IO;
+    if (!wb_guard()) {
+        wb.guard_failed = 1;
+        return GIULIA_CRM_LEASE;
+    }
+    wb_log("ace5-wifi-bringup: post-phy noc target=%u busy=%#x/%#x update=%#x/%#x pwr_idx_raw=%#x\n",
+        wb.crm_dev.target, before_busy, after_busy, before_update, after_update, pwr_idx);
+    wb_log("ace5-wifi-bringup: post-phy gcc votes=%#x/%#x cnoc=%#x aggre=%#x ddr=%#x\n",
+        votes0, votes1, cnoc, aggregate, ddr);
+
+    if (votes0 == UINT32_MAX || votes1 == UINT32_MAX ||
+        cnoc == UINT32_MAX || aggregate == UINT32_MAX || ddr == UINT32_MAX)
+        return GIULIA_POWER_READBACK;
+    uint32_t selected = 1u << wb.crm_dev.target;
+    if (before_busy != selected || after_busy != selected ||
+        before_update != selected || after_update != selected)
+        return GIULIA_CRM_DRIFT;
+    if ((votes0 & required0) != required0 || (votes1 & required1) != required1)
+        return GIULIA_POWER_READBACK;
+    return GIULIA_BRINGUP_OK;
+}
+
 static void wb_thread(void *arg, __unused wait_result_t wait)
 {
     uint64_t pa = (uint64_t)(uintptr_t)arg;
@@ -465,6 +509,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     cfg.mhi = (struct giulia_mhi_snapshot_io){0, wb_bar_r32, GIULIA_PCIE_LINK_BAR0_SIZE};
     cfg.prepare_noc = wb_prepare_noc;
     cfg.release_noc = wb_release_noc;
+    cfg.verify_noc = wb_verify_noc;
     cfg.max_stage = wb.max_stage;
 
     rc = giulia_wifi_bringup_start(&wb.bringup, &cfg);

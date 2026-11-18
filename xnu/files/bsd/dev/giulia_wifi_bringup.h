@@ -59,6 +59,7 @@ struct giulia_wifi_bringup_config {
      * are withdrawn; RETAINED keeps host power, supplies and platform leases
      * until cold reset. A negative result keeps all lower dependencies. */
     int (*release_noc)(void *cookie);
+    int (*verify_noc)(void *cookie);
     /* Optional diagnostic stop ceiling (enum giulia_wifi_bringup_stage, 0 = full). */
     unsigned max_stage;
 };

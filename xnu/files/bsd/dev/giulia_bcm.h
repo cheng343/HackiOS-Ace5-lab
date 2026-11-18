@@ -23,9 +23,8 @@ enum giulia_bcm_pcie0_policy {
     GIULIA_BCM_PCIE0_FIXED_500_800,
     /* Use only when current DT explicitly selects rate-based ICC voting. */
     GIULIA_BCM_PCIE0_GEN1_X1_250000_0,
-    /* Experimental bring-up policy: populate all 5 CRM power states (0..4)
-     * with the same FIXED_500_800 PERF/BW entries so an uninitialized pcie_sm
-     * parked at pwr_idx=4 still receives non-zero NoC bandwidth votes. */
+    /* Experimental comparison: populate all five CRM rows with the same
+     * PERF/BW entries. Raw PWR_IDX_STATUS does not identify the applied row. */
     GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES
 };
 #define GIULIA_BCM_PCIE0_PATCHES 12u

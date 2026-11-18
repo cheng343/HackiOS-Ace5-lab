@@ -261,9 +261,44 @@ static void noc_prepare(void)
     assert(wb_prepare_noc(0,&supply)==GIULIA_RPMH_NOT_FOUND);
     assert(cx_level_seen==256u && !crm_patches_seen && !rpmh_cx_sel_seen);
 }
+
+static void noc_after_phy(void)
+{
+    setup();
+    wb_map(&wb.shared, shared_pa, sizeof(struct loader_firmware_quiet), VM_WIMG_WCOMB);
+    wb.quiet = (void *)wb.shared.address;
+    wb_map(&wb.gic, 0x17100000u, 0x10000u, VM_WIMG_IO);
+    wb_map(&wb.crm, GIULIA_NOC_CRM_PHYS, GIULIA_NOC_CRM_SIZE, VM_WIMG_IO);
+    wb_map(&wb.gcc, GIULIA_QOS_GCC_PHYS, GIULIA_QOS_GCC_SIZE, VM_WIMG_IO);
+    uint32_t *crm = (void *)wb.crm.address;
+    uint32_t *gcc = (void *)wb.gcc.address;
+    wb.quiet->request = 1;
+    wb_test_barrier();
+    assert(wb_irq_acquire());
+    wb.crm_dev.state = GIULIA_CRM_ACTIVE;
+    wb.crm_dev.target = 0;
+    crm[0x1000 / 4] = 1;
+    crm[0x1020 / 4] = 1;
+    crm[0x3f0 / 4] = 4;
+    gcc[0x52000 / 4] = (1u << 12) | (1u << 19) | (1u << 22);
+    gcc[0x52008 / 4] = 0x7f;
+    gcc[0x10058 / 4] = 0x80000002u;
+    assert(wb_verify_noc(0) == GIULIA_BRINGUP_OK);
+    assert(strstr(messages, "pwr_idx_raw=0x4"));
+    crm[0x1000 / 4] = 2;
+    assert(wb_verify_noc(0) == GIULIA_CRM_DRIFT);
+    crm[0x1000 / 4] = 1;
+    gcc[0x52008 / 4] &= ~(1u << 6);
+    assert(wb_verify_noc(0) == GIULIA_POWER_READBACK);
+    gcc[0x52008 / 4] = 0x7f;
+    gcc[0x10058 / 4] = UINT32_MAX;
+    assert(wb_verify_noc(0) == GIULIA_POWER_READBACK);
+    wb.quiet->active = 0;
+    assert(wb_verify_noc(0) == GIULIA_CRM_LEASE && wb.guard_failed);
+}
 int main(void)
 {
-    admission();cleanup();single_access();noc_cleanup();noc_prepare();setup();
+    admission();cleanup();single_access();noc_cleanup();noc_prepare();noc_after_phy();setup();
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     return 0;
 }

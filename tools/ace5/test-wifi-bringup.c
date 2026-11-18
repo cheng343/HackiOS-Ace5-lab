@@ -73,6 +73,7 @@ int giulia_mhi_snapshot(const struct giulia_mhi_snapshot_io *io, uint32_t f, str
 
 static int noc_prep(void *cookie, struct giulia_wifi_supply *s) { (void)cookie; (void)s; assert(host_on); noc_owned=1; return ev('N', -1); }
 static int noc_rel(void *cookie) { (void)cookie; assert(host_on && noc_owned); int rc=ev('n',-1); if(!rc)rc=noc_release_rc; if(!rc)noc_owned=0; return rc; }
+static int noc_verify(void *cookie) { (void)cookie; assert(host_on && noc_owned); return ev('V', -1); }
 static uint32_t d_r32(void *c, unsigned b, uint32_t o) { (void)c; (void)b; (void)o; return 0; }
 static void d_w32(void *c, unsigned b, uint32_t o, uint32_t v) { (void)c; (void)b; (void)o; (void)v; }
 static uint16_t d_r16(void *c, unsigned b, uint32_t o) { (void)c; (void)b; (void)o; return 0; }
@@ -121,6 +122,15 @@ int main(void)
     assert(b.failed_stage == GIULIA_BRINGUP_PHY_START && b.sub_error == GIULIA_POWER_TIMEOUT);
     assert(b.pipe_checked && b.pipe_cbcr == 0x80000000u && b.stage == GIULIA_BRINGUP_HELD);
     assert(strcmp(trace, "SNPAYECrqyelnps") == 0);
+    stop_fail = 0;
+
+    tlen = 0; memset(trace, 0, sizeof(trace)); memset(&b,0,sizeof(b));
+    cfg.verify_noc = noc_verify;
+    stop_fail = 'V';
+    assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_PREREQUISITE);
+    assert(b.failed_stage == GIULIA_BRINGUP_PHY_START && b.stage == GIULIA_BRINGUP_HELD);
+    assert(strcmp(trace, "SNPAYECVrqyelnps") == 0);
+    cfg.verify_noc = 0;
     stop_fail = 0;
 
     /* Each startup failure must unwind its actual prerequisites; inactive

@@ -89,6 +89,10 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     b->pipe_checked = 1;
     rc = giulia_pcie_power_pipe_ready(&b->supply.power, &b->pipe_cbcr);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_POWER, rc);
+    if (b->cfg.verify_noc) {
+        rc = b->cfg.verify_noc(b->cfg.noc_cookie);
+        if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_PREREQUISITE, rc);
+    }
     if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_LINK_PREPARE;
