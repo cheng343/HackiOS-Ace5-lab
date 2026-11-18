@@ -23,6 +23,7 @@ def main():
     cases = [(drivers/f'giulia_pcie_{name}.c', root/f'tools/ace5/test-pcie-{name}.c')
              for name in ('phy', 'link', 'noc', 'qos')]
     cases += [
+        (drivers/'giulia_pcie_cesta.c', root/'tools/ace5/test-pcie-cesta.c'),
         (root/'tools/ace5/test-wifi-bringup-xnu.c',),
         (drivers/'giulia_rpmh.c',drivers/'giulia_arc.c',root/'tools/ace5/test-rpmh-probe.c'),
         (drivers/'giulia_arc.c', drivers/'giulia_gem_power.c', drivers/'giulia_gem_clock.c',
