@@ -76,8 +76,18 @@ static void plans(void)
     }
     for (unsigned i=0;i<2;i++) assert(p.patch[i].kind==0 && p.patch[i].state==i && p.patch[i].value==2);
     assert(giulia_bcm_pcie0_plan(db,sizeof(db),1,GIULIA_BCM_PCIE0_GEN1_X1_250000_0,&p)==0);
+    assert(p.patch_count==GIULIA_BCM_PCIE0_PATCHES);
     assert(p.vote[0].saturated && p.vote[1].saturated && p.vote[3].saturated);
     assert(!p.vote[0].y && p.vote[2].y==1 && p.vote[4].y==1);
+    assert(giulia_bcm_pcie0_plan(db,sizeof(db),1,GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES,&p)==0);
+    assert(p.patch_count==GIULIA_BCM_PCIE0_ALL_STATES_PATCHES);
+    for (unsigned st=0;st<5;st++)
+        assert(p.patch[st].kind==0 && p.patch[st].state==st && p.patch[st].value==2);
+    for (unsigned i=0;i<5;i++) for (unsigned st=0;st<5;st++) {
+        struct giulia_crm_patch *q=&p.patch[5+5*i+st];
+        assert(q->kind==1 && q->state==st && q->resource==nodes[i]);
+        assert(q->value==(p.vote[i].command&GIULIA_CRM_BW_FIELDS));
+    }
     le32(db+184,0x50000); /* Distinct BCM names cannot alias one address. */
     assert(giulia_bcm_pcie0_plan(db,sizeof(db),1,0,&p)==GIULIA_BCM_DATABASE);
     assert(!p.patch[0].value && !p.resource[0].address);

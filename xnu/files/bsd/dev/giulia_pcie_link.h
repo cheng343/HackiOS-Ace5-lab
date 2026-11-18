@@ -54,7 +54,11 @@ enum giulia_pcie_link_prerequisite {
     /* No other config/BAR/MSI users remain; MSI stop succeeded first. */
     GIULIA_LINK_USERS_QUIESCED = 1u << 6,
     /* QMP stop completed, or this owner never started the PHY. */
-    GIULIA_LINK_PHY_QUIET = 1u << 7
+    GIULIA_LINK_PHY_QUIET = 1u << 7,
+    /* Caller just completed an exclusive GCC_PCIE_0_BCR cold reset: SM8650
+     * resets PARF_INT_MASK (0x22c) non-zero. Snapshot and explicitly clear it
+     * to 0 in configure_parf() instead of rejecting as a foreign active IRQ. */
+    GIULIA_LINK_COLD_RESET_MASK = 1u << 8
 };
 #define GIULIA_LINK_PARF_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
     GIULIA_LINK_RAILS_NOC_READY | GIULIA_LINK_CLOCKS_RC_RESET_READY | \
@@ -94,7 +98,7 @@ struct giulia_pcie_link {
     uint16_t endpoint_msix_cap;
     uint8_t saved_count, config_atu_enabled, atu_touched;
     uint8_t parf_count, parf_owned, core_owned;
-    uint8_t memory_owned, memory_enabled;
+    uint8_t memory_owned, memory_enabled, mask_int_owned;
     struct giulia_pcie_link_saved saved[48];
 };
 

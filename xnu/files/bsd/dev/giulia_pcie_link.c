@@ -226,6 +226,8 @@ static int snapshot_parf(struct giulia_pcie_link *s)
     static const uint32_t parf[] = {PARF_TYPE, PARF_PHY,
         PARF_SYS, PARF_PM, PARF_MHI, PARF_HALT, PARF_DBI_LO, PARF_DBI_HI,
         PARF_ATU_LO, PARF_ATU_HI, PARF_SLV_LO, PARF_SLV_HI};
+    if (s->mask_int_owned && !save(s, GIULIA_LINK_PARF, PARF_INT_MASK, 4))
+        return 0;
     for (unsigned i = 0; i < sizeof(parf) / sizeof(parf[0]); i++)
         if (!save(s, GIULIA_LINK_PARF, parf[i], 4)) return 0;
     s->parf_count = s->saved_count;
@@ -279,6 +281,9 @@ static int restore_saved(struct giulia_pcie_link *s, unsigned first, unsigned co
  * This phase deliberately performs no DBI/ATU access, including on failure. */
 static int configure_parf(struct giulia_pcie_link *s)
 {
+    if (s->mask_int_owned &&
+        !put32(s, GIULIA_LINK_PARF, PARF_INT_MASK, 0, 0xffffffffu))
+        return 0;
     return put32(s, GIULIA_LINK_PARF, PARF_TYPE, 4, 0xffffffffu) &&
         change32(s, GIULIA_LINK_PARF, PARF_PHY, BIT(0), 0, BIT(0)) &&
         put32(s, GIULIA_LINK_PARF, PARF_DBI_LO, PARF_LOCAL_DBI, 0xffffffffu) &&
@@ -367,7 +372,11 @@ int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *s, uint32_t flags,
     if (v & BIT(8)) return reject(s, GIULIA_LINK_BUSY);
     v = r32(s, GIULIA_LINK_PARF, PARF_INT_MASK);
     if (v == 0xffffffffu) return reject(s, GIULIA_LINK_READBACK);
-    if (v) return reject(s, GIULIA_LINK_BUSY);
+    if (v) {
+        if (!(flags & GIULIA_LINK_COLD_RESET_MASK))
+            return reject(s, GIULIA_LINK_BUSY);
+        s->mask_int_owned = 1;
+    }
     if (!snapshot_parf(s)) return reject(s, GIULIA_LINK_READBACK);
     s->parf_owned = 1;
     s->stage = GIULIA_LINK_STAGE_PARF;

@@ -448,6 +448,26 @@ giulia_pcie_power_pipe_enable(struct giulia_pcie_power *p)
 }
 
 int
+giulia_pcie_power_pipe_ready(struct giulia_pcie_power *p, uint32_t *observed_cbcr)
+{
+    uint32_t v = 0;
+    if (!p)
+        return GIULIA_POWER_ARGUMENT;
+    if (p->state != GIULIA_POWER_PIPE_ON)
+        return GIULIA_POWER_STATE;
+    for (unsigned n = 0; n < 1000; n++) {
+        v = p->io.read32(p->io.cookie, GIULIA_POWER_GCC, 0x6b040u);
+        if (observed_cbcr) *observed_cbcr = v;
+        if (v == 0xffffffffu)
+            return GIULIA_POWER_READBACK;
+        if (!(v & B(31)) || ((v >> 28) & 7u) == 2u)
+            return GIULIA_POWER_OK;
+        delay(p, 10);
+    }
+    return GIULIA_POWER_TIMEOUT;
+}
+
+int
 giulia_pcie_power_pipe_disable(struct giulia_pcie_power *p)
 {
     int r;

@@ -68,7 +68,11 @@ class PhoneTests(unittest.TestCase):
         table.write_bytes(bytes(508))
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4),
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4')
+        self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 5, True, True),
+                         ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=5 ace5_wifi_crm_all_states=1 ace5_wifi_sm_diag=1')
         self.assertEqual(fn(False, None, 0, None, 0, True, True), '')
+        with self.assertRaises(RuntimeError): fn(False, None, 1, 'kernel', 30, False, False, 0, True, False)
+        with self.assertRaises(RuntimeError): fn(False, None, 1, 'kernel', 30, False, False, 0, False, True)
         for cpu, kernel, seconds, other, live in ((0, 'kernel', 30, False, False),
                 (1, None, 30, False, False), (1, 'kernel', 0, False, False),
                 (1, 'kernel', 121, False, False), (1, 'kernel', 30, True, False),

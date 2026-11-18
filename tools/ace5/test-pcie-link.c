@@ -381,6 +381,15 @@ static void test_busy(void)
     init(&f, &s); io = io_for(&f); f.regs[GIULIA_LINK_PARF][0x22c / 4] = BIT(13);
     assert(prepare_fixture(&s, GIULIA_LINK_PARF_REQUIRED, &io) == GIULIA_LINK_BUSY);
     assert(f.writes == 0);
+    /* After an exclusive SM8650 BCR reset, PARF_INT_MASK resets non-zero:
+     * COLD_RESET_MASK snapshots it, clears it to 0, and restores it on stop. */
+    init(&f, &s); io = io_for(&f);
+    f.regs[GIULIA_LINK_PARF][0x22c / 4] = 0xfe000000u;
+    f.original[GIULIA_LINK_PARF][0x22c / 4] = 0xfe000000u;
+    assert(prepare_fixture(&s, GIULIA_LINK_PARF_REQUIRED | GIULIA_LINK_COLD_RESET_MASK, &io) == 0);
+    assert(s.mask_int_owned && f.regs[GIULIA_LINK_PARF][0x22c / 4] == 0);
+    stop(&f, &s);
+    assert(f.regs[GIULIA_LINK_PARF][0x22c / 4] == 0xfe000000u);
 }
 static void test_timeout_and_link_loss(void)
 {

@@ -22,13 +22,19 @@ enum giulia_bcm_pcie0_policy {
     /* DT omits qcom,no-client-based-bw-voting: vendor's actual default. */
     GIULIA_BCM_PCIE0_FIXED_500_800,
     /* Use only when current DT explicitly selects rate-based ICC voting. */
-    GIULIA_BCM_PCIE0_GEN1_X1_250000_0
+    GIULIA_BCM_PCIE0_GEN1_X1_250000_0,
+    /* Experimental bring-up policy: populate all 5 CRM power states (0..4)
+     * with the same FIXED_500_800 PERF/BW entries so an uninitialized pcie_sm
+     * parked at pwr_idx=4 still receives non-zero NoC bandwidth votes. */
+    GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES
 };
 #define GIULIA_BCM_PCIE0_PATCHES 12u
+#define GIULIA_BCM_PCIE0_ALL_STATES_PATCHES 30u
 struct giulia_bcm_pcie0_plan {
-    struct giulia_crm_patch patch[12];
+    struct giulia_crm_patch patch[GIULIA_BCM_PCIE0_ALL_STATES_PATCHES];
     struct giulia_bcm_resource resource[5];
     struct giulia_bcm_vote vote[5];
+    uint32_t patch_count;
 };
 /* OnePlus pineapple PCIe0 CRM HW DRV0 data path, Gen1x1 only. Five BCMs:
  * MC0/SH0/SH1/SN4/ACV at CRM nodes0/1/2/3/5. IP0/node4 and nodes6..15

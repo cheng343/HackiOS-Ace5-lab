@@ -37,7 +37,7 @@ int giulia_pcie_power_pipe_disable(struct giulia_pcie_power *p) { p->state = GIU
 int giulia_pcie_power_stop(struct giulia_pcie_power *p, uint32_t f)
 { assert(f & GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET); assert(host_on && !noc_owned); int rc=ev('p',GIULIA_POWER_TIMEOUT); p->state=rc?GIULIA_POWER_FAULT:GIULIA_POWER_STOPPED; if(!rc)host_on=0; return rc; }
 int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *l, uint32_t f, const struct giulia_pcie_link_io *io)
-{ assert(f == GIULIA_LINK_PARF_REQUIRED); l->io = *io; int rc = ev('A', GIULIA_LINK_BUSY); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_PARF_READY; return rc; }
+{ assert(f == (GIULIA_LINK_PARF_REQUIRED | GIULIA_LINK_COLD_RESET_MASK)); l->io = *io; int rc = ev('A', GIULIA_LINK_BUSY); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_PARF_READY; return rc; }
 int giulia_pcie_link_prepare(struct giulia_pcie_link *l, uint32_t f)
 { assert(f == GIULIA_LINK_PREPARE_REQUIRED && l->state == GIULIA_LINK_PARF_READY); int rc = ev('L', GIULIA_LINK_BUSY); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_PREPARED; return rc; }
 int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t f, const struct giulia_pcie_phy_io *io)

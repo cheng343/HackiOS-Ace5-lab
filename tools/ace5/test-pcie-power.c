@@ -71,6 +71,7 @@ static void init(struct mock *m)
     seed(m, 0, 0x10064, BIT(31)); /* HALT_SKIP aggregate */
     seed(m, 0, 0x10058, 0);
     seed(m, 0, 0x6b054, 0);
+    seed(m, 0, 0x6b040, 0x10c00u); /* PIPE CBCR: CLK_OFF=0 once PHY runs */
     m->active_aux = raw(m, 0, 0x6b078) & CFG_MASK;
     m->active_rch = raw(m, 0, 0x6b05c) & CFG_MASK;
 }
@@ -197,6 +198,13 @@ static void lifecycle(void)
     assert(p.state == GIULIA_POWER_PIPE_ON);
     assert((raw(&m, 0, 0x6b070) & 3) == 0);
     assert(raw(&m, 0, 0x52008) & BIT(4));
+    {
+        uint32_t cbcr = 0;
+        assert(giulia_pcie_power_pipe_ready(&p, &cbcr) == 0 && cbcr == 0x10c00u);
+        m.branch_stuck = 0x6b040u;
+        assert(giulia_pcie_power_pipe_ready(&p, &cbcr) == GIULIA_POWER_TIMEOUT && cbcr == BIT(31));
+        m.branch_stuck = 0;
+    }
     assert(giulia_pcie_power_pipe_disable(&p) == 0);
     assert(p.state == GIULIA_POWER_READY);
     assert(!(raw(&m, 0, 0x52008) & BIT(4)));

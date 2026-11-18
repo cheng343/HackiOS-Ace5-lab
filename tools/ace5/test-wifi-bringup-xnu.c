@@ -26,10 +26,11 @@ typedef void *thread_t;
 typedef int DTEntry;
 static struct { unsigned num_cpus; } topology;
 #define ml_get_topology_info() (&topology)
-static unsigned enabled, board, cpus, cpu, seconds, ceiling, other;
+static unsigned enabled, board, cpus, cpu, seconds, ceiling, other, crm_all, sm_diag;
 static unsigned creates, exits, deallocs, maps, unmaps, fail_map, time_us;
 static unsigned no_ack, no_resume_ack, pending_irq, lost_guard;
 static unsigned stop_calls, qos_calls, gem_calls, crm_calls;
+static unsigned allow_prepare, bcm_policy_seen, crm_patches_seen, cx_level_seen, rpmh_cx_sel_seen;
 static int start_rc, stop_rc, qos_rc, gem_rc, crm_rc;
 static uint64_t shared_pa=0x90000100;
 static uint8_t pdc_table[508];
@@ -47,6 +48,8 @@ static int PE_parse_boot_argn(const char *name,void *out,unsigned size)
     if(!strcmp(name,"bootcpu"))value=cpu;
     if(!strcmp(name,"loader_return_after"))value=seconds;
     if(!strcmp(name,"ace5_wifi_bringup_stage"))value=ceiling;
+    if(!strcmp(name,"ace5_wifi_crm_all_states"))value=crm_all;
+    if(!strcmp(name,"ace5_wifi_sm_diag"))value=sm_diag;
     if(!strcmp(name,"ace5_aop_channel_test"))value=other;
     *(unsigned *)out=value; return value!=0;
 }
@@ -133,32 +136,53 @@ int giulia_gem_clock_stop(struct giulia_gem_clock *p)
 int giulia_crm_stop(struct giulia_crm *p)
 { crm_calls++;assert(!qos_rc && !gem_rc);if(crm_rc>=0)p->state=crm_rc?GIULIA_CRM_HELD:GIULIA_CRM_STOPPED;return crm_rc; }
 int giulia_bcm_pcie0_plan(__unused const uint8_t *db,__unused uint32_t bytes,
-    __unused uint32_t version,__unused unsigned policy,__unused struct giulia_bcm_pcie0_plan *plan)
-{ assert(!"unexpected prepare call");return -1; }
+    __unused uint32_t version,unsigned policy,struct giulia_bcm_pcie0_plan *plan)
+{
+    assert(allow_prepare);
+    bcm_policy_seen=policy;
+    plan->patch_count=(policy==GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES) ?
+        GIULIA_BCM_PCIE0_ALL_STATES_PATCHES : GIULIA_BCM_PCIE0_PATCHES;
+    return 0;
+}
 int giulia_crm_start_empty_keep(__unused struct giulia_crm *p,__unused const struct giulia_crm_io *io,
-    __unused const struct giulia_crm_patch *patch,__unused unsigned count)
-{ assert(!"unexpected prepare call");return -1; }
+    __unused const struct giulia_crm_patch *patch,unsigned count)
+{ assert(allow_prepare); crm_patches_seen=count; return 0; }
 int giulia_arc_resolve(__unused const uint8_t *db,__unused uint32_t bytes,__unused uint32_t version,
-    __unused const char *name,__unused struct giulia_arc_resource *r)
-{ assert(!"unexpected prepare call");return -1; }
-int giulia_arc_select(__unused const struct giulia_arc_resource *r,__unused uint32_t level,__unused uint32_t *out)
-{ assert(!"unexpected prepare call");return -1; }
-int giulia_rpmh_write(__unused struct giulia_rpmh *p,__unused const struct giulia_rpmh_command *cmd,__unused unsigned n)
-{ assert(!"unexpected prepare call");return -1; }
+    const char *name,struct giulia_arc_resource *r)
+{
+    assert(allow_prepare);
+    r->address=!strcmp(name,"xo.lvl") ? 0x30004u : 0x30000u;
+    r->count=6;
+    return 0;
+}
+int giulia_arc_select(__unused const struct giulia_arc_resource *r,uint32_t level,uint32_t *out)
+{
+    assert(allow_prepare);
+    cx_level_seen=level;
+    *out=level>=256u ? 5u : 2u;
+    return 0;
+}
+int giulia_rpmh_write(__unused struct giulia_rpmh *p,const struct giulia_rpmh_command *cmd,unsigned n)
+{
+    assert(allow_prepare && n==2 && cmd[0].data==3u);
+    rpmh_cx_sel_seen=cmd[1].data;
+    return 0;
+}
 int giulia_gem_clock_start(__unused struct giulia_gem_clock *p,__unused const struct giulia_gem_clock_io *io)
-{ assert(!"unexpected prepare call");return -1; }
+{ assert(allow_prepare); return 0; }
 int giulia_pcie_qos_start(__unused struct giulia_pcie_qos *p,__unused const struct giulia_pcie_qos_io *io,__unused uint32_t conditions)
-{ assert(!"unexpected prepare call");return -1; }
+{ assert(allow_prepare); return 0; }
 
 static void setup(void)
 {
     for(unsigned i=0;i<maps;i++)free((void *)allocation[i].va);
     memset(allocation,0,sizeof(allocation));memset(&wb,0,sizeof(wb));wb_started=0;
     memset(wb_dbg_r32,0,sizeof(wb_dbg_r32));memset(wb_dbg_r16,0,sizeof(wb_dbg_r16));
-    messages[0]=0;board=2;enabled=cpus=cpu=topology.num_cpus=1;seconds=30;ceiling=4;other=0;
+    messages[0]=0;board=2;enabled=cpus=cpu=topology.num_cpus=1;seconds=30;ceiling=4;other=0;crm_all=sm_diag=0;
     creates=exits=deallocs=maps=unmaps=fail_map=time_us=0;
     no_ack=no_resume_ack=pending_irq=lost_guard=0;gic_enabled=WB_IRQ|1;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
+    allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=0;
 }
 static void admission(void)
 {
@@ -214,9 +238,23 @@ static void noc_cleanup(void)
     setup();wb.crm_dev.state=GIULIA_CRM_ACTIVE;crm_rc=GIULIA_CRM_RETAINED;
     assert(wb_release_noc(0)==GIULIA_BRINGUP_RETAINED && crm_calls==1);
 }
+static void noc_prepare(void)
+{
+    struct giulia_wifi_supply supply={0};
+    setup();allow_prepare=1;wb.crm_all_states=0;
+    assert(wb_prepare_noc(0,&supply)==0);
+    assert(bcm_policy_seen==GIULIA_BCM_PCIE0_FIXED_500_800 && crm_patches_seen==GIULIA_BCM_PCIE0_PATCHES);
+    assert(cx_level_seen==256u && rpmh_cx_sel_seen==5u); /* Never down-volt HLOS Nominal CX. */
+
+    setup();allow_prepare=1;wb.crm_all_states=1;
+    assert(wb_prepare_noc(0,&supply)==0);
+    assert(bcm_policy_seen==GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES &&
+           crm_patches_seen==GIULIA_BCM_PCIE0_ALL_STATES_PATCHES);
+    assert(cx_level_seen==256u && rpmh_cx_sel_seen==5u);
+}
 int main(void)
 {
-    admission();cleanup();single_access();noc_cleanup();setup();
+    admission();cleanup();single_access();noc_cleanup();noc_prepare();setup();
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     return 0;
 }
