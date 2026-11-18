@@ -164,7 +164,7 @@ int giulia_pcie_link_read_root_id(struct giulia_pcie_link *s, uint32_t flags)
 int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
 {
     assert(wb.sm_diag == WB_SM_ENDPOINT && flags ==
-        (GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID));
+        (GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID | GIULIA_LINK_VENDOR_TRAINING));
     assert(wb.dbi.address && wb.atu.address && wb.cfg.address && !wb.bar0.address);
     s->root_id = wb_link_r32(0, GIULIA_LINK_DBI, 0);
     s->state = GIULIA_LINK_PREPARED;

@@ -579,7 +579,8 @@ static int wb_pcie_identify_endpoint(void)
 {
     struct giulia_pcie_link *link = &wb.bringup.link;
     struct giulia_wifi_gpio *gpio = &wb.bringup.supply.gpio;
-    int rc = giulia_pcie_link_prepare(link, GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID);
+    int rc = giulia_pcie_link_prepare(link, GIULIA_LINK_PREPARE_REQUIRED |
+        GIULIA_LINK_EXACT_ROOT_ID | GIULIA_LINK_VENDOR_TRAINING);
     wb_log("ace5-wifi-bringup: DBI root id rc=%d id=%#x; prepare stage=%u fail=%u last=%u/%#x/%#x\n",
         rc, link->root_id, link->stage, link->failure_stage, wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2]);
     if (rc) return rc;
@@ -592,9 +593,10 @@ static int wb_pcie_identify_endpoint(void)
     wb_log("ace5-wifi-bringup: PCIe endpoint reset release rc=%d\n", release);
     if (!release && wb_guard() && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED) {
         rc = giulia_pcie_link_identify(link, GIULIA_LINK_TRAIN_REQUIRED);
-        wb_log("ace5-wifi-bringup: PCIe endpoint identify rc=%d id=%#x lnk=%#x stage=%u fail=%u polls=%u debug=%#x/%#x\n",
+        wb_log("ace5-wifi-bringup: PCIe endpoint identify rc=%d id=%#x lnk=%#x stage=%u fail=%u polls=%u debug=%#x/%#x elbi=%#x ltssm=%#x\n",
             rc, link->endpoint_id, link->link_status, link->stage, link->failure_stage,
-            link->polls, link->debug0, link->debug1);
+            link->polls, link->debug0, link->debug1, link->elbi_status,
+            (link->elbi_status >> 12) & 0x3fu);
     } else {
         rc = GIULIA_LINK_PREREQUISITE;
     }

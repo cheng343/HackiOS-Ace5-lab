@@ -31,6 +31,7 @@
 #define PARF_HALT 0x1a8u
 #define PARF_LTSSM 0x1b0u
 #define PARF_INT_MASK 0x22cu
+#define PARF_CFG_BITS_3 0x2c4u
 #define PARF_DBI_LO 0x350u
 #define PARF_DBI_HI 0x354u
 #define PARF_SLV_LO 0x358u
@@ -51,12 +52,16 @@
 #define PCI_MEM 0x20u
 #define PCI_CAPLIST 0x34u
 #define DBI_LINK 0x710u
+#define DBI_LANE_SKEW 0x714u
 #define DBI_DEBUG0 0x728u
 #define DBI_DEBUG1 0x72cu
 #define DBI_WIDTH 0x80cu
 #define DBI_MSI_ENABLE 0x828u
 #define DBI_RO 0x8bcu
 #define DBI_VERSION 0x8f8u
+/* PCIe0 ELBI is in the same mapped CPU page, just past dm_core. */
+#define ELBI_SYS_STTS 0xf28u
+#define XMLH_LINK_UP BIT(10)
 #define ATU_CTRL1 0x00u
 #define ATU_CTRL2 0x04u
 #define ATU_BASE_LO 0x08u
@@ -124,11 +129,18 @@ static int profile_matches(struct giulia_pcie_link *s)
         ((s->link_status >> 4) & 0x3fu) == GIULIA_PCIE_BOOT_LANES;
 }
 
+static int xmlh_link_up(struct giulia_pcie_link *s)
+{
+    if (!s->vendor_training) return 1;
+    s->elbi_status = r32(s, GIULIA_LINK_DBI, ELBI_SYS_STTS);
+    return s->elbi_status != UINT32_MAX && (s->elbi_status & XMLH_LINK_UP);
+}
+
 /* Each endpoint transaction is guarded. Like Linux's map_bus check this
  * cannot prevent an asynchronous link-down SError between check and access.
  */
 static int cfg_ok(struct giulia_pcie_link *s)
-{ return s->config_atu_enabled && link_up(s) && profile_matches(s); }
+{ return s->config_atu_enabled && link_up(s) && profile_matches(s) && xmlh_link_up(s); }
 static int cr32(struct giulia_pcie_link *s, uint32_t o, uint32_t *v)
 {
     if (!cfg_ok(s)) return 0;
@@ -241,9 +253,13 @@ static int snapshot_core(struct giulia_pcie_link *s)
     static const uint32_t atu[] = {ATU_CTRL1, ATU_CTRL2, ATU_BASE_LO,
         ATU_BASE_HI, ATU_LIMIT, ATU_TARGET_LO, ATU_TARGET_HI, ATU_LIMIT_HI};
     if (!save(s, GIULIA_LINK_PARF, PARF_LTSSM, 4)) return 0;
+    if (s->vendor_training && !save(s, GIULIA_LINK_PARF, PARF_CFG_BITS_3, 4))
+        return 0;
     /* RO enable saved first, restored last among DBI registers. */
     for (unsigned i = 0; i < sizeof(dbi) / sizeof(dbi[0]); i++)
         if (!save(s, GIULIA_LINK_DBI, dbi[i], 4)) return 0;
+    if (s->vendor_training && !save(s, GIULIA_LINK_DBI, DBI_LANE_SKEW, 4))
+        return 0;
     if (!save(s, GIULIA_LINK_DBI, PCI_COMMAND, 2) ||
         !save(s, GIULIA_LINK_DBI, PCI_CLASS, 2) ||
         !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCAP, 4) ||
@@ -430,6 +446,8 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
 {
     uint16_t unused_msi, unused_msix;
     uint32_t v;
+    if ((flags & GIULIA_LINK_VENDOR_TRAINING) && !(flags & GIULIA_LINK_EXACT_ROOT_ID))
+        return GIULIA_LINK_PREREQUISITE;
     int rc = giulia_pcie_link_read_root_id(s, flags);
     if (rc) return rc;
     if ((r16(s, GIULIA_LINK_DBI, PCI_HEADER) & 0x7fu) != 1u)
@@ -459,10 +477,10 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
         if ((out & ATU_ENABLE) || (in & ATU_ENABLE) || msi)
             return record_failure(s, GIULIA_LINK_BUSY);
     }
+    s->vendor_training = !!(flags & GIULIA_LINK_VENDOR_TRAINING);
     if (!snapshot_core(s)) return record_failure(s, GIULIA_LINK_READBACK);
     s->core_owned = 1;
-    /* LTSSM snapshot is the one additional PARF entry in the core snapshot. */
-    s->parf_count++;
+    s->parf_count += s->vendor_training ? 2 : 1;
     s->stage = GIULIA_LINK_STAGE_ROOT;
     v = r32(s, GIULIA_LINK_DBI, DBI_RO);
     if (v == 0xffffffffu ||
@@ -491,6 +509,13 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     DCHANGE(s->root_pcie_cap + SLTCAP, BIT(6), 0, 0xffffffffu);
     if (!change16(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCTL, 3u, 0))
         return fail(s, GIULIA_LINK_READBACK);
+    /* Stock msm_pcie_enable_link does this with PERST# held: release
+     * FAL10 Qactive veto override and program the lane skew controls. */
+    if (s->vendor_training) {
+        if (!change32(s, GIULIA_LINK_PARF, PARF_CFG_BITS_3, BIT(0), BIT(8), BIT(0) | BIT(8)))
+            return fail(s, GIULIA_LINK_READBACK);
+        DCHANGE(DBI_LANE_SKEW, 0, BIT(5), BIT(5));
+    }
     DWRITE(DBI_RO, v, BIT(0));
 #undef DWRITE
 #undef DCHANGE
@@ -580,12 +605,15 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     if (!change32(s, GIULIA_LINK_PARF, PARF_LTSSM, 0, BIT(8), BIT(8)))
         return fail(s, GIULIA_LINK_READBACK);
     for (s->polls = 0; s->polls <= 1000u; s->polls++) {
-        if (link_up(s)) break;
+        if (link_up(s) && xmlh_link_up(s)) break;
         if (s->polls < 1000u) delay(s, 1000);
     }
     s->debug0 = r32(s, GIULIA_LINK_DBI, DBI_DEBUG0);
     s->debug1 = r32(s, GIULIA_LINK_DBI, DBI_DEBUG1);
-    if (s->polls > 1000u) return fail(s, GIULIA_LINK_TIMEOUT);
+    if (s->polls > 1000u) {
+        (void)xmlh_link_up(s);
+        return fail(s, GIULIA_LINK_TIMEOUT);
+    }
     if (!profile_matches(s)) return fail(s, GIULIA_LINK_PROFILE);
     s->stage = GIULIA_LINK_STAGE_CONFIG_ATU;
     s->atu_touched = 1;

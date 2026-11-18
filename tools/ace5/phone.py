@@ -378,7 +378,8 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
             followed = re.findall(r'ace5-wifi-bringup: CESTA follow-up rc=(-?\d+)', text)
             if (not followed or any(rc != '0' for rc in followed) or
                     'ace5-wifi-bringup: CESTA perf current=' not in text):
-                raise RuntimeError(f'CESTA performance or DBI check unconfirmed; preserve {log} and cold reboot')
+                check = 'PCIe endpoint training or identification' if sm_diag == 7 else 'CESTA performance or DBI check'
+                raise RuntimeError(f'{check} incomplete; preserve {log} and cold reboot')
         if sm_diag >= 6:
             identities = re.findall(r'ace5-wifi-bringup: DBI root id rc=(-?\d+) id=([0-9a-fx]+)', text)
             if (not identities or any(rc != '0' or int(value, 16) != 0x011317cb

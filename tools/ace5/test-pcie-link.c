@@ -724,6 +724,36 @@ static void test_split_prepare(void)
     puts("Ace5 PCIe PARF-before-PHY / DBI-after-PIPE and PARF-only shutdown passed");
 }
 
+static void test_vendor_training(void)
+{
+    struct fake f;
+    struct giulia_pcie_link s;
+    const uint32_t vendor = GIULIA_LINK_VENDOR_TRAINING | GIULIA_LINK_EXACT_ROOT_ID;
+
+    for (unsigned xmlh = 0; xmlh <= 1; xmlh++) {
+        init(&f, &s);
+        struct giulia_pcie_link_io io = io_for(&f);
+        f.regs[GIULIA_LINK_PARF][0x2c4 / 4] = BIT(11) | BIT(0);
+        f.regs[GIULIA_LINK_DBI][0x714 / 4] = BIT(7);
+        f.regs[GIULIA_LINK_DBI][0xf28 / 4] = xmlh ? (0x11u << 12) | BIT(10) : 2u << 12;
+        assert(giulia_pcie_link_prepare_parf(&s, GIULIA_LINK_PARF_REQUIRED, &io) == 0);
+        unsigned writes = f.writes;
+        assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED |
+            GIULIA_LINK_VENDOR_TRAINING) == GIULIA_LINK_PREREQUISITE);
+        assert(f.writes == writes && !f.core_reads);
+        assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED | vendor) == 0);
+        assert(f.regs[GIULIA_LINK_PARF][0x2c4 / 4] == (BIT(11) | BIT(8)));
+        assert(f.regs[GIULIA_LINK_DBI][0x714 / 4] == (BIT(7) | BIT(5)));
+        int rc = giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED);
+        assert(s.elbi_status == f.regs[GIULIA_LINK_DBI][0xf28 / 4]);
+        assert(rc == (xmlh ? GIULIA_LINK_OK : GIULIA_LINK_TIMEOUT));
+        assert(f.cfg_accesses == xmlh && !f.bar_probes);
+        assert(quiesce_then_stop(&f, &s) == 0);
+        assert(f.regs[GIULIA_LINK_PARF][0x2c4 / 4] == (BIT(11) | BIT(0)));
+        assert(f.regs[GIULIA_LINK_DBI][0x714 / 4] == BIT(7));
+    }
+}
+
 static void test_parf_drift_before_dbi(void)
 {
     const uint32_t offsets[] = {0x350u, 0x634u, 0x358u, 0x1b0u, 0x22cu};
@@ -825,6 +855,7 @@ int main(void)
     test_memory_readback_and_retry();
     test_deferred_parf_restore();
     test_split_prepare();
+    test_vendor_training();
     test_parf_drift_before_dbi();
     test_boot_profile();
     puts("SM8650 PCIe link: ownership, training, config, BAR and rollback mocks passed");

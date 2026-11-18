@@ -60,7 +60,9 @@ enum giulia_pcie_link_prerequisite {
      * resets PARF_INT_MASK (0x22c) non-zero. Snapshot and explicitly clear it
      * to 0 in configure_parf() instead of rejecting as a foreign active IRQ. */
     GIULIA_LINK_COLD_RESET_MASK = 1u << 8,
-    GIULIA_LINK_EXACT_ROOT_ID = 1u << 9
+    GIULIA_LINK_EXACT_ROOT_ID = 1u << 9,
+    /* Apply the stock pre-PERST controls and check PCIe0 ELBI link status. */
+    GIULIA_LINK_VENDOR_TRAINING = 1u << 10
 };
 #define GIULIA_LINK_PARF_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
     GIULIA_LINK_RAILS_NOC_READY | GIULIA_LINK_CLOCKS_RC_RESET_READY | \
@@ -94,13 +96,13 @@ struct giulia_pcie_link {
     struct giulia_pcie_link_io io;
     uint32_t state, stage, failure_stage;
     int error;
-    uint32_t root_id, endpoint_id, link_status, debug0, debug1;
+    uint32_t root_id, endpoint_id, link_status, debug0, debug1, elbi_status;
     uint32_t polls, bar0_mask, bar0_mask_hi;
     uint16_t root_pcie_cap, endpoint_pcie_cap, endpoint_msi_cap;
     uint16_t endpoint_msix_cap;
     uint8_t saved_count, config_atu_enabled, atu_touched;
     uint8_t parf_count, parf_owned, core_owned;
-    uint8_t memory_owned, memory_enabled, mask_int_owned;
+    uint8_t memory_owned, memory_enabled, mask_int_owned, vendor_training;
     struct giulia_pcie_link_saved saved[48];
 };
 
