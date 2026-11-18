@@ -92,7 +92,7 @@ int main(void)
         "ace5_crm_channel_test=1x","ace5_crm_channel_test=0",""};
     for (unsigned i=0;i<sizeof(invalid)/sizeof(invalid[0]);i++)
         assert(!quiet_flag_present(invalid[i],"ace5_crm_channel_test=1"));
-    crm_reset_required=0; assert(crm_command_allowed("oem run"));
+    crm_reset_required=pdc_reset_required=0; assert(crm_command_allowed("oem run"));
     crm_reset_required=1;
     const char *allowed[]={"getvar:result","getvar:crm-reset-required","upload",
         "oem screenshot","oem stop","reboot"};
