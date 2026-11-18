@@ -17,6 +17,7 @@ static void select_trial(const char *cmd,int other_cpu)
 {
     struct { const char *cmdline; } pi={cmd};
     unsigned kernel_mpidr=other_cpu ? 1u:0u,this_mpidr=0;
+    unsigned kernel_budget=75;
     crm_reset_required=pdc_reset_required=0;
 #include "quiet-enable.inc"
 }
@@ -55,6 +56,13 @@ static void flush_dcache(uint64_t a, uint64_t b)
         }
     } else assert(a == (uint64_t)(uintptr_t)&other_cpu_done && b == a + 8);
 }
+static void quiet_reset_on_request(uint64_t base)
+{
+    assert(masked && firmware_quiet.active && firmware_quiet.reset_request == 1);
+    firmware_quiet.reset_ack = LOADER_QUIET_RESET_ARMED;
+    clean_dcache(base + 128, base + sizeof(firmware_quiet));
+    other_cpu_done = 1;
+}
 #include "quiet-observer.inc"
 static void reset(void)
 {
@@ -71,6 +79,10 @@ int main(void)
     assert(!firmware_quiet_enabled && !pdc_reset_required);
     select_trial("ace5_aop_channel_test=40",1);
     assert(!firmware_quiet_enabled && !pdc_reset_required);
+    select_trial("ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_cold_reset=1 bootcpu=1",1);
+    assert(firmware_quiet_enabled && firmware_quiet.reset_capability);
+    select_trial("ace5_wifi_bringup=1 ace5_wifi_bringup_stage=5 ace5_wifi_cold_reset=1 bootcpu=1",1);
+    assert(firmware_quiet_enabled && !firmware_quiet.reset_capability);
     puts("PASS: actual RPMh READ selection enables quiet and cold-reset gate");
     assert(quiet_flag_present("cpus=1 ace5_crm_channel_test=1 bootcpu=1","ace5_crm_channel_test=1"));
     assert(quiet_flag_present("cpus=1 ace5_crm_channel_test=2 bootcpu=1","ace5_crm_channel_test=2"));
@@ -105,6 +117,9 @@ int main(void)
     assert(observer_firmware_quiet(0, 90, &last) == 0 && other_cpu_done && restored == 1 && !firmware_quiet.ack);
     reset(); firmware_quiet.request = 6; other_cpu_done = 1;
     assert(!observer_firmware_quiet(0, 90, &last) && !restored);
+    reset(); firmware_quiet.request = firmware_quiet.reset_capability = firmware_quiet.reset_request = 1;
+    assert(!observer_firmware_quiet(0, 90, &last) && other_cpu_done && clean_acks == 3);
+    assert(firmware_quiet.reset_ack == LOADER_QUIET_RESET_ARMED && !masked);
     puts("PASS: actual loader firmware quiet ACK, cancellation, kernel return and interrupt restore");
     puts("PASS: actual quiet opt-in parser and retained CRM cold-reset command gate");
     return 0;

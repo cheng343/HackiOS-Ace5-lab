@@ -770,6 +770,7 @@ jump_to_kernel(uint64_t entry, uint64_t boot_args_pa)
 #define PSCI_CPU_OFF       0x84000002u
 #define PSCI_CPU_ON        0xC4000003u
 #define PSCI_AFFINITY_INFO 0xC4000004u      /* (MPIDR, 0): 0 = that core is on, 1 = off, 2 = being started */
+#define PSCI_SYSTEM_RESET  0x84000009u
 #define PSCI_NOT_SUPPORTED (-1)
 
 /* each alone in a cache line: one core reads them with its caches off */
@@ -963,6 +964,9 @@ static struct loader_firmware_quiet firmware_quiet = {
     .size = sizeof(struct loader_firmware_quiet)
 };
 static int firmware_quiet_enabled;
+#ifdef HACKIOS_GIULIA
+static void quiet_reset_on_request(uint64_t base);
+#endif
 /* A selected first CRM channel has no verified select-none rollback. Keep
  * the payload/ownership reserved after XNU returns; only inspection/upload
  * and cold reboot are admitted until the platform reset ends its lifetime. */
@@ -2344,6 +2348,11 @@ observer_firmware_quiet(uint64_t started, uint64_t budget, uint64_t *last_pet)
             flush_dcache(base, base + 128);
             flush_dcache((uint64_t)(uintptr_t)&other_cpu_done, (uint64_t)(uintptr_t)&other_cpu_done + 8);
             if (other_cpu_done || firmware_quiet.request != request) break;
+#ifdef HACKIOS_GIULIA
+            if (firmware_quiet.reset_capability && firmware_quiet.reset_request == 1 &&
+                !firmware_quiet.reset_ack)
+                quiet_reset_on_request(base);
+#endif
             if (wdt_armed && seconds_since(*last_pet) >= 5 &&
                 observer_watchdog_within_budget(seconds_since(started), budget)) {
                 wdt_pet(); *last_pet = READ_SYSREG(CNTVCT_EL0);
@@ -2557,6 +2566,60 @@ wdt_arm(void)
 	    r_ctl, r_pet);
 	wdt_armed = (r_pet == 0);
 }
+
+#ifdef HACKIOS_GIULIA
+static int
+quiet_watchdog_disarm(void)
+{
+    uint64_t ctl = 0;
+    if (smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL)) return -1;
+    if (!(ctl & GIULIA_WDT_ENABLED)) return 0;
+    if (smc_call(GIULIA_WDT_CONTROL, 2, 0, NULL, NULL) ||
+        smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL)) return -1;
+    return (ctl & GIULIA_WDT_ENABLED) ? -1 : 0;
+}
+
+/* Runs with firmware interrupts masked. Only PSCI/SMC and cached RAM are used.
+ * Once acknowledged, only the assembly return from the borrowed core can cancel. */
+static void
+quiet_reset_on_request(uint64_t base)
+{
+    const uint64_t done = (uint64_t)(uintptr_t)&other_cpu_done;
+    uint64_t ctl = 0, detail;
+    if (!READ_SYSREG(CNTFRQ_EL0) ||
+        smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
+        (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED))) {
+        firmware_quiet.reset_ack = LOADER_QUIET_RESET_FAILED;
+        clean_dcache(base + 128, base + sizeof(firmware_quiet));
+        return;
+    }
+    if (giulia_wdt_configure(smc_call, &detail)) {
+        if (quiet_watchdog_disarm())
+            psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+        firmware_quiet.reset_ack = LOADER_QUIET_RESET_FAILED;
+        clean_dcache(base + 128, base + sizeof(firmware_quiet));
+        return;
+    }
+    const uint64_t started = READ_SYSREG(CNTVCT_EL0);
+    firmware_quiet.reset_ack = LOADER_QUIET_RESET_ARMED;
+    clean_dcache(base + 128, base + sizeof(firmware_quiet));
+    while (seconds_since(started) < LOADER_QUIET_RESET_SECONDS) {
+        flush_dcache(done, done + sizeof(other_cpu_done));
+        if (other_cpu_done) {
+            if (quiet_watchdog_disarm() == 0) return;
+            break;
+        }
+        __asm__ volatile("yield");
+    }
+    psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+    /* A failed PSCI leaves the watchdog armed unless the kernel safely returns. */
+    for (;;) {
+        flush_dcache(done, done + sizeof(other_cpu_done));
+        if (other_cpu_done && quiet_watchdog_disarm() == 0) return;
+        __asm__ volatile("yield");
+    }
+}
+#endif
 
 #if defined(HACKIOS_GIULIA) && defined(HACKIOS_DIAGNOSTIC)
 #define GIULIA_WDT_FALLBACK_SECONDS 24u
@@ -3123,6 +3186,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	dt_begin(&w, "chosen");
     firmware_quiet_enabled = 0;
+    firmware_quiet.reset_capability = 0;
 #if defined(HACKIOS_GIULIA)
     if (kernel_mpidr != this_mpidr) {
         int crm_test=quiet_flag_present(pi.cmdline,"ace5_crm_channel_test=1") ||
@@ -3134,10 +3198,16 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
             quiet_flag_present(pi.cmdline,"ace5_aop_channel_test=3");
         if (crm_test) crm_reset_required=1;
         if (pdc_test) pdc_reset_required=1;
+        firmware_quiet.reset_capability=quiet_flag_present(pi.cmdline,"ace5_wifi_bringup=1") &&
+            quiet_flag_present(pi.cmdline,"ace5_wifi_bringup_stage=4") &&
+            quiet_flag_present(pi.cmdline,"ace5_wifi_cold_reset=1") &&
+            quiet_flag_present(pi.cmdline,"bootcpu=1") &&
+            kernel_budget >= 60 && kernel_budget <= 120 && !wdt_armed;
     }
 #endif
     if (firmware_quiet_enabled) {
         firmware_quiet.request = firmware_quiet.ack = firmware_quiet.active = 0;
+        firmware_quiet.reset_request = firmware_quiet.reset_ack = 0;
         clean_dcache((uint64_t)(uintptr_t)&firmware_quiet,
             (uint64_t)(uintptr_t)&firmware_quiet + sizeof(firmware_quiet));
         dt_prop_u64(&w, "loader-firmware-quiet", (uint64_t)(uintptr_t)&firmware_quiet);

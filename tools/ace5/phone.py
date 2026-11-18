@@ -294,9 +294,10 @@ def ace5_pdc_test_arguments(enabled, table, bootcpu, kernel, seconds, other_hard
 
 
 def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log,
-                               stage=0, crm_all_states=False, sm_diag=0, sm_profile=None, watchdog=0):
+                               stage=0, crm_all_states=False, sm_diag=0, sm_profile=None,
+                               watchdog=0, cold_reset=False):
     if not enabled:
-        if stage or crm_all_states or sm_diag or sm_profile or watchdog:
+        if stage or crm_all_states or sm_diag or sm_profile or watchdog or cold_reset:
             raise RuntimeError('Wi-Fi stage, CRM and CESTA options require --wifi-bringup-test')
         return ''
     if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
@@ -308,29 +309,38 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
     if watchdog and (stage != 4 or crm_all_states or sm_diag or sm_profile or
                      (watchdog == 2 and seconds < 75)):
         raise RuntimeError('Watchdog diagnostic requires isolated Stage 4 and at least 75 seconds for expiry')
+    if (cold_reset and (stage != 4 or crm_all_states or watchdog or seconds < 60 or
+                       (sm_diag, bool(sm_profile)) not in ((0, False), (4, True)))) or (
+                       sm_diag == 4 and not cold_reset):
+        raise RuntimeError('Cold-reset profile requires isolated Stage 4 and 60..120 seconds')
     out = ' ace5_wifi_bringup=1'
     if stage:
         out += f' ace5_wifi_bringup_stage={stage}'
     if crm_all_states:
         out += ' ace5_wifi_crm_all_states=1'
-    if sm_diag:
+    if sm_diag and not sm_profile:
         out += f' ace5_wifi_sm_diag={int(sm_diag)}'
     if sm_profile:
         data = sm_profile.read_bytes()
         digest = 'b3ed154a6cabba921d99cf703d70255e2239977683153992c4a8f1cc5211d90e'
         if len(data) != 80 or hashlib.sha256(data).hexdigest() != digest:
             raise RuntimeError('CESTA profile does not match the verified Ace 5 device tree')
-        out += f' ace5_wifi_sm_diag=3 ace5_cesta_profile=v{data.hex()}'
+        out += f' ace5_wifi_sm_diag={4 if cold_reset else 3} ace5_cesta_profile=v{data.hex()}'
     if watchdog:
         out += f' ace5_wifi_watchdog={watchdog}'
+    if cold_reset:
+        out += ' ace5_wifi_cold_reset=1'
     return out
 
 
-def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=False, watchdog=0):
+def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=False,
+                           watchdog=0, cold_reset=False):
     if not enabled:
         return
     if watchdog == 2:
         raise RuntimeError(f'Watchdog expiry did not reset the phone; preserve {log} and cold reboot')
+    if cold_reset and sm_diag != 4:
+        raise RuntimeError(f'Independent cold reset did not occur; preserve {log} and cold reboot')
     if watchdog == 1:
         statuses = re.findall(r'ace5-wifi-bringup: quiet watchdog status ret=(\d+) ctl=([0-9a-fx]+)', text)
         if not statuses or any(ret != '0' or (int(ctl, 16) & 0x80000001) for ret, ctl in statuses):
@@ -339,7 +349,7 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
                                  r'branch0=(?:0x[0-9a-f]+|0) override=(?:0x[0-9a-f]+|0) '
                                  r'clkreq=(?:0x[0-9a-f]+|0)', text):
         raise RuntimeError(f'CESTA snapshot missing; preserve {log} and cold reboot')
-    if sm_diag >= 2:
+    if sm_diag in (2, 3):
         cold_checks = re.findall(r'ace5-wifi-bringup: cesta cold-check rc=(-?\d+)[ \t\r]*$', text, re.M)
         if not cold_checks or any(rc != '0' for rc in cold_checks):
             raise RuntimeError(f'Empty CESTA tables unconfirmed; preserve {log} and cold reboot')
@@ -355,6 +365,16 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
     clean = 'ace5-wifi-bringup: cleanup complete; IRQ37 restored and firmware resumed (cold reboot required)'
     held = 'ace5-wifi-bringup: resources retained; firmware quiet and IRQ37 isolation retained until cold reboot'
     start_ok = starts and all(tuple(map(int, row)) == (0, expected, stage, 0, 0, 0, 0) for row in starts)
+    if sm_diag == 4:
+        results = re.findall(r'ace5-wifi-bringup: cesta START result=(-?\d+) observe=(-?\d+)', text)
+        samples = set(re.findall(r'ace5-wifi-bringup: cesta execution sample=(\d+) start=', text))
+        if (not start_ok or reset_required != 'yes' or not results or
+                any(row != ('1', '0') for row in results) or samples != {'0', '1'} or
+                'ace5-wifi-bringup: loader cold reset armed' not in text or
+                'ace5-wifi-bringup: cesta START write returned' not in text or
+                'DBI+0 access begin' in text):
+            raise RuntimeError(f'Guarded CESTA START or samples unconfirmed; preserve {log} and cold reboot')
+        return
     stop_ok = stops and all(tuple(map(int, row)) in ((0, 13), (1, 14)) for row in stops)
     # Captured logs may contain duplicate console/loader copies. Every copy
     # must agree. A normal timed return or the old cleanup marker is not proof.
@@ -409,6 +429,10 @@ sm.add_argument('--wifi-watchdog-status', dest='wifi_watchdog', action='store_co
                 help='Read idle Gunyah watchdog status on the XNU core under Stage 4 firmware quiet')
 sm.add_argument('--wifi-watchdog-expiry', dest='wifi_watchdog', action='store_const', const=2,
                 help='Let the Gunyah watchdog expire at Stage 4; requires external recovery observation and 75..120 seconds')
+sm.add_argument('--wifi-cold-reset-test', action='store_true',
+                help='Test the Stage 4 loader cold reset deadline without starting CESTA; requires 60..120 seconds')
+sm.add_argument('--wifi-cesta-start', type=Path,
+                help='Start CESTA once with the stock profile and an independently verified loader reset; no DBI')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -580,7 +604,9 @@ try:
                 args.bootcpu, args.kernel, seconds,
                 args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test or args.wlan_pdc_test,
                 args.live_log, args.wifi_bringup_stage, args.wifi_crm_all_states,
-                args.wifi_sm_diag, args.wifi_sm_stage, args.wifi_watchdog)
+                4 if args.wifi_cesta_start else args.wifi_sm_diag,
+                args.wifi_cesta_start or args.wifi_sm_stage, args.wifi_watchdog,
+                args.wifi_cold_reset_test or bool(args.wifi_cesta_start))
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -672,7 +698,8 @@ try:
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
             check_wifi_bringup_log(args.wifi_bringup_test, args.wifi_bringup_stage, saved_log,
                 getvar('power-reset-required') if args.wifi_bringup_test else None, log,
-                3 if args.wifi_sm_stage else args.wifi_sm_diag, args.wifi_watchdog)
+                4 if args.wifi_cesta_start else 3 if args.wifi_sm_stage else args.wifi_sm_diag,
+                args.wifi_watchdog, args.wifi_cold_reset_test or bool(args.wifi_cesta_start))
             check_rpmh_read_log(args.rpmh_read_test,saved_log,
                 getvar('power-reset-required') if args.rpmh_read_test else None,log)
             if (args.aop_channel_test or args.aop_cx_vote_test) and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:

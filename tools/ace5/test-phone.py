@@ -71,6 +71,16 @@ class PhoneTests(unittest.TestCase):
             check(True, 4, cold, 'yes', self.log, 3)
         staged = cold + 'ace5-wifi-bringup: cesta stage rc=0 discard=0 cold=0\n'
         check(True, 4, staged, 'yes', self.log, 3)
+        start = (snapshot + '\nace5-wifi-bringup: loader cold reset armed\n'
+                 'ace5-wifi-bringup: cesta START write returned\n'
+                 'ace5-wifi-bringup: cesta execution sample=0 start=0x1\n'
+                 'ace5-wifi-bringup: cesta execution sample=1 start=0x1\n'
+                 'ace5-wifi-bringup: cesta START result=1 observe=0; retained until reset\n')
+        check(True, 4, start, 'yes', self.log, sm_diag=4, cold_reset=True)
+        with self.assertRaisesRegex(RuntimeError, 'Guarded CESTA START'):
+            check(True, 4, start + 'DBI+0 access begin', 'yes', self.log, sm_diag=4, cold_reset=True)
+        with self.assertRaisesRegex(RuntimeError, 'Independent cold reset did not occur'):
+            check(True, 4, good, 'yes', self.log, cold_reset=True)
         with self.assertRaisesRegex(RuntimeError, 'CESTA staging and rollback unconfirmed'):
             check(True, 4, staged + 'ace5-wifi-bringup: cesta stage rc=0 discard=-3 cold=-2\n',
                   'yes', self.log, 3)
@@ -98,6 +108,8 @@ class PhoneTests(unittest.TestCase):
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_watchdog=1')
         with self.assertRaisesRegex(RuntimeError, 'Watchdog diagnostic requires'):
             fn(True, table, 1, 'kernel', 30, False, False, 4, watchdog=2)
+        self.assertEqual(fn(True, table, 1, 'kernel', 60, False, False, 4, cold_reset=True),
+                         ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_cold_reset=1')
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, False, True),
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_sm_diag=1')
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, False, 2),

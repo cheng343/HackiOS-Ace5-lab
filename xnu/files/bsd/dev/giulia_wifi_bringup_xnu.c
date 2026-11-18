@@ -34,6 +34,7 @@ extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
 extern void loader_log_line(const char *);
+extern void loader_return(void);
 
 #define WB_IRQ (1u << 5)
 /* Observed Ace 5 HLOS DRV2 CX handoff is selector 5 (corner 256 = Nominal).
@@ -41,6 +42,7 @@ extern void loader_log_line(const char *);
 #define WB_CX_NOMINAL_LEVEL 256u
 #define WB_SM_TABLES 2u
 #define WB_SM_STAGE 3u
+#define WB_SM_START 4u
 #define WB_SM_PROFILE_BYTES (4u * GIULIA_CESTA_WORDS)
 #define WB_WATCHDOG_STATUS 1u
 #define WB_WATCHDOG_EXPIRY 2u
@@ -60,7 +62,7 @@ static struct {
     uint8_t pdc_table[508];
     uint8_t cesta_profile[WB_SM_PROFILE_BYTES];
     uint32_t irq_dirty, irq_prior, guard_failed, db_version, max_stage;
-    uint32_t crm_all_states, sm_diag, watchdog_trial, cx_sel_voted, cx_level_voted;
+    uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
     uint32_t noc_step;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
@@ -491,7 +493,16 @@ static int wb_cesta_table_read(__unused void *cookie, uint32_t off, uint32_t *va
 static int wb_cesta_table_write(void *cookie, uint32_t off, uint32_t value)
 {
     const uint32_t branch = GIULIA_CESTA_BRANCH_OFFSET;
-    if (wb.sm_diag != WB_SM_STAGE || (off & 3u) ||
+    if (wb.sm_diag == WB_SM_START && off == GIULIA_CESTA_START_OFFSET) {
+        if (value != 1 || wb.quiet->reset_ack != LOADER_QUIET_RESET_ARMED ||
+            wb_cesta_table_lease(cookie))
+            return -1;
+        wb_log("ace5-wifi-bringup: cesta START write begin\n");
+        wb_store(&wb.pcie_sm, off, value);
+        wb_log("ace5-wifi-bringup: cesta START write returned\n");
+        return 0;
+    }
+    if (wb.sm_diag < WB_SM_STAGE || (off & 3u) ||
         (off >= 4u * GIULIA_CESTA_SEQUENCE_WORDS &&
         (off < branch || off >= branch + 4u * GIULIA_CESTA_BRANCH_WORDS)) ||
         wb_cesta_table_lease(cookie))
@@ -501,9 +512,30 @@ static int wb_cesta_table_write(void *cookie, uint32_t off, uint32_t value)
     return 0;
 }
 
+static int wb_arm_cold_reset(__unused void *cookie)
+{
+    if (!wb.cold_reset || wb_stage4_reset_lease() || !wb.quiet->reset_capability ||
+        wb.quiet->reset_request || wb.quiet->reset_ack)
+        return -1;
+    wb.quiet->reset_request = 1;
+    wb_barrier(0);
+    for (unsigned i = 0; i < 10000; i++) {
+        uint32_t ack = wb.quiet->reset_ack;
+        if (ack == LOADER_QUIET_RESET_ARMED) {
+            wb_log("ace5-wifi-bringup: loader cold reset armed\n");
+            return 0;
+        }
+        if (ack == LOADER_QUIET_RESET_FAILED) break;
+        delay(100);
+    }
+    wb_log("ace5-wifi-bringup: loader cold reset arm unconfirmed\n");
+    return -1;
+}
+
 static const struct giulia_cesta_io wb_cesta_table_io = {
     .read = wb_cesta_table_read, .write = wb_cesta_table_write,
-    .barrier = wb_barrier, .validate_lease = wb_cesta_table_lease
+    .barrier = wb_barrier, .validate_lease = wb_cesta_table_lease,
+    .validate_reset = wb_arm_cold_reset
 };
 
 static int wb_cesta_read_cold(void)
@@ -518,6 +550,24 @@ static int wb_cesta_read_cold(void)
     return rc;
 }
 
+static int wb_cesta_observe(void)
+{
+    /* OnePlus pineapple-pcie DT pcie-sm-debug offsets (sequence state). */
+    static const uint32_t offsets[] = {0x1090u, 0x1088u, 0x1070u, 0x1078u, 0x1080u, 0x109cu};
+    for (unsigned sample = 0; sample < 2; sample++) {
+        uint32_t values[sizeof(offsets) / sizeof(offsets[0])];
+        for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); i++) {
+            if (wb_cesta_table_lease(0) ||
+                wb_cesta_table_read(0, offsets[i], &values[i]) || values[i] == UINT32_MAX)
+                return GIULIA_CESTA_IO;
+        }
+        wb_log("ace5-wifi-bringup: cesta execution sample=%u start=%#x pc=%#x power=%#x wait=%#x branch=%#x clkreq=%#x\n",
+            sample, values[0], values[1], values[2], values[3], values[4], values[5]);
+        if (sample == 0) delay(5000);
+    }
+    return GIULIA_CESTA_OK;
+}
+
 static int wb_cesta_stage_and_discard(void)
 {
     struct giulia_cesta sm = {0};
@@ -527,6 +577,18 @@ static int wb_cesta_stage_and_discard(void)
         GIULIA_CESTA_BRANCH_OFFSET, GIULIA_CESTA_START_OFFSET);
     if (staged == GIULIA_CESTA_OK)
         staged = giulia_cesta_verify_staged(&sm);
+    if (staged == GIULIA_CESTA_OK && wb.sm_diag == WB_SM_START) {
+        int start = giulia_cesta_start(&sm);
+        if (sm.state == GIULIA_CESTA_RESET_REQUIRED) {
+            int observed = start == GIULIA_CESTA_RETAINED ? wb_cesta_observe() : start;
+            wb_log("ace5-wifi-bringup: cesta START result=%d observe=%d; retained until reset\n",
+                start, observed);
+            wb.guard_failed = 1;
+            loader_return();
+            return GIULIA_CESTA_RETAINED;
+        }
+        staged = start;
+    }
     int write_attempted = sm.dirty != 0;
     int discarded = giulia_cesta_discard(&sm);
     int cold = discarded == GIULIA_CESTA_OK ? wb_cesta_read_cold() : GIULIA_CESTA_STATE;
@@ -641,7 +703,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     struct giulia_wifi_bringup_config cfg = {0};
     struct giulia_wlan_rail_baseline unk_rails[7] = {0};
     int rc = -1, stop_rc = -1, quiet = 0;
-    int link_access = wb.sm_diag < WB_SM_TABLES && !wb.watchdog_trial;
+    int link_access = wb.sm_diag < WB_SM_TABLES && !wb.watchdog_trial && !wb.cold_reset;
 
     wb_map(&wb.shared, pa, sizeof(struct loader_firmware_quiet), VM_WIMG_WCOMB);
     if (!wb.shared.address) goto done;
@@ -745,13 +807,24 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     if (wb.bringup.pipe_checked)
         wb_log("ace5-wifi-bringup: post-phy pipe_cbcr=%#x\n", wb.bringup.pipe_cbcr);
     if (rc == GIULIA_BRINGUP_OK) {
+        if (wb.cold_reset && !wb.sm_diag) {
+            if (wb_arm_cold_reset(0) == 0) {
+                /* The loader, not this core, must reset the phone for this trial. */
+                for (unsigned second = 0; second < 30; second++) delay(1000000);
+                wb_log("ace5-wifi-bringup: loader cold reset not observed\n");
+                wb.guard_failed = 1;
+                loader_return();
+            }
+            if (wb.guard_failed) goto release;
+            goto stop;
+        }
         if (wb.watchdog_trial) {
             int wdt_rc = wb_watchdog_quiet_test();
             if (wb.guard_failed) goto release;
             if (wdt_rc) goto stop;
         }
         if (wb.sm_diag >= WB_SM_TABLES) {
-            int sm_rc = wb.sm_diag == WB_SM_STAGE ? wb_cesta_stage_and_discard() : wb_cesta_read_cold();
+            int sm_rc = wb.sm_diag >= WB_SM_STAGE ? wb_cesta_stage_and_discard() : wb_cesta_read_cold();
             if (wb.guard_failed) goto release;
             if (sm_rc != GIULIA_CESTA_OK) goto stop;
         }
@@ -811,9 +884,11 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("ace5_wifi_crm_all_states", &wb.crm_all_states, sizeof(wb.crm_all_states));
     PE_parse_boot_argn("ace5_wifi_sm_diag", &wb.sm_diag, sizeof(wb.sm_diag));
     PE_parse_boot_argn("ace5_wifi_watchdog", &wb.watchdog_trial, sizeof(wb.watchdog_trial));
+    PE_parse_boot_argn("ace5_wifi_cold_reset", &wb.cold_reset, sizeof(wb.cold_reset));
     if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 ||
         seconds < 10 || seconds > 120 || wb.max_stage > GIULIA_BRINGUP_MHI_SNAP ||
-        wb.crm_all_states > 1 || wb.sm_diag > WB_SM_STAGE || wb.watchdog_trial > WB_WATCHDOG_EXPIRY) {
+        wb.crm_all_states > 1 || wb.sm_diag > WB_SM_START || wb.watchdog_trial > WB_WATCHDOG_EXPIRY ||
+        wb.cold_reset > 1) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
         return;
     }
@@ -826,7 +901,13 @@ void giulia_wifi_bringup_init(void)
         wb_log("ace5-wifi-bringup: watchdog trial requires isolated stage 4 and enough return time\n");
         return;
     }
-    if (wb.sm_diag == WB_SM_STAGE && wb_load_cesta_profile()) {
+    if ((wb.cold_reset && (wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.crm_all_states ||
+        wb.watchdog_trial || seconds < 60 || (wb.sm_diag && wb.sm_diag != WB_SM_START))) ||
+        (wb.sm_diag == WB_SM_START && !wb.cold_reset)) {
+        wb_log("ace5-wifi-bringup: cold-reset profile requires isolated stage 4 and 60..120s\n");
+        return;
+    }
+    if (wb.sm_diag >= WB_SM_STAGE && wb_load_cesta_profile()) {
         wb_log("ace5-wifi-bringup: CESTA board profile missing or mismatched\n");
         return;
     }

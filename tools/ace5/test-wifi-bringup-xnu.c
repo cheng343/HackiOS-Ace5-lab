@@ -45,6 +45,7 @@ static uint8_t pdc_table[508];
 static uint32_t gic_enabled;
 static uint64_t watchdog_ctl;
 static unsigned watchdog_reads, watchdog_writes, watchdog_cannot_cancel;
+static unsigned cold_reset, mock_reset_response, loader_returns;
 static char messages[16384];
 static struct { uintptr_t va; vm_size_t size; } allocation[24];
 static void wb_test_barrier(void);
@@ -84,6 +85,7 @@ static int PE_parse_boot_argn(const char *name,void *out,unsigned size)
     if(!strcmp(name,"ace5_wifi_crm_all_states"))value=crm_all;
     if(!strcmp(name,"ace5_wifi_sm_diag"))value=sm_diag;
     if(!strcmp(name,"ace5_wifi_watchdog"))value=watchdog;
+    if(!strcmp(name,"ace5_wifi_cold_reset"))value=cold_reset;
     if(!strcmp(name,"ace5_aop_channel_test"))value=other;
     *(unsigned *)out=value; return value!=0;
 }
@@ -109,6 +111,8 @@ static void wb_test_barrier(void)
 {
     if(wb.quiet && !no_ack && !(no_resume_ack && !wb.quiet->request)) {
         wb.quiet->ack=wb.quiet->request;wb.quiet->active=wb.quiet->request;
+        if (mock_reset_response && wb.quiet->reset_request)
+            wb.quiet->reset_ack = mock_reset_response;
     }
     if(wb.gic.address) {
         uint32_t *g=(void *)wb.gic.address;
@@ -144,6 +148,7 @@ void ml_io_unmap(vm_offset_t va,vm_size_t size)
 kern_return_t thread_terminate(thread_t thread) { assert(thread==current_thread());exits++;return 0; }
 void loader_log_line(const char *s)
 { assert(strlen(messages)+strlen(s)<sizeof(messages));strcat(messages,s); }
+void loader_return(void) { loader_returns++; }
 
 /* The adapter must propagate retained/failed core cleanup, independently of
  * whether its own IRQ and quiet handshakes would have succeeded. */
@@ -222,6 +227,7 @@ static void setup(void)
     creates=exits=deallocs=maps=unmaps=fail_map=time_us=0;
     no_ack=no_resume_ack=pending_irq=lost_guard=0;gic_enabled=WB_IRQ|1;
     watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
+    cold_reset=mock_reset_response=loader_returns=0;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
     allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=cx_nominal_unavailable=0;
 }
@@ -236,7 +242,9 @@ static void admission(void)
     setup();sm_diag=1;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=1;crm_all=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=2;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=5;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=4;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();cold_reset=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=3;giulia_wifi_bringup_init();assert(!maps && !creates);
     assert(strstr(messages, "CESTA board profile missing or mismatched"));
     setup();sm_diag=2;giulia_wifi_bringup_init();
@@ -385,6 +393,17 @@ static void noc_after_phy(void)
     watchdog_ctl = GIULIA_WDT_ENABLED;
     watchdog_cannot_cancel = 1;
     assert(wb_watchdog_cancel() != 0 && watchdog_ctl == GIULIA_WDT_ENABLED);
+    wb.sm_diag = WB_SM_START;
+    wb.cold_reset = 1;
+    assert(wb_cesta_table_write(0, GIULIA_CESTA_START_OFFSET, 1) != 0);
+    assert(wb_cesta_stage_and_discard() == GIULIA_CESTA_LEASE && !loader_returns && !wb.guard_failed);
+    assert(sm[0] == 0 && sm[GIULIA_CESTA_START_OFFSET / 4] == 0);
+    wb.quiet->reset_capability = 1;
+    mock_reset_response = LOADER_QUIET_RESET_ARMED;
+    assert(wb_cesta_stage_and_discard() == GIULIA_CESTA_RETAINED && loader_returns == 1 && wb.guard_failed);
+    assert(sm[0] == 1 && sm[GIULIA_CESTA_START_OFFSET / 4] == 1);
+    assert(strstr(messages, "cesta START result=1 observe=0; retained until reset"));
+    wb.guard_failed = 0;
     perst[1] = 2;
     assert(wb_cesta_read_cold() == GIULIA_CESTA_LEASE && wb.guard_failed);
     wb.guard_failed = 0;
