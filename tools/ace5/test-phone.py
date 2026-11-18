@@ -5,6 +5,7 @@ The functions are loaded from their AST; argument parsing and all top-level
 phone commands are excluded. fastboot, timing, logging and stdout are stubbed.
 """
 import ast
+import hashlib
 from pathlib import Path
 import re
 import subprocess
@@ -59,6 +60,13 @@ class PhoneTests(unittest.TestCase):
         check(True, 4, cold, 'yes', self.log, 2)
         with self.assertRaisesRegex(RuntimeError, 'Empty CESTA tables unconfirmed'):
             check(True, 4, cold + '[   22.243792]: ace5-wifi-bringup: cesta cold-check rc=-5\n', 'yes', self.log, 2)
+        with self.assertRaisesRegex(RuntimeError, 'CESTA staging and rollback unconfirmed'):
+            check(True, 4, cold, 'yes', self.log, 3)
+        staged = cold + 'ace5-wifi-bringup: cesta stage rc=0 discard=0 cold=0\n'
+        check(True, 4, staged, 'yes', self.log, 3)
+        with self.assertRaisesRegex(RuntimeError, 'CESTA staging and rollback unconfirmed'):
+            check(True, 4, staged + 'ace5-wifi-bringup: cesta stage rc=0 discard=-3 cold=-2\n',
+                  'yes', self.log, 3)
         check(True, 4, good + '\n' + good, 'yes', self.log)
         check(True, 0, report(11, 0, stop=0, end=13) + clean, 'yes', self.log)
         check(False, 4, '', None, self.log)
@@ -83,6 +91,10 @@ class PhoneTests(unittest.TestCase):
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_sm_diag=1')
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, False, 2),
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_sm_diag=2')
+        profile = self.directory / 'sm.bin'
+        profile.write_bytes(bytes(80))
+        with self.assertRaisesRegex(RuntimeError, 'CESTA profile does not match'):
+            fn(True, table, 1, 'kernel', 30, False, False, 4, sm_profile=profile)
         with self.assertRaises(RuntimeError): fn(True, table, 1, 'kernel', 30, False, False, 5, False, True)
         with self.assertRaises(RuntimeError): fn(True, table, 1, 'kernel', 30, False, False, 4, True, True)
         self.assertEqual(fn(False, None, 0, None, 0, True, True), '')
@@ -136,7 +148,7 @@ class PhoneTests(unittest.TestCase):
         self.snapshot_error = None
         self.live_response = 'OKAY'
         self.staged_logs = []
-        self.namespace = dict(re=re, subprocess=subprocess, sys=sys, time=self.clock,
+        self.namespace = dict(re=re, hashlib=hashlib, subprocess=subprocess, sys=sys, time=self.clock,
                               fb=self.fb, call=self.call, print=Mock())
         exec(compile(ast.Module(body=functions, type_ignores=[]), str(SOURCE), 'exec'), self.namespace)
         self.temporary = tempfile.TemporaryDirectory(prefix='ace5-phone-tests-', dir=SOURCE.resolve().parents[3])

@@ -105,18 +105,26 @@ giulia_cesta_stage(struct giulia_cesta *sm, const struct giulia_cesta_io *io,
 }
 
 int
-giulia_cesta_start(struct giulia_cesta *sm)
+giulia_cesta_verify_staged(const struct giulia_cesta *sm)
 {
     if (!sm) return GIULIA_CESTA_ARGUMENT;
     if (sm->state != GIULIA_CESTA_STAGED) return GIULIA_CESTA_STATE;
-    if (!sm->io.validate_reset) return GIULIA_CESTA_LEASE;
     for (unsigned index = 0; index < GIULIA_CESTA_WORDS; index++) {
         uint32_t value;
         int rc = read_word(&sm->io, word_offset(index), &value);
         if (rc) return rc;
         if (value != sm->image[index]) return GIULIA_CESTA_DRIFT;
     }
-    int rc = idle(&sm->io);
+    return idle(&sm->io);
+}
+
+int
+giulia_cesta_start(struct giulia_cesta *sm)
+{
+    if (!sm) return GIULIA_CESTA_ARGUMENT;
+    if (sm->state != GIULIA_CESTA_STAGED) return GIULIA_CESTA_STATE;
+    if (!sm->io.validate_reset) return GIULIA_CESTA_LEASE;
+    int rc = giulia_cesta_verify_staged(sm);
     if (rc) return rc;
     if (sm->io.validate_reset(sm->io.cookie) || sm->io.validate_lease(sm->io.cookie))
         return GIULIA_CESTA_LEASE;

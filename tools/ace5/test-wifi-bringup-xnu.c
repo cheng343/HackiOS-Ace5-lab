@@ -24,6 +24,12 @@ typedef int kern_return_t;
 typedef int wait_result_t;
 typedef void *thread_t;
 typedef int DTEntry;
+typedef struct { unsigned size; } SHA256_CTX;
+static void SHA256_Init(SHA256_CTX *c) { c->size = 0; }
+static void SHA256_Update(SHA256_CTX *c, const void *data, size_t size)
+{ assert(data && size == 80); c->size += size; }
+static void SHA256_Final(void *out, SHA256_CTX *c)
+{ assert(c->size == 80); memset(out, 0, 32); }
 static struct { unsigned num_cpus; } topology;
 #define ml_get_topology_info() (&topology)
 static unsigned enabled, board, cpus, cpu, seconds, ceiling, other, crm_all, sm_diag;
@@ -43,7 +49,9 @@ static void delay(unsigned us) { time_us+=us; assert(time_us<=3000000); }
 static int hackios_platform(void) { return (int)board; }
 static int PE_parse_boot_argn(const char *name,void *out,unsigned size)
 {
-    unsigned value=0; assert(size==4);
+    unsigned value=0;
+    if (!strcmp(name,"ace5_cesta_profile")) return 0;
+    assert(size==4);
     if(!strcmp(name,"ace5_wifi_bringup"))value=enabled;
     if(!strcmp(name,"cpus"))value=cpus;
     if(!strcmp(name,"bootcpu"))value=cpu;
@@ -117,7 +125,7 @@ void loader_log_line(const char *s)
 int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,const struct giulia_wifi_bringup_config *cfg)
 {
     assert(wb_guard());b->cfg=*cfg;b->stage=cfg->max_stage?cfg->max_stage:GIULIA_BRINGUP_READY;
-    if (sm_diag == WB_SM_TABLES)
+    if (sm_diag >= WB_SM_TABLES)
         assert(wb.pcie_sm.address && !wb.dbi.address && !wb.atu.address && !wb.cfg.address && !wb.bar0.address);
     if(start_rc){b->stage=GIULIA_BRINGUP_FAULT;b->cleanup_error=GIULIA_BRINGUP_SUPPLY;}
     return start_rc;
@@ -202,7 +210,9 @@ static void admission(void)
     setup();sm_diag=1;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=1;crm_all=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=2;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=4;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=3;giulia_wifi_bringup_init();assert(!maps && !creates);
+    assert(strstr(messages, "CESTA board profile missing or mismatched"));
     setup();sm_diag=2;giulia_wifi_bringup_init();
     assert(stop_calls == 1 && maps == unmaps && strstr(messages, "cesta cold-check rc=-3"));
     assert(!strstr(messages, "requested stage complete"));
@@ -312,6 +322,7 @@ static void noc_after_phy(void)
     wb.bringup.link.state = GIULIA_LINK_PARF_READY;
     wb.bringup.link.parf_owned = 1;
     wb.bringup.supply.gpio.state = GIULIA_WGPIO_ON;
+    wb.sm_diag = WB_SM_TABLES;
     perst[0] = (1u << 9);
     sm[0x1090 / 4] = 0;
     sm[0x1000 / 4] = 0;
@@ -322,6 +333,17 @@ static void noc_after_phy(void)
     assert(wb_cesta_read_cold() == GIULIA_CESTA_BUSY && sm[0x1018 / 4] == 4);
     sm[0x1018 / 4] = UINT32_MAX;
     assert(wb_cesta_read_cold() == GIULIA_CESTA_IO && sm[0x1018 / 4] == UINT32_MAX);
+    sm[0x1018 / 4] = 0;
+    assert(wb_cesta_table_write(0, 0, 1) != 0 && sm[0] == 0);
+    wb.sm_diag = WB_SM_STAGE;
+    wb.cesta_profile[3] = 1;
+    wb.cesta_profile[4 * (GIULIA_CESTA_SEQUENCE_WORDS + 1) - 1] = 4;
+    assert(wb_cesta_table_write(0, GIULIA_CESTA_START_OFFSET, 1) != 0 &&
+        sm[GIULIA_CESTA_START_OFFSET / 4] == 0);
+    assert(wb_cesta_stage_and_discard() == GIULIA_CESTA_OK && !wb.guard_failed);
+    assert(strstr(messages, "cesta stage rc=0 discard=0 cold=0") &&
+        !strstr(messages, "cesta table write begin off=0x1090"));
+    assert(sm[0] == 0 && sm[GIULIA_CESTA_BRANCH_OFFSET / 4] == 0);
     perst[1] = 2;
     assert(wb_cesta_read_cold() == GIULIA_CESTA_LEASE && wb.guard_failed);
     wb.guard_failed = 0;

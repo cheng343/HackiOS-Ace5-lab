@@ -293,16 +293,17 @@ def ace5_pdc_test_arguments(enabled, table, bootcpu, kernel, seconds, other_hard
     return ' ace5_aop_channel_test=2'
 
 
-def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log, stage=0, crm_all_states=False, sm_diag=False):
+def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log,
+                               stage=0, crm_all_states=False, sm_diag=0, sm_profile=None):
     if not enabled:
-        if stage or crm_all_states or sm_diag:
+        if stage or crm_all_states or sm_diag or sm_profile:
             raise RuntimeError('Wi-Fi stage, CRM and CESTA options require --wifi-bringup-test')
         return ''
     if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
         raise RuntimeError('--wifi-bringup-test requires current DT table, --kernel, CPU1, 10..120 seconds, no live-log and no other hardware probes')
     if not table.is_file() or table.stat().st_size != 508:
         raise RuntimeError('Missing or invalid current-DT PDC table (508 bytes); no upload attempted')
-    if sm_diag and (stage != 4 or crm_all_states):
+    if (sm_diag or sm_profile) and (stage != 4 or crm_all_states):
         raise RuntimeError('CESTA diagnostics require --wifi-bringup-stage 4 and the default CRM profile')
     out = ' ace5_wifi_bringup=1'
     if stage:
@@ -311,6 +312,12 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         out += ' ace5_wifi_crm_all_states=1'
     if sm_diag:
         out += f' ace5_wifi_sm_diag={int(sm_diag)}'
+    if sm_profile:
+        data = sm_profile.read_bytes()
+        digest = 'b3ed154a6cabba921d99cf703d70255e2239977683153992c4a8f1cc5211d90e'
+        if len(data) != 80 or hashlib.sha256(data).hexdigest() != digest:
+            raise RuntimeError('CESTA profile does not match the verified Ace 5 device tree')
+        out += f' ace5_wifi_sm_diag=3 ace5_cesta_profile=v{data.hex()}'
     return out
 
 
@@ -321,10 +328,14 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
                                  r'branch0=(?:0x[0-9a-f]+|0) override=(?:0x[0-9a-f]+|0) '
                                  r'clkreq=(?:0x[0-9a-f]+|0)', text):
         raise RuntimeError(f'CESTA snapshot missing; preserve {log} and cold reboot')
-    if sm_diag == 2:
+    if sm_diag >= 2:
         cold_checks = re.findall(r'ace5-wifi-bringup: cesta cold-check rc=(-?\d+)[ \t\r]*$', text, re.M)
         if not cold_checks or any(rc != '0' for rc in cold_checks):
             raise RuntimeError(f'Empty CESTA tables unconfirmed; preserve {log} and cold reboot')
+    if sm_diag == 3:
+        stages = re.findall(r'ace5-wifi-bringup: cesta stage rc=(-?\d+) discard=(-?\d+) cold=(-?\d+)', text)
+        if not stages or any(row != ('0', '0', '0') for row in stages):
+            raise RuntimeError(f'CESTA staging and rollback unconfirmed; preserve {log} and cold reboot')
     expected = stage or 11  # READY follows the ten hardware stages.
     starts = re.findall(r'ace5-wifi-bringup: start rc=(-?\d+) stage=(\d+) max=(\d+) '
                         r'failed=(\d+) err=(-?\d+) sub=(-?\d+) cleanup=(-?\d+)', text)
@@ -381,6 +392,8 @@ sm.add_argument('--wifi-sm-diag', dest='wifi_sm_diag', action='store_const', con
                 help='Read PCIe CESTA state after PHY startup; requires Wi-Fi Stage 4 and default CRM')
 sm.add_argument('--wifi-sm-tables', dest='wifi_sm_diag', action='store_const', const=2,
                 help='Verify all CESTA program words are empty while PERST# stays low; requires Stage 4 and default CRM')
+sm.add_argument('--wifi-sm-stage', type=Path,
+                help='Stage and withdraw the stock 80-byte CESTA profile without START; requires Stage 4 and default CRM')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -551,7 +564,8 @@ try:
             commandline += ace5_wifi_bringup_arguments(args.wifi_bringup_test, args.wlan_pdc_table,
                 args.bootcpu, args.kernel, seconds,
                 args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test or args.wlan_pdc_test,
-                args.live_log, args.wifi_bringup_stage, args.wifi_crm_all_states, args.wifi_sm_diag)
+                args.live_log, args.wifi_bringup_stage, args.wifi_crm_all_states,
+                args.wifi_sm_diag, args.wifi_sm_stage)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -642,7 +656,8 @@ try:
         if args.command == 'run':
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
             check_wifi_bringup_log(args.wifi_bringup_test, args.wifi_bringup_stage, saved_log,
-                getvar('power-reset-required') if args.wifi_bringup_test else None, log, args.wifi_sm_diag)
+                getvar('power-reset-required') if args.wifi_bringup_test else None, log,
+                3 if args.wifi_sm_stage else args.wifi_sm_diag)
             check_rpmh_read_log(args.rpmh_read_test,saved_log,
                 getvar('power-reset-required') if args.rpmh_read_test else None,log)
             if (args.aop_channel_test or args.aop_cx_vote_test) and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:

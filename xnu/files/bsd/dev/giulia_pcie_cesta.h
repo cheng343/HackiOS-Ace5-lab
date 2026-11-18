@@ -40,6 +40,7 @@ struct giulia_cesta {
 
 /* Read-only admission for the cold register image. */
 int giulia_cesta_check_cold(const struct giulia_cesta_io *);
+int giulia_cesta_verify_staged(const struct giulia_cesta *);
 
 /* Offsets are relative to the verified giulia PCIe0 SM resource. A zero
  * lease result requires exclusive SM ownership, ordered accessible MMIO,

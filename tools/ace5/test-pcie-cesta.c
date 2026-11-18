@@ -65,6 +65,7 @@ int main(void)
     assert(stage(&sm, &fake, 52) == GIULIA_CESTA_BUSY && !fake.writes);
     fake.regs[0x1000 / 4] = 0;
     assert(stage(&sm, &fake, 52) == 0 && fake.writes == 20 && !fake.starts);
+    assert(giulia_cesta_verify_staged(&sm) == 0 && fake.writes == 20 && !fake.starts);
     assert(fake.regs[0] == 0x01020304u && fake.regs[0x1000 / 4] == 4);
     assert(giulia_cesta_start(&sm) == GIULIA_CESTA_LEASE && fake.writes == 20);
 
