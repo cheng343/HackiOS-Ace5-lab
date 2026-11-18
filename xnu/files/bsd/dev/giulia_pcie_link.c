@@ -126,7 +126,7 @@ static int link_up(struct giulia_pcie_link *s)
 static int profile_matches(struct giulia_pcie_link *s)
 {
     return (s->link_status & 0x0fu) == GIULIA_PCIE_BOOT_SPEED &&
-        ((s->link_status >> 4) & 0x3fu) == GIULIA_PCIE_BOOT_LANES;
+        ((s->link_status >> 4) & 0x3fu) == s->expected_lanes;
 }
 
 static int xmlh_link_up(struct giulia_pcie_link *s)
@@ -448,6 +448,8 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     uint32_t v;
     if ((flags & GIULIA_LINK_VENDOR_TRAINING) && !(flags & GIULIA_LINK_EXACT_ROOT_ID))
         return GIULIA_LINK_PREREQUISITE;
+    if ((flags & GIULIA_LINK_NATIVE_WIDTH) && !(flags & GIULIA_LINK_VENDOR_TRAINING))
+        return GIULIA_LINK_PREREQUISITE;
     int rc = giulia_pcie_link_read_root_id(s, flags);
     if (rc) return rc;
     if ((r16(s, GIULIA_LINK_DBI, PCI_HEADER) & 0x7fu) != 1u)
@@ -461,6 +463,14 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     v = r16(s, GIULIA_LINK_DBI, s->root_pcie_cap + 2u);
     if (v == 0xffffu) return record_failure(s, GIULIA_LINK_READBACK);
     if ((v & 0xfu) < 2u) return record_failure(s, GIULIA_LINK_CAPABILITY);
+    const int native_width = (flags & GIULIA_LINK_NATIVE_WIDTH) != 0;
+    s->expected_lanes = GIULIA_PCIE_BOOT_LANES;
+    if (native_width) {
+        v = r32(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCAP);
+        if (v == UINT32_MAX) return record_failure(s, GIULIA_LINK_READBACK);
+        if (((v >> 4) & 0x3fu) != 2u) return record_failure(s, GIULIA_LINK_PROFILE);
+        s->expected_lanes = 2;
+    }
     if (link_up(s)) return record_failure(s, GIULIA_LINK_BUSY);
     if (s->link_status == 0xffffu) return record_failure(s, GIULIA_LINK_READBACK);
     v = r16(s, GIULIA_LINK_DBI, PCI_COMMAND);
@@ -498,12 +508,17 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     if (!change16(s, GIULIA_LINK_DBI, PCI_COMMAND, 7u, BIT(10)) ||
         !put16(s, GIULIA_LINK_DBI, PCI_CLASS, 0x0604u))
         return fail(s, GIULIA_LINK_READBACK);
-    /* A fixed Gen1 x1 budget must not inherit a Gen2/3 target or x2 width.
-     * Program cold controls only; bit17 is an action, not saved configuration. */
-    DCHANGE(DBI_LINK, (0x3fu << 16) | BIT(7), (1u << 16) | BIT(5), 0xffffffffu);
-    DCHANGE(DBI_WIDTH, (0x1fu << 8) | BIT(17), GIULIA_PCIE_BOOT_LANES << 8, ~BIT(17));
-    DCHANGE(s->root_pcie_cap + LNKCAP, 0x3ffu,
-        (GIULIA_PCIE_BOOT_LANES << 4) | GIULIA_PCIE_BOOT_SPEED, 0xffffffffu);
+    /* Keep Gen1 in both modes. The native-width trial deliberately leaves
+     * PORT_LINK_MODE and NUM_OF_LANES at their reset values. */
+    if (native_width) {
+        DCHANGE(DBI_LINK, BIT(7), BIT(5), 0xffffffffu);
+        DCHANGE(s->root_pcie_cap + LNKCAP, 0xfu, GIULIA_PCIE_BOOT_SPEED, 0xffffffffu);
+    } else {
+        DCHANGE(DBI_LINK, (0x3fu << 16) | BIT(7), (1u << 16) | BIT(5), 0xffffffffu);
+        DCHANGE(DBI_WIDTH, (0x1fu << 8) | BIT(17), GIULIA_PCIE_BOOT_LANES << 8, ~BIT(17));
+        DCHANGE(s->root_pcie_cap + LNKCAP, 0x3ffu,
+            (GIULIA_PCIE_BOOT_LANES << 4) | GIULIA_PCIE_BOOT_SPEED, 0xffffffffu);
+    }
     if (!change16(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCTL2,
             0x0fu, GIULIA_PCIE_BOOT_SPEED)) return fail(s, GIULIA_LINK_READBACK);
     DCHANGE(s->root_pcie_cap + SLTCAP, BIT(6), 0, 0xffffffffu);
@@ -638,6 +653,8 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
 int giulia_pcie_link_train(struct giulia_pcie_link *s, uint32_t flags)
 {
     uint16_t header;
+    if (s && s->expected_lanes == 2)
+        return GIULIA_LINK_PREREQUISITE;
     int error = giulia_pcie_link_identify(s, flags);
     if (error) return error;
     if (!cr16(s, PCI_HEADER, &header) || (header & 0x7fu) != 0)

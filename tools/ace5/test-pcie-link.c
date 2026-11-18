@@ -754,6 +754,39 @@ static void test_vendor_training(void)
     }
 }
 
+static void test_native_width(void)
+{
+    struct fake f;
+    struct giulia_pcie_link s;
+    const uint32_t flags = GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID |
+        GIULIA_LINK_VENDOR_TRAINING | GIULIA_LINK_NATIVE_WIDTH;
+
+    init(&f, &s);
+    struct giulia_pcie_link_io io = io_for(&f);
+    assert(giulia_pcie_link_prepare_parf(&s, GIULIA_LINK_PARF_REQUIRED, &io) == 0);
+    assert(giulia_pcie_link_prepare(&s, flags) == GIULIA_LINK_PROFILE && !f.core_writes);
+    for (unsigned lanes = 1; lanes <= 2; lanes++) {
+        init(&f, &s);
+        io = io_for(&f);
+        f.regs[GIULIA_LINK_DBI][0x7c / 4] = 0x22c23u;
+        f.regs[GIULIA_LINK_DBI][0x710 / 4] = 3u << 16;
+        f.regs[GIULIA_LINK_DBI][0x80c / 4] = 2u << 8;
+        f.regs[GIULIA_LINK_DBI][0xf28 / 4] = BIT(10);
+        f.negotiated_profile = (uint16_t)(lanes << 4 | 1u);
+        assert(giulia_pcie_link_prepare_parf(&s, GIULIA_LINK_PARF_REQUIRED, &io) == 0);
+        assert(giulia_pcie_link_prepare(&s, flags) == 0 && s.expected_lanes == 2);
+        assert(f.regs[GIULIA_LINK_DBI][0x7c / 4] == 0x22c21u);
+        assert(f.regs[GIULIA_LINK_DBI][0x710 / 4] == ((3u << 16) | BIT(5)));
+        assert(f.regs[GIULIA_LINK_DBI][0x80c / 4] == (2u << 8));
+        assert(giulia_pcie_link_train(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_PREREQUISITE);
+        assert(!f.link_reads);
+        int rc = giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED);
+        assert(rc == (lanes == 2 ? GIULIA_LINK_OK : GIULIA_LINK_PROFILE));
+        assert(f.cfg_accesses == (lanes == 2) && !f.bar_probes);
+        assert(quiesce_then_stop(&f, &s) == 0);
+    }
+}
+
 static void test_parf_drift_before_dbi(void)
 {
     const uint32_t offsets[] = {0x350u, 0x634u, 0x358u, 0x1b0u, 0x22cu};
@@ -856,6 +889,7 @@ int main(void)
     test_deferred_parf_restore();
     test_split_prepare();
     test_vendor_training();
+    test_native_width();
     test_parf_drift_before_dbi();
     test_boot_profile();
     puts("SM8650 PCIe link: ownership, training, config, BAR and rollback mocks passed");

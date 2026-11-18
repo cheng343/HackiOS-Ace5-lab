@@ -62,7 +62,9 @@ enum giulia_pcie_link_prerequisite {
     GIULIA_LINK_COLD_RESET_MASK = 1u << 8,
     GIULIA_LINK_EXACT_ROOT_ID = 1u << 9,
     /* Apply the stock pre-PERST controls and check PCIe0 ELBI link status. */
-    GIULIA_LINK_VENDOR_TRAINING = 1u << 10
+    GIULIA_LINK_VENDOR_TRAINING = 1u << 10,
+    /* Preserve the native two-lane fields in a guarded developer trial. */
+    GIULIA_LINK_NATIVE_WIDTH = 1u << 11
 };
 #define GIULIA_LINK_PARF_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
     GIULIA_LINK_RAILS_NOC_READY | GIULIA_LINK_CLOCKS_RC_RESET_READY | \
@@ -103,6 +105,7 @@ struct giulia_pcie_link {
     uint8_t saved_count, config_atu_enabled, atu_touched;
     uint8_t parf_count, parf_owned, core_owned;
     uint8_t memory_owned, memory_enabled, mask_int_owned, vendor_training;
+    uint8_t expected_lanes;
     struct giulia_pcie_link_saved saved[48];
 };
 

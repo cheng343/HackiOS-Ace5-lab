@@ -68,7 +68,7 @@ static struct {
     uint8_t cesta_profile[WB_SM_PROFILE_BYTES];
     uint32_t irq_dirty, irq_prior, guard_failed, endpoint_reset_unconfirmed, db_version, max_stage;
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
-    uint32_t pcs_first, pcs_first_armed;
+    uint32_t pcs_first, pcs_first_armed, native_width;
     uint32_t noc_step;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
@@ -609,8 +609,10 @@ static int wb_pcie_identify_endpoint(void)
 {
     struct giulia_pcie_link *link = &wb.bringup.link;
     struct giulia_wifi_gpio *gpio = &wb.bringup.supply.gpio;
-    int rc = giulia_pcie_link_prepare(link, GIULIA_LINK_PREPARE_REQUIRED |
-        GIULIA_LINK_EXACT_ROOT_ID | GIULIA_LINK_VENDOR_TRAINING);
+    uint32_t flags = GIULIA_LINK_PREPARE_REQUIRED |
+        GIULIA_LINK_EXACT_ROOT_ID | GIULIA_LINK_VENDOR_TRAINING;
+    if (wb.native_width) flags |= GIULIA_LINK_NATIVE_WIDTH;
+    int rc = giulia_pcie_link_prepare(link, flags);
     wb_log("ace5-wifi-bringup: DBI root id rc=%d id=%#x; prepare stage=%u fail=%u last=%u/%#x/%#x\n",
         rc, link->root_id, link->stage, link->failure_stage, wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2]);
     if (rc) return rc;
@@ -1026,10 +1028,12 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("ace5_wifi_watchdog", &wb.watchdog_trial, sizeof(wb.watchdog_trial));
     PE_parse_boot_argn("ace5_wifi_cold_reset", &wb.cold_reset, sizeof(wb.cold_reset));
     PE_parse_boot_argn("ace5_wifi_pcs_first", &wb.pcs_first, sizeof(wb.pcs_first));
+    PE_parse_boot_argn("ace5_wifi_native_width", &wb.native_width, sizeof(wb.native_width));
     if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 ||
         seconds < 10 || seconds > 120 || wb.max_stage > GIULIA_BRINGUP_MHI_SNAP ||
         wb.crm_all_states > 1 || wb.sm_diag > WB_SM_ENDPOINT || wb.watchdog_trial > WB_WATCHDOG_EXPIRY ||
-        wb.cold_reset > 1 || wb.pcs_first > 1 || (wb.pcs_first && wb.sm_diag != WB_SM_ENDPOINT)) {
+        wb.cold_reset > 1 || wb.pcs_first > 1 || wb.native_width > 1 ||
+        ((wb.pcs_first || wb.native_width) && wb.sm_diag != WB_SM_ENDPOINT)) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
         return;
     }

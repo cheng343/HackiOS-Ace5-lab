@@ -91,6 +91,10 @@ class PhoneTests(unittest.TestCase):
         check(True, 4, endpoint + 'ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access\n',
               'yes', self.log, sm_diag=7, cold_reset=True, pcs_first=True)
         with self.assertRaisesRegex(RuntimeError, 'WCN7850 identity or reset'):
+            check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True, native_width=True)
+        check(True, 4, endpoint.replace('lnk=0x2011', 'lnk=0x2021'), 'yes', self.log,
+              sm_diag=7, cold_reset=True, native_width=True)
+        with self.assertRaisesRegex(RuntimeError, 'WCN7850 identity or reset'):
             check(True, 4, endpoint.replace('lnk=0x2011', 'lnk=0x2022'),
                   'yes', self.log, sm_diag=7, cold_reset=True)
         with self.assertRaisesRegex(RuntimeError, 'PCIe0 root identity'):
