@@ -197,6 +197,8 @@ static void admission(void)
     setup();cpu=0;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();seconds=0;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();ceiling=11;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=1;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=1;crm_all=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();other=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();no_ack=1;giulia_wifi_bringup_init();assert(maps==unmaps && !stop_calls);
     setup();fail_map=1;giulia_wifi_bringup_init();assert(!maps && exits==1);
@@ -285,6 +287,17 @@ static void noc_after_phy(void)
     gcc[0x10058 / 4] = 0x80000002u;
     assert(wb_verify_noc(0) == GIULIA_BRINGUP_OK);
     assert(strstr(messages, "pwr_idx_raw=0x4"));
+    assert(!strstr(messages, "post-phy cesta"));
+    wb_map(&wb.pcie_sm, GIULIA_NOC_SM_PHYS, GIULIA_NOC_SM_SIZE, VM_WIMG_IO);
+    uint32_t *sm = (void *)wb.pcie_sm.address;
+    wb.sm_diag = 1;
+    sm[0x1090 / 4] = 1;
+    sm[0x1000 / 4] = 4;
+    assert(wb_verify_noc(0) == GIULIA_BRINGUP_OK);
+    assert(strstr(messages, "post-phy cesta start=0x1 branch0=0x4 override=0 clkreq=0"));
+    sm[0x1090 / 4] = UINT32_MAX;
+    assert(wb_verify_noc(0) == GIULIA_CRM_IO);
+    wb.sm_diag = 0;
     crm[0x1000 / 4] = 2;
     assert(wb_verify_noc(0) == GIULIA_CRM_DRIFT);
     crm[0x1000 / 4] = 1;

@@ -33,8 +33,6 @@ extern kern_return_t thread_terminate(thread_t);
 extern void loader_log_line(const char *);
 
 #define WB_IRQ (1u << 5)
-#define WB_PCIE_SM_PHYS 0x01d07000u
-#define WB_PCIE_SM_SIZE 0x2000u
 /* Observed Ace 5 HLOS DRV2 CX handoff is selector 5 (corner 256 = Nominal).
  * Never overwrite DRV2 with LOWER (64) and undervolt VDD_CX across the SoC. */
 #define WB_CX_NOMINAL_LEVEL 256u
@@ -377,12 +375,6 @@ static int wb_prepare_noc(__unused void *cookie, struct giulia_wifi_supply *supp
         wb_log("ace5-wifi-bringup: noc ready policy=%u patches=%u cx_sel=%u(lvl=%u) crm_pwr_idx=%#x cnoc_sf=%#x\n",
             crm_policy, patch_count, wb.cx_sel_voted, wb.cx_level_voted, pwr_idx, cnoc_sf);
     }
-    if (wb.sm_diag && wb.pcie_sm.address) {
-        wb_log("ace5-wifi-bringup: pcie_sm ro +1000=%#x +1040=%#x +1090=%#x +109c=%#x\n",
-            wb_mmio(&wb.pcie_sm, 0x1000u), wb_mmio(&wb.pcie_sm, 0x1040u),
-            wb_mmio(&wb.pcie_sm, 0x1090u), wb_mmio(&wb.pcie_sm, 0x109cu));
-    }
-
     wb.noc_step = 0; wb.noc_rc = 0;
     return 0;
 }
@@ -428,6 +420,22 @@ static int wb_verify_noc(__unused void *cookie)
         return GIULIA_CRM_DRIFT;
     if ((votes0 & required0) != required0 || (votes1 & required1) != required1)
         return GIULIA_POWER_READBACK;
+    if (wb.sm_diag) {
+        uint32_t start = wb_mmio(&wb.pcie_sm, 0x1090u);
+        if (start == UINT32_MAX) return GIULIA_CRM_IO;
+        uint32_t branch = wb_mmio(&wb.pcie_sm, 0x1000u);
+        if (branch == UINT32_MAX) return GIULIA_CRM_IO;
+        uint32_t override = wb_mmio(&wb.pcie_sm, 0x1040u);
+        if (override == UINT32_MAX) return GIULIA_CRM_IO;
+        uint32_t clkreq = wb_mmio(&wb.pcie_sm, 0x109cu);
+        if (clkreq == UINT32_MAX) return GIULIA_CRM_IO;
+        if (!wb_guard()) {
+            wb.guard_failed = 1;
+            return GIULIA_CRM_LEASE;
+        }
+        wb_log("ace5-wifi-bringup: post-phy cesta start=%#x branch0=%#x override=%#x clkreq=%#x\n",
+            start, branch, override, clkreq);
+    }
     return GIULIA_BRINGUP_OK;
 }
 
@@ -463,7 +471,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     wb_map(&wb.qos_pcie, GIULIA_QOS_PCIE_PHYS, GIULIA_QOS_PCIE_SIZE, VM_WIMG_IO);
     wb_map(&wb.qos_gem, GIULIA_QOS_GEM_PHYS, GIULIA_QOS_GEM_SIZE, VM_WIMG_IO);
     if (wb.sm_diag)
-        wb_map(&wb.pcie_sm, WB_PCIE_SM_PHYS, WB_PCIE_SM_SIZE, VM_WIMG_IO);
+        wb_map(&wb.pcie_sm, GIULIA_NOC_SM_PHYS, GIULIA_NOC_SM_SIZE, VM_WIMG_IO);
     if (!wb.gcc.address || !wb.tcsr.address || !wb.tlmm.address || !wb.rsc.address ||
         !wb.db.address || !wb.gic.address || !wb.msg.address || !wb.ipcc.address ||
         !wb.parf.address || !wb.phy.address || !wb.dbi.address || !wb.atu.address ||
@@ -595,6 +603,10 @@ void giulia_wifi_bringup_init(void)
         seconds < 10 || seconds > 120 || wb.max_stage > GIULIA_BRINGUP_MHI_SNAP ||
         wb.crm_all_states > 1 || wb.sm_diag > 1) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
+        return;
+    }
+    if (wb.sm_diag && (wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.crm_all_states)) {
+        wb_log("ace5-wifi-bringup: CESTA snapshot requires stage 4 and default CRM profile\n");
         return;
     }
     const char *const incompatible[] = {

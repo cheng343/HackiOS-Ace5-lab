@@ -48,6 +48,10 @@ class PhoneTests(unittest.TestCase):
         clean = 'ace5-wifi-bringup: cleanup complete; IRQ37 restored and firmware resumed (cold reboot required)'
         good = report() + held
         check(True, 4, good, 'yes', self.log)
+        with self.assertRaisesRegex(RuntimeError, 'CESTA snapshot missing'):
+            check(True, 4, good, 'yes', self.log, True)
+        check(True, 4, good + '\nace5-wifi-bringup: post-phy cesta start=0 branch0=0 override=0 clkreq=0',
+              'yes', self.log, True)
         check(True, 4, good + '\n' + good, 'yes', self.log)
         check(True, 0, report(11, 0, stop=0, end=13) + clean, 'yes', self.log)
         check(False, 4, '', None, self.log)
@@ -68,8 +72,10 @@ class PhoneTests(unittest.TestCase):
         table.write_bytes(bytes(508))
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4),
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4')
-        self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 5, True, True),
-                         ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=5 ace5_wifi_crm_all_states=1 ace5_wifi_sm_diag=1')
+        self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, False, True),
+                         ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_sm_diag=1')
+        with self.assertRaises(RuntimeError): fn(True, table, 1, 'kernel', 30, False, False, 5, False, True)
+        with self.assertRaises(RuntimeError): fn(True, table, 1, 'kernel', 30, False, False, 4, True, True)
         self.assertEqual(fn(False, None, 0, None, 0, True, True), '')
         with self.assertRaises(RuntimeError): fn(False, None, 1, 'kernel', 30, False, False, 0, True, False)
         with self.assertRaises(RuntimeError): fn(False, None, 1, 'kernel', 30, False, False, 0, False, True)
