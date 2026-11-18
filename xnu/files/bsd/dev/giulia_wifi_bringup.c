@@ -74,17 +74,10 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     if (rc) return fail_stop(b, GIULIA_BRINGUP_POWER_RESET, GIULIA_BRINGUP_POWER, rc);
     if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
-    /* Mask PARF global interrupts and release PHY_TEST_PWR_DOWN before QMP PHY init. */
-    if (b->cfg.link.write32) {
-        b->cfg.link.write32(b->cfg.link.cookie, GIULIA_LINK_PARF, 0x22cu, 0);
-        if (b->cfg.link.read32) {
-            uint32_t phy_pwr = b->cfg.link.read32(b->cfg.link.cookie, GIULIA_LINK_PARF, 0x040u);
-            if (phy_pwr != 0xffffffffu && (phy_pwr & 1u))
-                b->cfg.link.write32(b->cfg.link.cookie, GIULIA_LINK_PARF, 0x040u, phy_pwr & ~1u);
-        }
-    }
-
     b->stage = GIULIA_BRINGUP_PHY_START;
+    rc = giulia_pcie_link_prepare_parf(&b->link, link_base | GIULIA_LINK_PERST_ASSERTED,
+        &b->cfg.link);
+    if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_LINK, rc);
     phy_io = b->cfg.phy;
     phy_io.cookie = b;
     phy_io.pipe_enable = pipe_on;
@@ -94,8 +87,8 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_LINK_PREPARE;
-    rc = giulia_pcie_link_prepare(&b->link, link_base | GIULIA_LINK_PERST_ASSERTED,
-        &b->cfg.link);
+    rc = giulia_pcie_link_prepare(&b->link, link_base | GIULIA_LINK_PERST_ASSERTED |
+        GIULIA_LINK_PHY_READY);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_LINK_PREPARE, GIULIA_BRINGUP_LINK, rc);
     if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
@@ -158,7 +151,9 @@ int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b)
         if (rc) STOP_FAILED(GIULIA_BRINGUP_GPIO);
     }
     if (b->link.state != GIULIA_LINK_IDLE && b->link.state != GIULIA_LINK_STOPPED) {
-        rc = giulia_pcie_link_quiesce(&b->link, GIULIA_LINK_QUIESCE_REQUIRED);
+        uint32_t flags = GIULIA_LINK_QUIESCE_REQUIRED;
+        if (b->phy.state == GIULIA_PHY_READY) flags |= GIULIA_LINK_PHY_READY;
+        rc = giulia_pcie_link_quiesce(&b->link, flags);
         if (rc) STOP_FAILED(GIULIA_BRINGUP_LINK);
     }
     if (b->phy.state != GIULIA_PHY_IDLE && b->phy.state != GIULIA_PHY_STOPPED) {

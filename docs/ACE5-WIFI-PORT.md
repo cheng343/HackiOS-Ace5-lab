@@ -1,8 +1,24 @@
 # Ace 5 Wi-Fi 移植状态
 
-核对日期：2026-11-17。本文记录源码和 Android 只读采集所得证据；不表示
+核对日期：2026-11-18。本文记录源码和 Android 只读采集所得证据；不表示
 XNU 已能初始化无线芯片、扫描或联网。此前 QRTR 边界修复属于现有代码的
 健壮性修复，没有补齐 Ace 5 的硬件传输。
+
+## 2026-11-18：PCIe 启停顺序审计
+
+`a8ea7e3` 的真机阶段 4 在保留资源的情况下正常返回，阶段 5 黑屏且
+未取回日志；强制重启后确认 Android 正常启动。没有证据定位到某一次 MMIO。
+
+- 启动路径曾在 QMP 启动后才设置大部分 PARF 参数，还在保存快照前写了
+  PHY 电源位和 PARF 中断掩码。现在先确认 LTSSM 和 PARF 中断均禁用，
+  保存原值，再配置 PARF；QMP 和 PIPE 就绪后才允许阶段 5 访问 DBI/iATU。
+  原厂 `msm_pcie_enable_link` 同样将 PARF 配置安排在 `pcie_phy_init` 前。
+- 旧清理在 QMP/PIPE 停止后才恢复 DBI/iATU；若恢复失败，下一次可能再次
+  访问已经断钟的窗口。现在先拉低 PERST#、确认链路已停并恢复 DBI/iATU，
+  再停 QMP，最后仅恢复 PARF。PARF 恢复失败的重试不会重新访问核心窗口。
+- 阶段 4 现在包含 PARF 设置与读回、QMP/PIPE 初始化，仍没有 DBI/iATU
+  访问。64 MiB 窗口和候选 decoder 值保持不变。阶段 4 须重新做真机验证；
+  这轮修改不证明阶段 5 可返回或 Wi-Fi 已联网。
 
 ## 2026-11-17：阶段 5 黑屏后的诊断与清理修正
 
@@ -699,9 +715,9 @@ PHY、链路训练、SMMU/DMA、MHI 和 ath12k 网络收发尚未接通，不能
   端点内存解码和 Bus Master 均保持关闭，不启动 DMA 或无线固件。
 
 需要由同一板级 owner 串行执行：完成真实供电/NoC/所有权交接并拉低 PERST#，
-启动 power，执行 link prepare，再启动 PHY，经规定 PERST# 延时后训练链路。
-退出时先停上层/MSI、拉低 PERST#，再让 link 静止、停 PHY、最终恢复 link，
-然后停 power。不能在 PHY 清理前恢复可能关闭 PHY 访问的 PARF 配置；恢复失败
+启动 power，配置 PARF，启动 PHY 和 PIPE，再准备 DBI/iATU，经规定 PERST# 延时后训练链路。
+退出时先停上层/MSI、拉低 PERST#，让 link 静止并恢复 DBI/iATU，再停 PHY、
+恢复 PARF，最后停 power。不能在 PHY 清理前恢复可能关闭 PHY 访问的 PARF 配置；恢复失败
 保留资源和状态供重试。前置条件标志不能代替真实供电、时钟或 AOP/CESTA 交接。
 
 云端 `test-pcie-bringup.py --cc clang-18` 将生产核心与 mock-MMIO 链接，

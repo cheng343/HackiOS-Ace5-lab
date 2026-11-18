@@ -31,7 +31,8 @@ enum giulia_pcie_link_result {
 };
 enum giulia_pcie_link_state {
     GIULIA_LINK_IDLE, GIULIA_LINK_PREPARED, GIULIA_LINK_READY,
-    GIULIA_LINK_FAULT, GIULIA_LINK_STOPPED, GIULIA_LINK_QUIESCED
+    GIULIA_LINK_FAULT, GIULIA_LINK_STOPPED, GIULIA_LINK_QUIESCED,
+    GIULIA_LINK_PARF_READY
 };
 enum giulia_pcie_link_stage {
     GIULIA_LINK_STAGE_IDLE, GIULIA_LINK_STAGE_ADMISSION,
@@ -55,9 +56,10 @@ enum giulia_pcie_link_prerequisite {
     /* QMP stop completed, or this owner never started the PHY. */
     GIULIA_LINK_PHY_QUIET = 1u << 7
 };
-#define GIULIA_LINK_PREPARE_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
+#define GIULIA_LINK_PARF_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
     GIULIA_LINK_RAILS_NOC_READY | GIULIA_LINK_CLOCKS_RC_RESET_READY | \
     GIULIA_LINK_PERST_ASSERTED)
+#define GIULIA_LINK_PREPARE_REQUIRED (GIULIA_LINK_PARF_REQUIRED | GIULIA_LINK_PHY_READY)
 #define GIULIA_LINK_TRAIN_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
     GIULIA_LINK_RAILS_NOC_READY | GIULIA_LINK_CLOCKS_RC_RESET_READY | \
     GIULIA_LINK_PHY_READY | GIULIA_LINK_PERST_RELEASED_SETTLED)
@@ -96,10 +98,8 @@ struct giulia_pcie_link {
     struct giulia_pcie_link_saved saved[48];
 };
 
-/* Zero-initialize once. Missing prerequisites cause no MMIO. prepare refuses
- * an enabled LTSSM, live link, enabled iATU region, PARF global IRQ source
- * or internal MSI receiver.
- * It must run before the PHY is powered on (PARF PHY_TEST_PWR_DOWN release).
+/* Zero-initialize once. Missing prerequisites cause no MMIO. PARF setup
+ * must run before PHY power-on and refuses enabled LTSSM or PARF IRQs.
  * A ready flag is the caller's observed hardware condition, not a substitute
  * for owning/enabling supplies, NoC and clocks. This is not a firmware-handoff
  * path: PERST# is asserted and the controller has been exclusively reset.
@@ -109,12 +109,14 @@ struct giulia_pcie_link {
  * aperture-local offsets (DBI=0, iATU=0x1000, slave size=64 MiB). The latter
  * profile is a candidate based on the vendor DBI convention, not a measured
  * guarantee that a core read will complete in every handoff state.
- * A later busy/unreadable-core rejection restores only owned PARF registers;
- * it never modifies a foreign DBI/ATU. Partial PARF restoration failure keeps
- * FAULT/ownership for stop retry. This does not borrow a running link.
+ * This does not borrow a running link.
  */
-int giulia_pcie_link_prepare(struct giulia_pcie_link *, uint32_t prerequisites,
+int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *, uint32_t prerequisites,
     const struct giulia_pcie_link_io *);
+/* Enter DBI/ATU only after the PHY and PIPE clock are ready. A busy or
+ * unreadable core leaves PARF owned until the PHY is stopped.
+ */
+int giulia_pcie_link_prepare(struct giulia_pcie_link *, uint32_t prerequisites);
 /* prepare fixes both target/max speed and all RC width controls to Gen1 x1,
  * matching the initial CRM resource profile. It requires a PCIe v2 root
  * capability with Link Control 2 in bounds. The x2 PHY can remain initialized;
@@ -143,17 +145,16 @@ int giulia_pcie_link_train(struct giulia_pcie_link *, uint32_t prerequisites);
 int giulia_pcie_link_mem_enable(struct giulia_pcie_link *, uint32_t prerequisites);
 int giulia_pcie_link_mem_disable(struct giulia_pcie_link *, uint32_t prerequisites);
 /* After PERST# assertion, disable CPU MEM/LTSSM/ATU and confirm link down, but
- * retain PARF/core snapshots and powered PHY access. This must precede QMP
- * stop: restoring PARF_PHY_TEST_PWR_DOWN before PIPE/PHY cleanup is unsafe.
+ * restore owned DBI/ATU with PHY_READY and retain PARF. This must precede
+ * QMP stop: restoring PARF_PHY_TEST_PWR_DOWN before PIPE cleanup is unsafe.
  * QUIESCED still owns mappings; it never authorizes caller resource release.
  * A provisional PARF-only owner leaves the unowned core entirely untouched.
  */
 int giulia_pcie_link_quiesce(struct giulia_pcie_link *, uint32_t prerequisites);
 /* Caller first quiesces all upper layers, asserts PERST#, calls quiesce and
  * stops QMP. PHY_QUIET is required before restoring PARF's power-down state.
- * For a never-started PHY stop may perform quiesce itself. Restore only the
- * originally inactive controller/iATU snapshot. On readback failure retain
- * clocks, mappings and object in FAULT and retry; do not unmap or power down.
+ * Stop touches PARF only. On readback failure retain clocks, mappings and
+ * PARF ownership in FAULT and retry; do not unmap or power down.
  * Release clocks/NoC/rails only after PHY stop and this final restore succeed.
  */
 int giulia_pcie_link_stop(struct giulia_pcie_link *, uint32_t prerequisites);

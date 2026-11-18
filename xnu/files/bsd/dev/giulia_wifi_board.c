@@ -75,7 +75,7 @@ static uint32_t phy_conditions(struct giulia_wifi_board *b)
     if (b->perst_isolated) f |= GIULIA_PHY_PERST_ASSERTED;
     if (!b->link_may_run && (b->conditions & GIULIA_WBOARD_USERS_QUIESCED))
         f |= GIULIA_PHY_LINK_QUIET;
-    if (b->link.state == GIULIA_LINK_PREPARED) f |= GIULIA_PHY_PARF_PREPARED;
+    if (b->link.state == GIULIA_LINK_PARF_READY) f |= GIULIA_PHY_PARF_PREPARED;
     return f;
 }
 
@@ -95,7 +95,7 @@ static int pipe_enable(void *p)
     int err = external_valid(b, GIULIA_WBOARD_START_REQUIRED);
     if (err) return err;
     if (!b->host_clocks_ready || !b->perst_isolated || b->link_may_run ||
-        b->link.state != GIULIA_LINK_PREPARED) return GIULIA_WBOARD_CONTRACT;
+        b->link.state != GIULIA_LINK_PARF_READY) return GIULIA_WBOARD_CONTRACT;
     return giulia_pcie_power_pipe_enable(&b->power);
 }
 static int pipe_disable(void *p)
@@ -252,15 +252,19 @@ int giulia_wifi_board_start(struct giulia_wifi_board *b,
     EXPECT(b->power.state == GIULIA_POWER_READY);
     b->host_clocks_ready = 1;
     CHECK_STAGE(GIULIA_WBOARD_STAGE_LINK_PREPARE);
-    rc = giulia_pcie_link_prepare(&b->link, link_conditions(b), &b->io.link);
+    rc = giulia_pcie_link_prepare_parf(&b->link, link_conditions(b), &b->io.link);
     CHECK_RC();
-    EXPECT(b->link.state == GIULIA_LINK_PREPARED && b->link.parf_owned && b->link.core_owned);
+    EXPECT(b->link.state == GIULIA_LINK_PARF_READY && b->link.parf_owned && !b->link.core_owned);
     CHECK_STAGE(GIULIA_WBOARD_STAGE_PHY);
     bound_phy = (struct giulia_pcie_phy_io){b, phy_read, phy_write, phy_barrier,
         phy_delay, pipe_enable, pipe_disable};
     rc = giulia_pcie_phy_start(&b->phy, phy_conditions(b), &bound_phy);
     CHECK_RC();
     EXPECT(b->phy.state == GIULIA_PHY_READY && b->power.state == GIULIA_POWER_PIPE_ON);
+    CHECK_STAGE(GIULIA_WBOARD_STAGE_LINK_PREPARE);
+    rc = giulia_pcie_link_prepare(&b->link, link_conditions(b));
+    CHECK_RC();
+    EXPECT(b->link.state == GIULIA_LINK_PREPARED && b->link.parf_owned && b->link.core_owned);
     CHECK_STAGE(GIULIA_WBOARD_STAGE_PERST_RELEASE);
     b->perst_isolated = 0; /* A failed GPIO write might still release reset. */
     rc = giulia_wifi_gpio_perst_release(&b->gpio, gpio_conditions(b));

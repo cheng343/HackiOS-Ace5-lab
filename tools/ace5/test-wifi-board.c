@@ -167,18 +167,26 @@ int giulia_pcie_power_stop(struct giulia_pcie_power *p, uint32_t flags)
     rc = event('p'); p->state = rc ? GIULIA_POWER_FAULT : GIULIA_POWER_STOPPED;
     return rc;
 }
-int giulia_pcie_link_prepare(struct giulia_pcie_link *l, uint32_t flags,
+int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *l, uint32_t flags,
     const struct giulia_pcie_link_io *io)
 {
     int rc;
     assert(l == &current->board->link && io->cookie == current);
-    required(flags, GIULIA_LINK_PREPARE_REQUIRED);
+    required(flags, GIULIA_LINK_PARF_REQUIRED);
     assert(!(flags & (GIULIA_LINK_PHY_READY | GIULIA_LINK_PERST_RELEASED_SETTLED)));
     rc = event('L');
     if (current->reject_start == 'L') { l->state = GIULIA_LINK_STOPPED; return -55; }
-    l->io = *io; l->parf_owned = l->core_owned = 1;
-    l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_PREPARED;
+    l->io = *io; l->parf_owned = 1;
+    l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_PARF_READY;
     return rc;
+}
+int giulia_pcie_link_prepare(struct giulia_pcie_link *l, uint32_t flags)
+{
+    required(flags, GIULIA_LINK_PREPARE_REQUIRED);
+    assert(l->state == GIULIA_LINK_PARF_READY && current->board->power.state == GIULIA_POWER_PIPE_ON);
+    l->core_owned = 1;
+    l->state = GIULIA_LINK_PREPARED;
+    return 0;
 }
 int giulia_pcie_link_train(struct giulia_pcie_link *l, uint32_t flags)
 {
@@ -204,7 +212,7 @@ int giulia_pcie_link_quiesce(struct giulia_pcie_link *l, uint32_t flags)
     assert(current->board->perst_isolated && current->board->host_clocks_ready);
     assert(!(flags & GIULIA_LINK_PERST_RELEASED_SETTLED));
     rc = event('l'); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_QUIESCED;
-    if (!rc) l->memory_enabled = 0;
+    if (!rc) l->core_owned = l->memory_owned = l->memory_enabled = 0;
     return rc;
 }
 int giulia_pcie_link_stop(struct giulia_pcie_link *l, uint32_t flags)
@@ -213,7 +221,7 @@ int giulia_pcie_link_stop(struct giulia_pcie_link *l, uint32_t flags)
     required(flags, GIULIA_LINK_STOP_REQUIRED);
     assert(current->board->perst_isolated && current->board->host_clocks_ready);
     assert(!(current->board->owned & GIULIA_WBOARD_OWNS_PHY));
-    assert(l->state == GIULIA_LINK_QUIESCED);
+    assert(l->state == GIULIA_LINK_QUIESCED && !l->core_owned);
     rc = event('s'); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_STOPPED;
     if (!rc) l->parf_owned = l->core_owned = l->memory_owned = l->memory_enabled = 0;
     return rc;
