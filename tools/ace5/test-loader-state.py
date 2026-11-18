@@ -63,6 +63,10 @@ def main() -> int:
         watchdog = section(text, 'static int\nobserver_watchdog_within_budget(',
                            '/*\n * Run the kernel on the core with that MPIDR', source)
         (build / "watchdog-budget.inc").write_text(watchdog, encoding="utf-8")
+        trial = section(text, '#define GIULIA_WDT_TRIAL_MS ',
+                        '#endif\n\n/* ------------------------------------------------------------------------ */\n'
+                        '/* UEFI exception hook:', source)
+        (build / "watchdog-trial.inc").write_text(trial, encoding="utf-8")
         quiet = section(text, 'static int\nobserver_firmware_quiet(', 'static int64_t\nrun_on_other_cpu(', source)
         (build / 'quiet-observer.inc').write_text(quiet, encoding='utf8')
         quiet_args = section(text, 'static int\nquiet_flag_present(', 'static int\nobserver_firmware_quiet(', source)

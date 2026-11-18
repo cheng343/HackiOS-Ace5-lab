@@ -2557,6 +2557,36 @@ wdt_arm(void)
 	wdt_armed = (r_pet == 0);
 }
 
+#if defined(HACKIOS_GIULIA) && defined(HACKIOS_DIAGNOSTIC)
+#define GIULIA_WDT_TRIAL_MS 8000u
+#define GIULIA_WDT_FALLBACK_SECONDS 16u
+#define WDT_CTL_ENABLED 1u
+#define WDT_CTL_EXPIRED (1u << 31)
+
+static int watchdog_trial_reply;
+
+static int
+giulia_wdt_status(uint64_t *ctl)
+{
+	uint64_t since_pet = 0;
+	*ctl = 0;
+	uint64_t ret = smc_call(VIRT_WDT_STATUS, 0, 0, ctl, &since_pet);
+	print("giulia watchdog: status=%x ctl=%x since_pet=%x\n", ret, *ctl, since_pet);
+	return ret == 0;
+}
+
+/* The caller has confirmed that the original watchdog is idle. */
+static int
+giulia_wdt_arm_trial(void)
+{
+	uint64_t ctl;
+	return smc_call(VIRT_WDT_SET_TIME, GIULIA_WDT_TRIAL_MS, GIULIA_WDT_TRIAL_MS, NULL, NULL) == 0 &&
+	    smc_call(VIRT_WDT_CONTROL, 3, 0, NULL, NULL) == 0 &&
+	    smc_call(VIRT_WDT_PET, 0, 0, NULL, NULL) == 0 &&
+	    giulia_wdt_status(&ctl) && (ctl & (WDT_CTL_ENABLED | WDT_CTL_EXPIRED)) == WDT_CTL_ENABLED;
+}
+#endif
+
 /* ------------------------------------------------------------------------ */
 /* UEFI exception hook: put the fault into the log instead of on the screen  */
 
@@ -3657,6 +3687,11 @@ usb_wait(uint8_t endpoint)
 		if (msg == UsbDeviceEventTransferNotification && data.transfer.endpoint_index == endpoint) {
 			return data.transfer.status == UsbDeviceTransferStatusCompleteOK ? (int64_t)data.transfer.bytes_completed : -1;
 		}
+#if defined(HACKIOS_GIULIA) && defined(HACKIOS_DIAGNOSTIC)
+		if (watchdog_trial_reply && READ_SYSREG(CNTVCT_EL0) - began >= freq) {
+			return -1;
+		}
+#endif
 		if (READ_SYSREG(CNTVCT_EL0) - last_pet > freq) {
 			last_pet = READ_SYSREG(CNTVCT_EL0);
 			wdt_pet();
@@ -3925,9 +3960,47 @@ fb_command(char *cmd)
 				compose_logs(NULL, 0);
 			}
 		} else if (starts_with(cmd, "oem hang")) {
+			if (!wdt_armed) {
+				fb_reply("FAIL", "no active watchdog");
+				return;
+			}
 			fb_reply("OKAY", "watchdog test: not petting any more");
 			for (;;) {
 			}
+#if defined(HACKIOS_GIULIA) && defined(HACKIOS_DIAGNOSTIC)
+		} else if (str_eq(cmd, "oem watchdog-status") || str_eq(cmd, "oem watchdog-expiry")) {
+			uint64_t ctl;
+			if (busy || wdt_armed || PLAT != &platform_giulia || READ_SYSREG(CNTFRQ_EL0) == 0) {
+				fb_reply("FAIL", "watchdog trial requires idle giulia diagnostic loader");
+				return;
+			}
+			if (!giulia_wdt_status(&ctl)) {
+				fb_reply("FAIL", "Gunyah watchdog STATUS failed");
+				return;
+			}
+			if (ctl & (WDT_CTL_ENABLED | WDT_CTL_EXPIRED)) {
+				fb_reply("FAIL", "Gunyah watchdog already enabled or expired");
+				return;
+			}
+			if (str_eq(cmd, "oem watchdog-status")) {
+				fb_reply("OKAY", "Gunyah watchdog STATUS idle");
+				return;
+			}
+			/* Keep the normal pet path disabled. Start no XNU or Wi-Fi services. */
+			int armed = giulia_wdt_arm_trial();
+			uint64_t started = READ_SYSREG(CNTVCT_EL0);
+			watchdog_trial_reply = 1;
+			if (armed) {
+				fb_reply("OKAY", "Gunyah watchdog armed: 8s bite, 16s cold-reset fallback");
+				while (seconds_since(started) < GIULIA_WDT_FALLBACK_SECONDS) {
+					__asm__ volatile ("yield");
+				}
+			} else {
+				fb_reply("FAIL", "Gunyah watchdog arm unconfirmed; cold-reset fallback");
+			}
+			watchdog_trial_reply = 0;
+			ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
+#endif
 #ifdef HACKIOS_GIULIA
         } else if (starts_with(cmd, "oem touchwatch")) {
             if (busy) { fb_reply("FAIL", "kernel is running"); return; }
