@@ -71,6 +71,7 @@ struct giulia_wifi_bringup {
     struct giulia_kiwi_soc_info soc;
     struct giulia_mhi_snapshot mhi;
     uint32_t stage, failed_stage, noc_started;
+    uint32_t pipe_checked, pipe_cbcr;
     int error, sub_error, cleanup_error;
 };
 

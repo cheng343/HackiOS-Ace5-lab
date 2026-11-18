@@ -387,6 +387,17 @@ int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *s, uint32_t flags,
 
 int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
 {
+    static const struct { uint32_t offset, mask, expected; } decoder[] = {
+        {PARF_TYPE, UINT32_MAX, 4u},
+        {PARF_PHY, BIT(0), 0u},
+        {PARF_DBI_LO, UINT32_MAX, PARF_LOCAL_DBI},
+        {PARF_DBI_HI, UINT32_MAX, 0u},
+        {PARF_ATU_LO, UINT32_MAX, PARF_LOCAL_ATU},
+        {PARF_ATU_HI, UINT32_MAX, 0u},
+        {PARF_SLV_LO, UINT32_MAX, PARF_SLAVE_SIZE},
+        {PARF_SLV_HI, UINT32_MAX, 0u},
+        {PARF_SYS, BIT(29), 0u}
+    };
     uint16_t unused_msi, unused_msix;
     uint32_t v;
     if (!s) return GIULIA_LINK_ARGUMENT;
@@ -395,6 +406,18 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
         return GIULIA_LINK_PREREQUISITE;
     if (s->state != GIULIA_LINK_PARF_READY || !s->parf_owned)
         return GIULIA_LINK_STATE;
+    s->stage = GIULIA_LINK_STAGE_PARF;
+    for (unsigned index = 0; index < sizeof(decoder) / sizeof(decoder[0]); index++) {
+        v = r32(s, GIULIA_LINK_PARF, decoder[index].offset);
+        if (v == UINT32_MAX || (v & decoder[index].mask) != decoder[index].expected)
+            return record_failure(s, GIULIA_LINK_READBACK);
+    }
+    v = r32(s, GIULIA_LINK_PARF, PARF_LTSSM);
+    if (v == UINT32_MAX) return record_failure(s, GIULIA_LINK_READBACK);
+    if (v & BIT(8)) return record_failure(s, GIULIA_LINK_BUSY);
+    v = r32(s, GIULIA_LINK_PARF, PARF_INT_MASK);
+    if (v == UINT32_MAX) return record_failure(s, GIULIA_LINK_READBACK);
+    if (v) return record_failure(s, GIULIA_LINK_BUSY);
     s->stage = GIULIA_LINK_STAGE_ADMISSION;
     s->root_id = r32(s, GIULIA_LINK_DBI, 0);
     if (s->root_id == 0xffffffffu) return record_failure(s, GIULIA_LINK_READBACK);

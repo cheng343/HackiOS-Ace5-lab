@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: BSD-2-Clause */
 /* Finite, single-CPU XNU bring-up diagnostic for Ace 5 Wi-Fi:
- * supply (KEEP_VOTES) -> PCIe power reset -> PARF/DBI -> QMP PHY -> PERST# ->
+ * supply (KEEP_VOTES) -> PCIe power reset -> PARF -> QMP PHY/PIPE -> DBI -> PERST# ->
  * Link train -> BAR0 MEM decode -> WCN7850 SoC ID (BAR+0x224) -> MHI snapshot.
  * Explicitly gated behind ace5_wifi_bringup=1, cpus=1, bootcpu=1, finite timer,
  * loader firmware-quiet and IRQ37 isolation; cold reboot required afterwards.
@@ -330,12 +330,6 @@ static int wb_prepare_noc(__unused void *cookie, struct giulia_wifi_supply *supp
     wb.crm_rc = rc;
     if (rc) { wb.noc_rc = rc; return rc; }
 
-    wb.noc_step = 2;
-    uint32_t patch_count = wb.crm_plan.patch_count ? wb.crm_plan.patch_count : GIULIA_BCM_PCIE0_PATCHES;
-    rc = giulia_crm_start_empty_keep(&wb.crm_dev, &crm_io, wb.crm_plan.patch, patch_count);
-    wb.crm_rc = rc;
-    if (rc) { wb.noc_rc = rc; return rc; }
-
     wb.noc_step = 3;
     if ((rc = giulia_arc_resolve((const uint8_t *)wb.db.address, GIULIA_RPMH_DB_MAX,
             wb.db_version, "xo.lvl", &xo_res)) ||
@@ -345,17 +339,20 @@ static int wb_prepare_noc(__unused void *cookie, struct giulia_wifi_supply *supp
     }
     /* Keep DRV2 CX at or above Nominal (256, matching observed HLOS handoff
      * selector 5) instead of lowering VDD_CX to LOWER (64 / selector 2). */
-    uint32_t cx_req_level = WB_CX_NOMINAL_LEVEL;
-    rc = giulia_arc_select(&cx_res, cx_req_level, &cx_sel);
-    if (rc == GIULIA_RPMH_NOT_FOUND) {
-        cx_req_level = GIULIA_GEM_CX_AO_MIN_LEVEL;
-        rc = giulia_arc_select(&cx_res, cx_req_level, &cx_sel);
-    }
+    rc = giulia_arc_select(&cx_res, WB_CX_NOMINAL_LEVEL, &cx_sel);
     if (rc) {
         wb.arc_rc = rc; wb.noc_rc = rc; return rc;
     }
+
+    wb.noc_step = 2;
+    uint32_t patch_count = wb.crm_plan.patch_count ? wb.crm_plan.patch_count : GIULIA_BCM_PCIE0_PATCHES;
+    rc = giulia_crm_start_empty_keep(&wb.crm_dev, &crm_io, wb.crm_plan.patch, patch_count);
+    wb.crm_rc = rc;
+    if (rc) { wb.noc_rc = rc; return rc; }
+
+    wb.noc_step = 3;
     wb.cx_sel_voted = cx_sel;
-    wb.cx_level_voted = cx_req_level;
+    wb.cx_level_voted = cx_res.level[cx_sel];
     struct giulia_rpmh_command arc_cmds[2] = {
         {xo_res.address, 3u},
         {cx_res.address, cx_sel}
@@ -492,11 +489,9 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     wb_log("ace5-wifi-bringup: root=%#x ep=%#x link_sts=%#x bar0=%#x/%#x\n",
         wb.bringup.link.root_id, wb.bringup.link.endpoint_id,
         wb.bringup.link.link_status, wb.bringup.link.bar0_mask, wb.bringup.link.bar0_mask_hi);
+    if (wb.bringup.pipe_checked)
+        wb_log("ace5-wifi-bringup: post-phy pipe_cbcr=%#x\n", wb.bringup.pipe_cbcr);
     if (rc == GIULIA_BRINGUP_OK) {
-        if (wb.bringup.stage >= GIULIA_BRINGUP_PHY_START && wb.gcc.address) {
-            wb_log("ace5-wifi-bringup: post-phy pipe_cbcr=%#x cnoc_sf=%#x\n",
-                wb_mmio(&wb.gcc, 0x6b040u), wb_mmio(&wb.gcc, 0x10058u));
-        }
         wb_log("ace5-wifi-bringup: requested stage complete; stage=%u max=%u\n",
             wb.bringup.stage, wb.max_stage);
         if (wb.bringup.stage == GIULIA_BRINGUP_READY) {

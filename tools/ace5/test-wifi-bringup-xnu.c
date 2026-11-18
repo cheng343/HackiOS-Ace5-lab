@@ -31,6 +31,7 @@ static unsigned creates, exits, deallocs, maps, unmaps, fail_map, time_us;
 static unsigned no_ack, no_resume_ack, pending_irq, lost_guard;
 static unsigned stop_calls, qos_calls, gem_calls, crm_calls;
 static unsigned allow_prepare, bcm_policy_seen, crm_patches_seen, cx_level_seen, rpmh_cx_sel_seen;
+static unsigned cx_nominal_unavailable;
 static int start_rc, stop_rc, qos_rc, gem_rc, crm_rc;
 static uint64_t shared_pa=0x90000100;
 static uint8_t pdc_table[508];
@@ -153,13 +154,17 @@ int giulia_arc_resolve(__unused const uint8_t *db,__unused uint32_t bytes,__unus
     assert(allow_prepare);
     r->address=!strcmp(name,"xo.lvl") ? 0x30004u : 0x30000u;
     r->count=6;
+    r->level[2]=64u;
+    r->level[5]=256u;
     return 0;
 }
-int giulia_arc_select(__unused const struct giulia_arc_resource *r,uint32_t level,uint32_t *out)
+int giulia_arc_select(const struct giulia_arc_resource *r,uint32_t level,uint32_t *out)
 {
     assert(allow_prepare);
     cx_level_seen=level;
+    if (cx_nominal_unavailable && level>=256u) return GIULIA_RPMH_NOT_FOUND;
     *out=level>=256u ? 5u : 2u;
+    assert(r->level[*out] >= level);
     return 0;
 }
 int giulia_rpmh_write(__unused struct giulia_rpmh *p,const struct giulia_rpmh_command *cmd,unsigned n)
@@ -182,7 +187,7 @@ static void setup(void)
     creates=exits=deallocs=maps=unmaps=fail_map=time_us=0;
     no_ack=no_resume_ack=pending_irq=lost_guard=0;gic_enabled=WB_IRQ|1;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
-    allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=0;
+    allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=cx_nominal_unavailable=0;
 }
 static void admission(void)
 {
@@ -251,6 +256,10 @@ static void noc_prepare(void)
     assert(bcm_policy_seen==GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES &&
            crm_patches_seen==GIULIA_BCM_PCIE0_ALL_STATES_PATCHES);
     assert(cx_level_seen==256u && rpmh_cx_sel_seen==5u);
+
+    setup();allow_prepare=1;cx_nominal_unavailable=1;
+    assert(wb_prepare_noc(0,&supply)==GIULIA_RPMH_NOT_FOUND);
+    assert(cx_level_seen==256u && !crm_patches_seen && !rpmh_cx_sel_seen);
 }
 int main(void)
 {

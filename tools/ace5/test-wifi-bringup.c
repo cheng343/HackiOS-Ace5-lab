@@ -33,6 +33,13 @@ int giulia_wifi_supply_cancel(struct giulia_wifi_supply *p)
 int giulia_pcie_power_finish_reset(struct giulia_pcie_power *p, uint32_t f)
 { assert(f & GIULIA_POWER_NOC_READY); int rc = ev('P', GIULIA_POWER_TIMEOUT); p->reset_attempted=1; p->state = rc ? GIULIA_POWER_FAULT : GIULIA_POWER_READY; return rc; }
 int giulia_pcie_power_pipe_enable(struct giulia_pcie_power *p) { p->state = GIULIA_POWER_PIPE_ON; return ev('E', 0); }
+int giulia_pcie_power_pipe_ready(struct giulia_pcie_power *p, uint32_t *observed)
+{
+    assert(p->state == GIULIA_POWER_PIPE_ON);
+    int rc = ev('C', GIULIA_POWER_TIMEOUT);
+    *observed = rc ? 0x80000000u : 0x10c00u;
+    return rc;
+}
 int giulia_pcie_power_pipe_disable(struct giulia_pcie_power *p) { p->state = GIULIA_POWER_READY; return ev('e', 0); }
 int giulia_pcie_power_stop(struct giulia_pcie_power *p, uint32_t f)
 { assert(f & GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET); assert(host_on && !noc_owned); int rc=ev('p',GIULIA_POWER_TIMEOUT); p->state=rc?GIULIA_POWER_FAULT:GIULIA_POWER_STOPPED; if(!rc)host_on=0; return rc; }
@@ -90,10 +97,10 @@ int main(void)
     tlen = 0; fail_at = -1;
     assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_OK);
     assert(b.stage == GIULIA_BRINGUP_READY && strcmp(giulia_kiwi_fw_name(&b.soc), "amss20.bin") == 0);
-    assert(strcmp(trace, "SNPAYELRTMIH") == 0);
+    assert(strcmp(trace, "SNPAYECLRTMIH") == 0);
     assert(giulia_wifi_bringup_stop(&b) == GIULIA_BRINGUP_RETAINED);
     assert(b.stage == GIULIA_BRINGUP_HELD);
-    assert(strcmp(trace, "SNPAYELRTMIHmrqyelnps") == 0);
+    assert(strcmp(trace, "SNPAYECLRTMIHmrqyelnps") == 0);
     assert(!host_on && !noc_owned);
     unsigned before=tlen;
     assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_RETAINED && tlen==before);
@@ -101,15 +108,23 @@ int main(void)
     assert(giulia_wifi_bringup_start(&b,&cfg)==GIULIA_BRINGUP_STATE);
     assert(!memcmp(&b,&saved,sizeof(b)) && tlen==before);
 
-    /* Failure at link train (step 9 = 'T') triggers clean reverse unwind */
-    tlen = 0; memset(trace, 0, sizeof(trace)); memset(&b,0,sizeof(b)); fail_at = 9;
+    /* Failure at link train triggers clean reverse unwind. */
+    tlen = 0; memset(trace, 0, sizeof(trace)); memset(&b,0,sizeof(b)); fail_at = 10;
     assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_LINK);
     assert(b.failed_stage == GIULIA_BRINGUP_LINK_TRAIN && b.stage == GIULIA_BRINGUP_HELD);
-    assert(strcmp(trace, "SNPAYELRTrqyelnps") == 0);
+    assert(strcmp(trace, "SNPAYECLRTrqyelnps") == 0);
+
+    tlen = 0; memset(trace, 0, sizeof(trace)); memset(&b,0,sizeof(b));
+    stop_fail = 'C';
+    assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_POWER);
+    assert(b.failed_stage == GIULIA_BRINGUP_PHY_START && b.sub_error == GIULIA_POWER_TIMEOUT);
+    assert(b.pipe_checked && b.pipe_cbcr == 0x80000000u && b.stage == GIULIA_BRINGUP_HELD);
+    assert(strcmp(trace, "SNPAYECrqyelnps") == 0);
+    stop_fail = 0;
 
     /* Each startup failure must unwind its actual prerequisites; inactive
      * hooks must not acquire/stop NoC, and a historical reset is not a user. */
-    const int startup_faults[]={1,2,3,4,5,7,8,9,10,11,12};
+    const int startup_faults[]={1,2,3,4,5,7,8,9,10,11,12,13};
     for(unsigned i=0;i<sizeof(startup_faults)/sizeof(startup_faults[0]);i++) {
         memset(&b,0,sizeof(b)); memset(trace,0,sizeof(trace)); tlen=0; fail_at=startup_faults[i];
         assert(giulia_wifi_bringup_start(&b,&cfg)<0);
@@ -121,8 +136,10 @@ int main(void)
         int rc=giulia_wifi_bringup_start(&b,&cfg);
         if(rc || b.stage!=ceiling)fprintf(stderr,"ceiling=%u rc=%d actual=%u\n",ceiling,rc,b.stage);
         assert(!rc && b.stage==ceiling);
-        if (ceiling == GIULIA_BRINGUP_PHY_START)
-            assert(!strcmp(trace, "SNPAYE") && b.link.state == GIULIA_LINK_PARF_READY);
+        if (ceiling == GIULIA_BRINGUP_PHY_START) {
+            assert(!strcmp(trace, "SNPAYEC") && b.link.state == GIULIA_LINK_PARF_READY);
+            assert(b.pipe_checked && b.pipe_cbcr == 0x10c00u);
+        }
         assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_RETAINED && !host_on && !noc_owned);
     }
     cfg.max_stage=0;

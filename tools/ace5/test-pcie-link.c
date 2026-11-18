@@ -710,6 +710,27 @@ static void test_split_prepare(void)
         sizeof(f.regs[GIULIA_LINK_PARF])));
     puts("Ace5 PCIe PARF-before-PHY / DBI-after-PIPE and PARF-only shutdown passed");
 }
+
+static void test_parf_drift_before_dbi(void)
+{
+    const uint32_t offsets[] = {0x350u, 0x634u, 0x358u, 0x1b0u, 0x22cu};
+    const uint32_t changed[] = {0x60000000u, 0xffffffffu, 0u, BIT(8), BIT(13)};
+    const int expected[] = {GIULIA_LINK_READBACK, GIULIA_LINK_READBACK,
+        GIULIA_LINK_READBACK, GIULIA_LINK_BUSY, GIULIA_LINK_BUSY};
+    for (unsigned index = 0; index < sizeof(offsets) / sizeof(offsets[0]); index++) {
+        struct fake f;
+        struct giulia_pcie_link s;
+        init(&f, &s);
+        struct giulia_pcie_link_io io = io_for(&f);
+        f.core_dark = 1;
+        assert(giulia_pcie_link_prepare_parf(&s, GIULIA_LINK_PARF_REQUIRED, &io) == 0);
+        unsigned writes = f.writes;
+        f.regs[GIULIA_LINK_PARF][offsets[index] / 4u] = changed[index];
+        assert(giulia_pcie_link_prepare(&s, GIULIA_LINK_PREPARE_REQUIRED) == expected[index]);
+        assert(s.failure_stage == GIULIA_LINK_STAGE_PARF && f.writes == writes);
+        assert(!f.core_reads && !f.core_writes && s.parf_owned && !s.core_owned);
+    }
+}
 static void test_boot_profile(void)
 {
     struct fake f; struct giulia_pcie_link s; struct giulia_pcie_link_io io;
@@ -791,6 +812,7 @@ int main(void)
     test_memory_readback_and_retry();
     test_deferred_parf_restore();
     test_split_prepare();
+    test_parf_drift_before_dbi();
     test_boot_profile();
     puts("SM8650 PCIe link: ownership, training, config, BAR and rollback mocks passed");
     return 0;
