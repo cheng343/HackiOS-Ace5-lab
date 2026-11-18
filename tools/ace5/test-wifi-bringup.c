@@ -48,7 +48,7 @@ int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *l, uint32_t f, const 
 int giulia_pcie_link_prepare(struct giulia_pcie_link *l, uint32_t f)
 { assert(f == GIULIA_LINK_PREPARE_REQUIRED && l->state == GIULIA_LINK_PARF_READY); int rc = ev('L', GIULIA_LINK_BUSY); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_PREPARED; return rc; }
 int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t f, const struct giulia_pcie_phy_io *io)
-{ (void)f; p->io = *io; int rc = ev('Y', GIULIA_PHY_TIMEOUT); if (!rc) { assert(!io->pipe_enable(io->cookie)); p->state = GIULIA_PHY_READY; } else p->state = GIULIA_PHY_FAULT; return rc; }
+{ assert(!!(f & GIULIA_PHY_PCS_BEFORE_PIPE) == !!strchr(trace, 'K')); p->io = *io; int rc = ev('Y', GIULIA_PHY_TIMEOUT); if (!rc) { assert(!io->pipe_enable(io->cookie)); p->state = GIULIA_PHY_READY; } else p->state = GIULIA_PHY_FAULT; return rc; }
 int giulia_pcie_phy_stop(struct giulia_pcie_phy *p, uint32_t f)
 { (void)f; int rc=ev('y',GIULIA_PHY_TIMEOUT); if(rc){p->state=GIULIA_PHY_FAULT;return rc;} assert(!p->io.pipe_disable(p->io.cookie)); p->state = GIULIA_PHY_STOPPED; return 0; }
 int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *g, uint32_t f)
@@ -74,6 +74,7 @@ int giulia_mhi_snapshot(const struct giulia_mhi_snapshot_io *io, uint32_t f, str
 static int noc_prep(void *cookie, struct giulia_wifi_supply *s) { (void)cookie; (void)s; assert(host_on); noc_owned=1; return ev('N', -1); }
 static int noc_rel(void *cookie) { (void)cookie; assert(host_on && noc_owned); int rc=ev('n',-1); if(!rc)rc=noc_release_rc; if(!rc)noc_owned=0; return rc; }
 static int noc_verify(void *cookie) { (void)cookie; assert(host_on && noc_owned); return ev('V', -1); }
+static int arm_pcs_first(void) { assert(host_on && noc_owned); return ev('K', -1); }
 static uint32_t d_r32(void *c, unsigned b, uint32_t o) { (void)c; (void)b; (void)o; return 0; }
 static void d_w32(void *c, unsigned b, uint32_t o, uint32_t v) { (void)c; (void)b; (void)o; (void)v; }
 static uint16_t d_r16(void *c, unsigned b, uint32_t o) { (void)c; (void)b; (void)o; return 0; }
@@ -174,6 +175,18 @@ int main(void)
         stop_fail=0;
         assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_RETAINED && !b.cleanup_error && !host_on && !noc_owned);
     }
+
+    cfg.arm_pcs_first = arm_pcs_first;
+    cfg.max_stage = GIULIA_BRINGUP_PHY_START;
+    memset(&b,0,sizeof(b)); memset(trace,0,sizeof(trace)); tlen=0;
+    stop_fail = 'K';
+    assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_PREREQUISITE);
+    assert(!strncmp(trace, "SNPAK", 5) && !strchr(trace, 'Y') && !strchr(trace, 'E'));
+    assert(!host_on && !noc_owned);
+    memset(&b,0,sizeof(b)); memset(trace,0,sizeof(trace)); tlen=0;
+    stop_fail = 0;
+    assert(!giulia_wifi_bringup_start(&b, &cfg) && !strcmp(trace, "SNPAKYEC"));
+    assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_RETAINED);
 
     puts("Wi-Fi end-to-end bringup coordinator tests passed");
     puts("Wi-Fi teardown: NoC before power, retained CRM dependencies, all startup stages and stop-failure retries passed");

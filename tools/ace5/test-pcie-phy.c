@@ -13,7 +13,7 @@ struct fixture {
     uint32_t regs[0x2000 / 4], original[0x2000 / 4];
     uint32_t ignore_write;
     unsigned reads, writes, delays, elapsed_us, status_reads;
-    unsigned ready_after, pipe_on, pipe_off, pipe_live;
+    unsigned ready_after, pipe_on, pipe_off, pipe_live, pcs_first;
     int pipe_on_fail, pipe_off_fail, status_bad;
 };
 static uint32_t rd(void *cookie, uint32_t off)
@@ -46,7 +46,12 @@ static int pipe_on(void *cookie)
 {
     struct fixture *f = cookie;
     ++f->pipe_on; f->pipe_live = 1;
-    assert((f->regs[RESET / 4] & 1) && !(f->regs[START / 4] & 3));
+    if (f->pcs_first) {
+        assert(!(f->regs[RESET / 4] & 1) && (f->regs[START / 4] & 3) == 3);
+        assert(f->elapsed_us == 1000);
+    } else {
+        assert((f->regs[RESET / 4] & 1) && !(f->regs[START / 4] & 3));
+    }
     assert((f->regs[POWER / 4] & 3) == 3);
     /* Ace 5 TX values differ from the older reference board, on both lanes. */
     assert(f->regs[0x0e40 / 4] == 9 && f->regs[0x1640 / 4] == 9);
@@ -119,6 +124,18 @@ int main(void)
     restored(&f, &p);
     before = f.reads + f.writes;
     assert(!giulia_pcie_phy_stop(&p, 0) && before == f.reads + f.writes);
+
+    setup(&f, &p);
+    f.pcs_first = 1;
+    assert(!giulia_pcie_phy_start(&p, GIULIA_PHY_START_REQUIRED | GIULIA_PHY_PCS_BEFORE_PIPE, &bus));
+    assert(p.state == GIULIA_PHY_READY && f.pipe_on == 1 && !giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED));
+    restored(&f, &p);
+    setup(&f, &p);
+    f.ignore_write = START;
+    assert(giulia_pcie_phy_start(&p, GIULIA_PHY_START_REQUIRED | GIULIA_PHY_PCS_BEFORE_PIPE, &bus)
+        == GIULIA_PHY_READBACK);
+    assert(!f.pipe_on && !f.pipe_off);
+    restored(&f, &p);
 
     setup(&f, &p); f.ready_after = 1000;
     assert(giulia_pcie_phy_start(&p, GIULIA_PHY_START_REQUIRED, &bus) == GIULIA_PHY_TIMEOUT);

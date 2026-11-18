@@ -295,9 +295,9 @@ def ace5_pdc_test_arguments(enabled, table, bootcpu, kernel, seconds, other_hard
 
 def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log,
                                stage=0, crm_all_states=False, sm_diag=0, sm_profile=None,
-                               watchdog=0, cold_reset=False):
+                               watchdog=0, cold_reset=False, pcs_first=False):
     if not enabled:
-        if stage or crm_all_states or sm_diag or sm_profile or watchdog or cold_reset:
+        if stage or crm_all_states or sm_diag or sm_profile or watchdog or cold_reset or pcs_first:
             raise RuntimeError('Wi-Fi stage, CRM and CESTA options require --wifi-bringup-test')
         return ''
     if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
@@ -313,6 +313,8 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
                        (sm_diag, bool(sm_profile)) not in ((0, False), (4, True), (5, True), (6, True), (7, True)))) or (
                        sm_diag >= 4 and not cold_reset):
         raise RuntimeError('Cold-reset profile requires isolated Stage 4 and 60..120 seconds')
+    if pcs_first and (sm_diag != 7 or not cold_reset or not sm_profile):
+        raise RuntimeError('--wifi-pcs-first requires --wifi-cesta-endpoint')
     out = ' ace5_wifi_bringup=1'
     if stage:
         out += f' ace5_wifi_bringup_stage={stage}'
@@ -330,13 +332,17 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         out += f' ace5_wifi_watchdog={watchdog}'
     if cold_reset:
         out += ' ace5_wifi_cold_reset=1'
+    if pcs_first:
+        out += ' ace5_wifi_pcs_first=1'
     return out
 
 
 def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=False,
-                           watchdog=0, cold_reset=False):
+                           watchdog=0, cold_reset=False, pcs_first=False):
     if not enabled:
         return
+    if pcs_first and 'ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access' not in text:
+        raise RuntimeError(f'PCS-before-PIPE trial unconfirmed; preserve {log} and cold reboot')
     if watchdog == 2:
         raise RuntimeError(f'Watchdog expiry did not reset the phone; preserve {log} and cold reboot')
     if cold_reset and sm_diag < 4:
@@ -457,6 +463,8 @@ sm.add_argument('--wifi-cesta-dbi-id', type=Path,
                 help='If guarded CESTA and actual CRM performance agree, read DBI+0 once')
 sm.add_argument('--wifi-cesta-endpoint', type=Path,
                 help='Train Gen1 x1 under the reset deadline and read the WCN7850 ID through CFG0')
+run.add_argument('--wifi-pcs-first', action='store_true',
+                 help='Arm independent reset before starting PCS ahead of PIPE; requires --wifi-cesta-endpoint')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -633,7 +641,7 @@ try:
                 args.bootcpu, args.kernel, seconds,
                 args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test or args.wlan_pdc_test,
                 args.live_log, args.wifi_bringup_stage, args.wifi_crm_all_states,
-                sm_mode, cesta_profile, args.wifi_watchdog, cold_reset)
+                sm_mode, cesta_profile, args.wifi_watchdog, cold_reset, args.wifi_pcs_first)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -725,7 +733,7 @@ try:
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
             check_wifi_bringup_log(args.wifi_bringup_test, args.wifi_bringup_stage, saved_log,
                 getvar('power-reset-required') if args.wifi_bringup_test else None, log,
-                sm_mode, args.wifi_watchdog, cold_reset)
+                sm_mode, args.wifi_watchdog, cold_reset, args.wifi_pcs_first)
             check_rpmh_read_log(args.rpmh_read_test,saved_log,
                 getvar('power-reset-required') if args.rpmh_read_test else None,log)
             if (args.aop_channel_test or args.aop_cx_vote_test) and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:

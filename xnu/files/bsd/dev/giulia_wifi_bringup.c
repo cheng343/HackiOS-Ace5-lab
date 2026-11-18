@@ -52,6 +52,8 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
         return GIULIA_BRINGUP_STATE;
     if (!!cfg->prepare_noc != !!cfg->release_noc || cfg->max_stage > GIULIA_BRINGUP_MHI_SNAP)
         return GIULIA_BRINGUP_ARGUMENT;
+    if (cfg->arm_pcs_first && cfg->max_stage != GIULIA_BRINGUP_PHY_START)
+        return GIULIA_BRINGUP_PREREQUISITE;
     struct giulia_wifi_bringup_config copy = *cfg;
     *b = (struct giulia_wifi_bringup){0};
     b->cfg = copy;
@@ -84,6 +86,11 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     phy_io.cookie = b;
     phy_io.pipe_enable = pipe_on;
     phy_io.pipe_disable = pipe_off;
+    if (b->cfg.arm_pcs_first) {
+        rc = b->cfg.arm_pcs_first();
+        if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_PREREQUISITE, rc);
+        phy_req |= GIULIA_PHY_PCS_BEFORE_PIPE;
+    }
     rc = giulia_pcie_phy_start(&b->phy, phy_req, &phy_io);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_PHY, rc);
     b->pipe_checked = 1;

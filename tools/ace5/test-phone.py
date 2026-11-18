@@ -86,6 +86,10 @@ class PhoneTests(unittest.TestCase):
         endpoint = dbi + ('PCIe endpoint identify rc=0 id=0x110717cb lnk=0x2011\n'
                           'PCIe endpoint reset reassert rc=0\n')
         check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True)
+        with self.assertRaisesRegex(RuntimeError, 'PCS-before-PIPE trial unconfirmed'):
+            check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True, pcs_first=True)
+        check(True, 4, endpoint + 'ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access\n',
+              'yes', self.log, sm_diag=7, cold_reset=True, pcs_first=True)
         with self.assertRaisesRegex(RuntimeError, 'WCN7850 identity or reset'):
             check(True, 4, endpoint.replace('lnk=0x2011', 'lnk=0x2022'),
                   'yes', self.log, sm_diag=7, cold_reset=True)

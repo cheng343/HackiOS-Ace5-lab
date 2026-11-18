@@ -60,6 +60,10 @@ struct giulia_wifi_bringup_config {
      * until cold reset. A negative result keeps all lower dependencies. */
     int (*release_noc)(void *cookie);
     int (*verify_noc)(void *cookie);
+    /* Optional Stage 4 trial. Called with PARF and reset pins owned, before
+     * touching PHY registers. Must arm independent recovery before returning
+     * success and enabling the stock PCS-before-PIPE sequence. */
+    int (*arm_pcs_first)(void);
     /* Optional diagnostic stop ceiling (enum giulia_wifi_bringup_stage, 0 = full). */
     unsigned max_stage;
 };

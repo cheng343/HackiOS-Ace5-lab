@@ -119,12 +119,20 @@ int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t prerequisites,
             return phy_failed(p, GIULIA_PHY_READBACK);
     }
     io->barrier(io->cookie);
+    const int pcs_first = (prerequisites & GIULIA_PHY_PCS_BEFORE_PIPE) != 0;
+    if (pcs_first) {
+        if (phy_update(p, PHY_RESET, 1u, 0) || phy_update(p, PHY_START, 3u, 3u))
+            return phy_failed(p, GIULIA_PHY_READBACK);
+        io->delay_us(io->cookie, 1000);
+    }
     /* Mark before callback: a failed enable may have partially voted PIPE. */
     p->pipe_owned = 1;
     if (io->pipe_enable(io->cookie)) return phy_failed(p, GIULIA_PHY_PIPE);
-    if (phy_update(p, PHY_RESET, 1u, 0) || phy_update(p, PHY_START, 3u, 3u))
-        return phy_failed(p, GIULIA_PHY_READBACK);
-    io->delay_us(io->cookie, 1000);
+    if (!pcs_first) {
+        if (phy_update(p, PHY_RESET, 1u, 0) || phy_update(p, PHY_START, 3u, 3u))
+            return phy_failed(p, GIULIA_PHY_READBACK);
+        io->delay_us(io->cookie, 1000);
+    }
     for (i = 0; i <= 50; ++i) {
         p->last_status = io->read32(io->cookie, PHY_STATUS);
         p->polls = i + 1;

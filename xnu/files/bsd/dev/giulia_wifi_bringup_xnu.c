@@ -68,6 +68,7 @@ static struct {
     uint8_t cesta_profile[WB_SM_PROFILE_BYTES];
     uint32_t irq_dirty, irq_prior, guard_failed, endpoint_reset_unconfirmed, db_version, max_stage;
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
+    uint32_t pcs_first, pcs_first_armed;
     uint32_t noc_step;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
@@ -456,6 +457,20 @@ static int wb_verify_noc(__unused void *cookie)
     return GIULIA_BRINGUP_OK;
 }
 
+static int wb_perst_held(void)
+{
+    /* GPIO94 remains an AP-controlled GPIO output and drives PERST# low. */
+    uint32_t cfg = wb_mmio(&wb.tlmm, 94u * 0x1000u);
+    uint32_t io = wb_mmio(&wb.tlmm, 94u * 0x1000u + 4u);
+    uint32_t ltssm = wb_mmio(&wb.parf, 0x1b0u);
+    if ((cfg & ((1u << 12) | (1u << 9) | (15u << 2))) != (1u << 9) ||
+        (io & 3u) || (ltssm & (1u << 8))) {
+        wb.guard_failed = 1;
+        return -1;
+    }
+    return 0;
+}
+
 static int wb_stage4_reset_lease(void)
 {
     if (!wb_guard()) {
@@ -469,16 +484,7 @@ static int wb_stage4_reset_lease(void)
         !wb.bringup.link.parf_owned ||
         wb.bringup.supply.gpio.state != GIULIA_WGPIO_ON)
         return -1;
-    /* GPIO94 remains an AP-controlled GPIO output and drives PERST# low. */
-    uint32_t cfg = wb_mmio(&wb.tlmm, 94u * 0x1000u);
-    uint32_t io = wb_mmio(&wb.tlmm, 94u * 0x1000u + 4u);
-    uint32_t ltssm = wb_mmio(&wb.parf, 0x1b0u);
-    if ((cfg & ((1u << 12) | (1u << 9) | (15u << 2))) != (1u << 9) ||
-        (io & 3u) || (ltssm & (1u << 8))) {
-        wb.guard_failed = 1;
-        return -1;
-    }
-    return 0;
+    return wb_perst_held();
 }
 
 static int wb_cesta_table_lease(__unused void *cookie)
@@ -519,9 +525,9 @@ static int wb_cesta_table_write(void *cookie, uint32_t off, uint32_t value)
     return 0;
 }
 
-static int wb_arm_cold_reset(__unused void *cookie)
+static int wb_request_cold_reset(void)
 {
-    if (!wb.cold_reset || wb_stage4_reset_lease() || !wb.quiet->reset_capability ||
+    if (!wb.cold_reset || !wb.quiet->reset_capability ||
         wb.quiet->reset_request || wb.quiet->reset_ack)
         return -1;
     wb.quiet->reset_request = 1;
@@ -537,6 +543,30 @@ static int wb_arm_cold_reset(__unused void *cookie)
     }
     wb_log("ace5-wifi-bringup: loader cold reset arm unconfirmed\n");
     return -1;
+}
+
+static int wb_arm_cold_reset(__unused void *cookie)
+{
+    if (wb_stage4_reset_lease()) return -1;
+    if (wb.pcs_first_armed)
+        return wb.quiet->reset_request == 1 &&
+            wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED ? 0 : -1;
+    return wb_request_cold_reset();
+}
+
+static int wb_arm_pcs_first(void)
+{
+    if (wb.sm_diag != WB_SM_ENDPOINT || !wb.pcs_first || !wb_guard() ||
+        wb.bringup.stage != GIULIA_BRINGUP_PHY_START ||
+        wb.bringup.phy.state != GIULIA_PHY_IDLE || wb.bringup.pipe_checked ||
+        wb.bringup.supply.power.state != GIULIA_POWER_READY ||
+        wb.bringup.link.state != GIULIA_LINK_PARF_READY || !wb.bringup.link.parf_owned ||
+        wb.bringup.supply.gpio.state != GIULIA_WGPIO_ON || wb_perst_held() ||
+        wb_request_cold_reset())
+        return -1;
+    wb.pcs_first_armed = 1;
+    wb_log("ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access\n");
+    return 0;
 }
 
 static const struct giulia_cesta_io wb_cesta_table_io = {
@@ -883,6 +913,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     cfg.prepare_noc = wb_prepare_noc;
     cfg.release_noc = wb_release_noc;
     cfg.verify_noc = wb_verify_noc;
+    if (wb.pcs_first) cfg.arm_pcs_first = wb_arm_pcs_first;
     cfg.max_stage = wb.max_stage;
 
     rc = giulia_wifi_bringup_start(&wb.bringup, &cfg);
@@ -945,6 +976,12 @@ stop:
     }
 
 release:
+    if (wb.pcs_first_armed) {
+        wb.guard_failed = 1;
+        if (!wb.endpoint_reset_unconfirmed)
+            loader_return();
+        goto retained;
+    }
     if (wb.guard_failed || wb.bringup.cleanup_error ||
         wb.bringup.stage == GIULIA_BRINGUP_FAULT) {
         wb_log("ace5-wifi-bringup: cleanup FAILED; resources/IRQ37/firmware quiet retained until cold reboot\n");
@@ -988,10 +1025,11 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("ace5_wifi_sm_diag", &wb.sm_diag, sizeof(wb.sm_diag));
     PE_parse_boot_argn("ace5_wifi_watchdog", &wb.watchdog_trial, sizeof(wb.watchdog_trial));
     PE_parse_boot_argn("ace5_wifi_cold_reset", &wb.cold_reset, sizeof(wb.cold_reset));
+    PE_parse_boot_argn("ace5_wifi_pcs_first", &wb.pcs_first, sizeof(wb.pcs_first));
     if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 ||
         seconds < 10 || seconds > 120 || wb.max_stage > GIULIA_BRINGUP_MHI_SNAP ||
         wb.crm_all_states > 1 || wb.sm_diag > WB_SM_ENDPOINT || wb.watchdog_trial > WB_WATCHDOG_EXPIRY ||
-        wb.cold_reset > 1) {
+        wb.cold_reset > 1 || wb.pcs_first > 1 || (wb.pcs_first && wb.sm_diag != WB_SM_ENDPOINT)) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
         return;
     }

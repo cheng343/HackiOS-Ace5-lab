@@ -22,7 +22,9 @@ enum giulia_pcie_phy_prerequisite {
     GIULIA_PHY_POWER_CLOCKS_READY = 1u << 1,
     GIULIA_PHY_PERST_ASSERTED = 1u << 2,
     GIULIA_PHY_LINK_QUIET = 1u << 3,
-    GIULIA_PHY_PARF_PREPARED = 1u << 4
+    GIULIA_PHY_PARF_PREPARED = 1u << 4,
+    /* Ace 5 downstream trial with PERST# held and independent reset armed. */
+    GIULIA_PHY_PCS_BEFORE_PIPE = 1u << 5
 };
 #define GIULIA_PHY_STOP_REQUIRED (GIULIA_PHY_EXCLUSIVE | \
     GIULIA_PHY_POWER_CLOCKS_READY | GIULIA_PHY_PERST_ASSERTED | GIULIA_PHY_LINK_QUIET)
@@ -50,8 +52,9 @@ struct giulia_pcie_phy {
 };
 
 /* Zero-initialize once. Refuses an already powered/started PHY. Programs the
- * public Ace 5 tuning table, then PIPE, SW_RESET, START; waits 1ms and polls
- * PHYSTATUS bit6 for <=10ms. No firmware or DMA is involved. On failure,
+ * public Ace 5 tuning table, then PIPE, SW_RESET, START. The opt-in trial
+ * releases SW_RESET and writes START 1ms before PIPE, as in pci-msm.
+ * Polls PHYSTATUS bit6 for <=10ms. No firmware or DMA is involved. On failure,
  * cleanup is attempted before return; FAULT means retain resources/retry. */
 int giulia_pcie_phy_start(struct giulia_pcie_phy *, uint32_t prerequisites,
     const struct giulia_pcie_phy_io *);
