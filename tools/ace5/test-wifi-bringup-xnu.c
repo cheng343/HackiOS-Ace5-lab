@@ -293,6 +293,7 @@ static void noc_after_phy(void)
     gcc[0x52008 / 4] = 0x7f;
     gcc[0x10058 / 4] = UINT32_MAX;
     assert(wb_verify_noc(0) == GIULIA_POWER_READBACK);
+    no_ack = 1;
     wb.quiet->active = 0;
     assert(wb_verify_noc(0) == GIULIA_CRM_LEASE && wb.guard_failed);
 }
