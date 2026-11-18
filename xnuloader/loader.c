@@ -13,6 +13,7 @@
 #include "identity.h"         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
 #include "image.h"
 #include "../xnu/files/bsd/sys/loader_firmware_quiet.h"
+#include "../xnu/files/bsd/sys/giulia_gunyah_watchdog.h"
 
 /* ------------------------------------------------------------------------ */
 /* Fixed conventions shared with the boot shim, the packer and the kernel   */
@@ -2558,12 +2559,7 @@ wdt_arm(void)
 }
 
 #if defined(HACKIOS_GIULIA) && defined(HACKIOS_DIAGNOSTIC)
-#define GIULIA_WDT_BARK_MS 11000u
-#define GIULIA_WDT_BITE_MS 14000u
 #define GIULIA_WDT_FALLBACK_SECONDS 24u
-#define WDT_NO_CHANGE 0xffffu
-#define WDT_CTL_ENABLED 1u
-#define WDT_CTL_EXPIRED (1u << 31)
 
 static int watchdog_trial_reply;
 
@@ -2574,29 +2570,14 @@ giulia_wdt_status(uint64_t *ctl)
 	*ctl = 0;
 	uint64_t ret = smc_call(VIRT_WDT_STATUS, 0, 0, ctl, &since_pet);
 	print("giulia watchdog: status=%x ctl=%x since_pet=%x\n", ret, *ctl, since_pet);
-	return ret;
+    return ret;
 }
 
 /* The caller has confirmed that the original watchdog is idle. */
 static const char *
 giulia_wdt_arm_trial(uint64_t *detail)
 {
-	/* Match the stock Linux driver: program bark and bite separately. */
-	*detail = smc_call(VIRT_WDT_SET_TIME, GIULIA_WDT_BARK_MS, WDT_NO_CHANGE, NULL, NULL);
-	if (*detail != 0) return "SET_BARK ret";
-	*detail = smc_call(VIRT_WDT_SET_TIME, WDT_NO_CHANGE, GIULIA_WDT_BITE_MS, NULL, NULL);
-	if (*detail != 0) return "SET_BITE ret";
-	*detail = smc_call(VIRT_WDT_CONTROL, 3, 0, NULL, NULL);
-	if (*detail != 0) return "ENABLE ret";
-	*detail = smc_call(VIRT_WDT_PET, 0, 0, NULL, NULL);
-	if (*detail != 0) return "PET ret";
-	uint64_t ctl;
-	*detail = giulia_wdt_status(&ctl);
-	if (*detail != 0) return "STATUS ret";
-	*detail = ctl;
-	if ((ctl & (WDT_CTL_ENABLED | WDT_CTL_EXPIRED)) != WDT_CTL_ENABLED)
-		return "STATUS ctl";
-	return NULL;
+	return giulia_wdt_configure(smc_call, detail);
 }
 #endif
 
@@ -3991,7 +3972,7 @@ fb_command(char *cmd)
 				fb_reply("FAIL", "Gunyah watchdog STATUS failed");
 				return;
 			}
-			if (ctl & (WDT_CTL_ENABLED | WDT_CTL_EXPIRED)) {
+			if (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED)) {
 				fb_reply("FAIL", "Gunyah watchdog already enabled or expired");
 				return;
 			}

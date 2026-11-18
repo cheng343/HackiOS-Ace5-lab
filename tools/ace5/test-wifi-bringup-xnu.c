@@ -8,6 +8,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include "../../xnu/files/bsd/sys/loader_firmware_quiet.h"
+#include "../../xnu/files/bsd/sys/giulia_gunyah_watchdog.h"
 #define GIULIA_WIFI_BRINGUP_XNU_HOST_TEST
 #define __unused __attribute__((unused))
 #define __printflike(a,b)
@@ -32,7 +33,7 @@ static void SHA256_Final(void *out, SHA256_CTX *c)
 { assert(c->size == 80); memset(out, 0, 32); }
 static struct { unsigned num_cpus; } topology;
 #define ml_get_topology_info() (&topology)
-static unsigned enabled, board, cpus, cpu, seconds, ceiling, other, crm_all, sm_diag;
+static unsigned enabled, board, cpus, cpu, seconds, ceiling, other, crm_all, sm_diag, watchdog;
 static unsigned creates, exits, deallocs, maps, unmaps, fail_map, time_us;
 static unsigned no_ack, no_resume_ack, pending_irq, lost_guard;
 static unsigned stop_calls, qos_calls, gem_calls, crm_calls;
@@ -42,10 +43,33 @@ static int start_rc, stop_rc, qos_rc, gem_rc, crm_rc;
 static uint64_t shared_pa=0x90000100;
 static uint8_t pdc_table[508];
 static uint32_t gic_enabled;
+static uint64_t watchdog_ctl;
+static unsigned watchdog_reads, watchdog_writes, watchdog_cannot_cancel;
 static char messages[16384];
 static struct { uintptr_t va; vm_size_t size; } allocation[24];
 static void wb_test_barrier(void);
-static void delay(unsigned us) { time_us+=us; assert(time_us<=3000000); }
+static void delay(unsigned us) { time_us+=us; assert(time_us<=30000000); }
+static uint64_t wb_test_watchdog_call(uint64_t id, uint64_t a1, uint64_t a2,
+    uint64_t *r1, uint64_t *r2)
+{
+    if (id == GIULIA_WDT_STATUS) {
+        watchdog_reads++;
+        assert(!a1 && !a2 && r1);
+        *r1 = watchdog_ctl;
+        if (r2) *r2 = 7;
+    } else {
+        watchdog_writes++;
+        assert(!r1 && !r2);
+        if (id == GIULIA_WDT_CONTROL) {
+            assert((a1 == 3 || a1 == 2) && !a2);
+            if (a1 == 2 && watchdog_cannot_cancel) return 1;
+            watchdog_ctl = a1 == 3 ? GIULIA_WDT_ENABLED : 0;
+        } else {
+            assert(id == GIULIA_WDT_SET_TIME || (id == GIULIA_WDT_PET && watchdog_ctl));
+        }
+    }
+    return 0;
+}
 static int hackios_platform(void) { return (int)board; }
 static int PE_parse_boot_argn(const char *name,void *out,unsigned size)
 {
@@ -59,6 +83,7 @@ static int PE_parse_boot_argn(const char *name,void *out,unsigned size)
     if(!strcmp(name,"ace5_wifi_bringup_stage"))value=ceiling;
     if(!strcmp(name,"ace5_wifi_crm_all_states"))value=crm_all;
     if(!strcmp(name,"ace5_wifi_sm_diag"))value=sm_diag;
+    if(!strcmp(name,"ace5_wifi_watchdog"))value=watchdog;
     if(!strcmp(name,"ace5_aop_channel_test"))value=other;
     *(unsigned *)out=value; return value!=0;
 }
@@ -125,8 +150,8 @@ void loader_log_line(const char *s)
 int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,const struct giulia_wifi_bringup_config *cfg)
 {
     assert(wb_guard());b->cfg=*cfg;b->stage=cfg->max_stage?cfg->max_stage:GIULIA_BRINGUP_READY;
-    if (sm_diag >= WB_SM_TABLES)
-        assert(wb.pcie_sm.address && !wb.dbi.address && !wb.atu.address && !wb.cfg.address && !wb.bar0.address);
+    if (sm_diag >= WB_SM_TABLES || watchdog)
+        assert(!wb.dbi.address && !wb.atu.address && !wb.cfg.address && !wb.bar0.address);
     if(start_rc){b->stage=GIULIA_BRINGUP_FAULT;b->cleanup_error=GIULIA_BRINGUP_SUPPLY;}
     return start_rc;
 }
@@ -196,6 +221,7 @@ static void setup(void)
     messages[0]=0;board=2;enabled=cpus=cpu=topology.num_cpus=1;seconds=30;ceiling=4;other=0;crm_all=sm_diag=0;
     creates=exits=deallocs=maps=unmaps=fail_map=time_us=0;
     no_ack=no_resume_ack=pending_irq=lost_guard=0;gic_enabled=WB_IRQ|1;
+    watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
     allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=cx_nominal_unavailable=0;
 }
@@ -216,6 +242,8 @@ static void admission(void)
     setup();sm_diag=2;giulia_wifi_bringup_init();
     assert(stop_calls == 1 && maps == unmaps && strstr(messages, "cesta cold-check rc=-3"));
     assert(!strstr(messages, "requested stage complete"));
+    setup();watchdog=2;giulia_wifi_bringup_init();assert(!maps && !creates && !watchdog_writes);
+    setup();watchdog=1;ceiling=5;giulia_wifi_bringup_init();assert(!maps && !creates && !watchdog_writes);
     setup();other=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();no_ack=1;giulia_wifi_bringup_init();assert(maps==unmaps && !stop_calls);
     setup();fail_map=1;giulia_wifi_bringup_init();assert(!maps && exits==1);
@@ -344,6 +372,19 @@ static void noc_after_phy(void)
     assert(strstr(messages, "cesta stage rc=0 discard=0 cold=0") &&
         !strstr(messages, "cesta table write begin off=0x1090"));
     assert(sm[0] == 0 && sm[GIULIA_CESTA_BRANCH_OFFSET / 4] == 0);
+    const unsigned test_begin = time_us;
+    wb.watchdog_trial = WB_WATCHDOG_STATUS;
+    assert(wb_watchdog_quiet_test() == 0 && watchdog_reads == 1 && !watchdog_writes);
+    watchdog_ctl = GIULIA_WDT_ENABLED;
+    assert(wb_watchdog_quiet_test() != 0 && watchdog_reads == 2 && !watchdog_writes);
+    watchdog_ctl = 0;
+    wb.watchdog_trial = WB_WATCHDOG_EXPIRY;
+    assert(wb_watchdog_quiet_test() != 0 && watchdog_reads == 6 && watchdog_writes == 5);
+    assert(time_us - test_begin == WB_WATCHDOG_WAIT_SECONDS * 1000000u && !watchdog_ctl);
+    assert(!wb.guard_failed && strstr(messages,"quiet watchdog expiry not observed"));
+    watchdog_ctl = GIULIA_WDT_ENABLED;
+    watchdog_cannot_cancel = 1;
+    assert(wb_watchdog_cancel() != 0 && watchdog_ctl == GIULIA_WDT_ENABLED);
     perst[1] = 2;
     assert(wb_cesta_read_cold() == GIULIA_CESTA_LEASE && wb.guard_failed);
     wb.guard_failed = 0;
@@ -365,5 +406,6 @@ int main(void)
     admission();cleanup();single_access();noc_cleanup();noc_prepare();noc_after_phy();setup();
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");
+    puts("Wi-Fi XNU adapter: quiet watchdog read-only status, bounded expiry and disarm passed");
     return 0;
 }

@@ -294,9 +294,9 @@ def ace5_pdc_test_arguments(enabled, table, bootcpu, kernel, seconds, other_hard
 
 
 def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log,
-                               stage=0, crm_all_states=False, sm_diag=0, sm_profile=None):
+                               stage=0, crm_all_states=False, sm_diag=0, sm_profile=None, watchdog=0):
     if not enabled:
-        if stage or crm_all_states or sm_diag or sm_profile:
+        if stage or crm_all_states or sm_diag or sm_profile or watchdog:
             raise RuntimeError('Wi-Fi stage, CRM and CESTA options require --wifi-bringup-test')
         return ''
     if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
@@ -305,6 +305,9 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         raise RuntimeError('Missing or invalid current-DT PDC table (508 bytes); no upload attempted')
     if (sm_diag or sm_profile) and (stage != 4 or crm_all_states):
         raise RuntimeError('CESTA diagnostics require --wifi-bringup-stage 4 and the default CRM profile')
+    if watchdog and (stage != 4 or crm_all_states or sm_diag or sm_profile or
+                     (watchdog == 2 and seconds < 75)):
+        raise RuntimeError('Watchdog diagnostic requires isolated Stage 4 and at least 75 seconds for expiry')
     out = ' ace5_wifi_bringup=1'
     if stage:
         out += f' ace5_wifi_bringup_stage={stage}'
@@ -318,12 +321,20 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         if len(data) != 80 or hashlib.sha256(data).hexdigest() != digest:
             raise RuntimeError('CESTA profile does not match the verified Ace 5 device tree')
         out += f' ace5_wifi_sm_diag=3 ace5_cesta_profile=v{data.hex()}'
+    if watchdog:
+        out += f' ace5_wifi_watchdog={watchdog}'
     return out
 
 
-def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=False):
+def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=False, watchdog=0):
     if not enabled:
         return
+    if watchdog == 2:
+        raise RuntimeError(f'Watchdog expiry did not reset the phone; preserve {log} and cold reboot')
+    if watchdog == 1:
+        statuses = re.findall(r'ace5-wifi-bringup: quiet watchdog status ret=(\d+) ctl=([0-9a-fx]+)', text)
+        if not statuses or any(ret != '0' or (int(ctl, 16) & 0x80000001) for ret, ctl in statuses):
+            raise RuntimeError(f'Idle Gunyah watchdog status under quiet unconfirmed; preserve {log}')
     if sm_diag and not re.search(r'ace5-wifi-bringup: post-phy cesta start=(?:0x[0-9a-f]+|0) '
                                  r'branch0=(?:0x[0-9a-f]+|0) override=(?:0x[0-9a-f]+|0) '
                                  r'clkreq=(?:0x[0-9a-f]+|0)', text):
@@ -394,6 +405,10 @@ sm.add_argument('--wifi-sm-tables', dest='wifi_sm_diag', action='store_const', c
                 help='Verify all CESTA program words are empty while PERST# stays low; requires Stage 4 and default CRM')
 sm.add_argument('--wifi-sm-stage', type=Path,
                 help='Stage and withdraw the stock 80-byte CESTA profile without START; requires Stage 4 and default CRM')
+sm.add_argument('--wifi-watchdog-status', dest='wifi_watchdog', action='store_const', const=1, default=0,
+                help='Read idle Gunyah watchdog status on the XNU core under Stage 4 firmware quiet')
+sm.add_argument('--wifi-watchdog-expiry', dest='wifi_watchdog', action='store_const', const=2,
+                help='Let the Gunyah watchdog expire at Stage 4; requires external recovery observation and 75..120 seconds')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -565,7 +580,7 @@ try:
                 args.bootcpu, args.kernel, seconds,
                 args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test or args.wlan_pdc_test,
                 args.live_log, args.wifi_bringup_stage, args.wifi_crm_all_states,
-                args.wifi_sm_diag, args.wifi_sm_stage)
+                args.wifi_sm_diag, args.wifi_sm_stage, args.wifi_watchdog)
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -657,7 +672,7 @@ try:
             check_wifi_probe_log(args.wifi_probe, saved_log, log)
             check_wifi_bringup_log(args.wifi_bringup_test, args.wifi_bringup_stage, saved_log,
                 getvar('power-reset-required') if args.wifi_bringup_test else None, log,
-                3 if args.wifi_sm_stage else args.wifi_sm_diag)
+                3 if args.wifi_sm_stage else args.wifi_sm_diag, args.wifi_watchdog)
             check_rpmh_read_log(args.rpmh_read_test,saved_log,
                 getvar('power-reset-required') if args.rpmh_read_test else None,log)
             if (args.aop_channel_test or args.aop_cx_vote_test) and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:

@@ -63,7 +63,7 @@ def main() -> int:
         watchdog = section(text, 'static int\nobserver_watchdog_within_budget(',
                            '/*\n * Run the kernel on the core with that MPIDR', source)
         (build / "watchdog-budget.inc").write_text(watchdog, encoding="utf-8")
-        trial = section(text, '#define GIULIA_WDT_BARK_MS ',
+        trial = section(text, '#define GIULIA_WDT_FALLBACK_SECONDS ',
                         '#endif\n\n/* ------------------------------------------------------------------------ */\n'
                         '/* UEFI exception hook:', source)
         (build / "watchdog-trial.inc").write_text(trial, encoding="utf-8")

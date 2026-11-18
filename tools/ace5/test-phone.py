@@ -49,6 +49,13 @@ class PhoneTests(unittest.TestCase):
         clean = 'ace5-wifi-bringup: cleanup complete; IRQ37 restored and firmware resumed (cold reboot required)'
         good = report() + held
         check(True, 4, good, 'yes', self.log)
+        status = good + '\nace5-wifi-bringup: quiet watchdog status ret=0 ctl=0 since=0x11\n'
+        check(True, 4, status, 'yes', self.log, watchdog=1)
+        with self.assertRaisesRegex(RuntimeError, 'Idle Gunyah watchdog status'):
+            check(True, 4, status + 'ace5-wifi-bringup: quiet watchdog status ret=0 ctl=0x1',
+                  'yes', self.log, watchdog=1)
+        with self.assertRaisesRegex(RuntimeError, 'Watchdog expiry did not reset'):
+            check(True, 4, status, 'yes', self.log, watchdog=2)
         with self.assertRaisesRegex(RuntimeError, 'CESTA snapshot missing'):
             check(True, 4, good, 'yes', self.log, True)
         check(True, 4, good + '\nace5-wifi-bringup: post-phy cesta start=0 branch0=0 override=0 clkreq=0',
@@ -87,6 +94,10 @@ class PhoneTests(unittest.TestCase):
         table.write_bytes(bytes(508))
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4),
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4')
+        self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, watchdog=1),
+                         ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_watchdog=1')
+        with self.assertRaisesRegex(RuntimeError, 'Watchdog diagnostic requires'):
+            fn(True, table, 1, 'kernel', 30, False, False, 4, watchdog=2)
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, False, True),
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_sm_diag=1')
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, False, 2),

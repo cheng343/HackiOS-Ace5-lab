@@ -15,6 +15,7 @@
 #include <machine/machine_routines.h>
 #include <pexpert/pexpert.h>
 #include <pexpert/device_tree.h>
+#include <sys/giulia_gunyah_watchdog.h>
 #include <sys/hackios_platform.h>
 #include <sys/loader_firmware_quiet.h>
 #include <sys/systm.h>
@@ -41,6 +42,9 @@ extern void loader_log_line(const char *);
 #define WB_SM_TABLES 2u
 #define WB_SM_STAGE 3u
 #define WB_SM_PROFILE_BYTES (4u * GIULIA_CESTA_WORDS)
+#define WB_WATCHDOG_STATUS 1u
+#define WB_WATCHDOG_EXPIRY 2u
+#define WB_WATCHDOG_WAIT_SECONDS 28u
 
 struct wb_map { uintptr_t allocation, address; vm_size_t size; };
 static struct {
@@ -56,7 +60,7 @@ static struct {
     uint8_t pdc_table[508];
     uint8_t cesta_profile[WB_SM_PROFILE_BYTES];
     uint32_t irq_dirty, irq_prior, guard_failed, db_version, max_stage;
-    uint32_t crm_all_states, sm_diag, cx_sel_voted, cx_level_voted;
+    uint32_t crm_all_states, sm_diag, watchdog_trial, cx_sel_voted, cx_level_voted;
     uint32_t noc_step;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
@@ -445,13 +449,13 @@ static int wb_verify_noc(__unused void *cookie)
     return GIULIA_BRINGUP_OK;
 }
 
-static int wb_cesta_table_lease(__unused void *cookie)
+static int wb_stage4_reset_lease(void)
 {
     if (!wb_guard()) {
         wb.guard_failed = 1;
         return -1;
     }
-    if (!wb.pcie_sm.address || wb.bringup.stage != GIULIA_BRINGUP_PHY_START ||
+    if (wb.bringup.stage != GIULIA_BRINGUP_PHY_START ||
         !wb.bringup.pipe_checked || wb.bringup.link.state != GIULIA_LINK_PARF_READY ||
         !wb.bringup.link.parf_owned ||
         wb.bringup.supply.gpio.state != GIULIA_WGPIO_ON)
@@ -466,6 +470,11 @@ static int wb_cesta_table_lease(__unused void *cookie)
         return -1;
     }
     return 0;
+}
+
+static int wb_cesta_table_lease(__unused void *cookie)
+{
+    return !wb.pcie_sm.address ? -1 : wb_stage4_reset_lease();
 }
 
 static int wb_cesta_table_read(__unused void *cookie, uint32_t off, uint32_t *value)
@@ -560,12 +569,79 @@ static int wb_load_cesta_profile(void)
     return __builtin_memcmp(digest, expected, sizeof(expected)) == 0 ? 0 : -1;
 }
 
+static uint64_t wb_watchdog_call(uint64_t id, uint64_t a1, uint64_t a2,
+    uint64_t *r1, uint64_t *r2)
+{
+#ifdef GIULIA_WIFI_BRINGUP_XNU_HOST_TEST
+    return wb_test_watchdog_call(id, a1, a2, r1, r2);
+#else
+    register uint64_t x0 __asm__("x0") = id;
+    register uint64_t x1 __asm__("x1") = a1;
+    register uint64_t x2 __asm__("x2") = a2;
+    register uint64_t x3 __asm__("x3") = 0;
+    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3) :
+        : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13",
+          "x14", "x15", "x16", "x17", "memory");
+    if (r1) *r1 = x1;
+    if (r2) *r2 = x2;
+    return x0;
+#endif
+}
+
+static int wb_watchdog_cancel(void)
+{
+    uint64_t ctl = 0;
+    if (wb_watchdog_call(GIULIA_WDT_STATUS, 0, 0, &ctl, 0))
+        return -1;
+    if (ctl & GIULIA_WDT_ENABLED) {
+        if (wb_watchdog_call(GIULIA_WDT_CONTROL, 2, 0, 0, 0) ||
+            wb_watchdog_call(GIULIA_WDT_STATUS, 0, 0, &ctl, 0) ||
+            (ctl & GIULIA_WDT_ENABLED))
+            return -1;
+    }
+    return 0;
+}
+
+static int wb_watchdog_quiet_test(void)
+{
+    if (wb_stage4_reset_lease())
+        return -1;
+    uint64_t ctl = 0, since = 0;
+    uint64_t ret = wb_watchdog_call(GIULIA_WDT_STATUS, 0, 0, &ctl, &since);
+    wb_log("ace5-wifi-bringup: quiet watchdog status ret=%llu ctl=%#llx since=%#llx\n",
+        (unsigned long long)ret, (unsigned long long)ctl, (unsigned long long)since);
+    if (ret || (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED)))
+        return -1;
+    if (wb.watchdog_trial == WB_WATCHDOG_STATUS)
+        return 0;
+
+    uint64_t detail;
+    const char *failure = giulia_wdt_configure(wb_watchdog_call, &detail);
+    if (failure) {
+        wb_log("ace5-wifi-bringup: quiet watchdog arm failed %s=%#llx\n",
+            failure, (unsigned long long)detail);
+    } else {
+        wb_log("ace5-wifi-bringup: quiet watchdog armed; observing expiry\n");
+        for (unsigned second = 0; second < WB_WATCHDOG_WAIT_SECONDS; ++second) {
+            delay(1000000);
+            if (wb_stage4_reset_lease()) break;
+        }
+        wb_log("ace5-wifi-bringup: quiet watchdog expiry not observed\n");
+    }
+    if (wb_watchdog_cancel()) {
+        wb.guard_failed = 1;
+        wb_log("ace5-wifi-bringup: quiet watchdog disarm unconfirmed\n");
+    }
+    return -1; /* A successful expiry resets the device, so it cannot return here. */
+}
+
 static void wb_thread(void *arg, __unused wait_result_t wait)
 {
     uint64_t pa = (uint64_t)(uintptr_t)arg;
     struct giulia_wifi_bringup_config cfg = {0};
     struct giulia_wlan_rail_baseline unk_rails[7] = {0};
     int rc = -1, stop_rc = -1, quiet = 0;
+    int link_access = wb.sm_diag < WB_SM_TABLES && !wb.watchdog_trial;
 
     wb_map(&wb.shared, pa, sizeof(struct loader_firmware_quiet), VM_WIMG_WCOMB);
     if (!wb.shared.address) goto done;
@@ -584,7 +660,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     wb_map(&wb.ipcc, 0x00406000u, 0x1000u, VM_WIMG_IO);
     wb_map(&wb.parf, 0x01c00000u, 0x3000u, VM_WIMG_IO);
     wb_map(&wb.phy, 0x01c06000u, 0x2000u, VM_WIMG_IO);
-    if (wb.sm_diag < WB_SM_TABLES) {
+    if (link_access) {
         wb_map(&wb.dbi, GIULIA_PCIE_LINK_DBI_PA, 0x1000u, VM_WIMG_IO);
         wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
         wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
@@ -598,7 +674,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     if (!wb.gcc.address || !wb.tcsr.address || !wb.tlmm.address || !wb.rsc.address ||
         !wb.db.address || !wb.gic.address || !wb.msg.address || !wb.ipcc.address ||
         !wb.parf.address || !wb.phy.address || !wb.crm.address ||
-        (wb.sm_diag < WB_SM_TABLES && (!wb.dbi.address || !wb.atu.address ||
+        (link_access && (!wb.dbi.address || !wb.atu.address ||
         !wb.cfg.address || !wb.bar0.address)) ||
         !wb.qos_pcie.address || !wb.qos_gem.address ||
         (wb.sm_diag && !wb.pcie_sm.address)) {
@@ -669,6 +745,11 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     if (wb.bringup.pipe_checked)
         wb_log("ace5-wifi-bringup: post-phy pipe_cbcr=%#x\n", wb.bringup.pipe_cbcr);
     if (rc == GIULIA_BRINGUP_OK) {
+        if (wb.watchdog_trial) {
+            int wdt_rc = wb_watchdog_quiet_test();
+            if (wb.guard_failed) goto release;
+            if (wdt_rc) goto stop;
+        }
         if (wb.sm_diag >= WB_SM_TABLES) {
             int sm_rc = wb.sm_diag == WB_SM_STAGE ? wb_cesta_stage_and_discard() : wb_cesta_read_cold();
             if (wb.guard_failed) goto release;
@@ -729,14 +810,20 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("ace5_wifi_bringup_stage", &wb.max_stage, sizeof(wb.max_stage));
     PE_parse_boot_argn("ace5_wifi_crm_all_states", &wb.crm_all_states, sizeof(wb.crm_all_states));
     PE_parse_boot_argn("ace5_wifi_sm_diag", &wb.sm_diag, sizeof(wb.sm_diag));
+    PE_parse_boot_argn("ace5_wifi_watchdog", &wb.watchdog_trial, sizeof(wb.watchdog_trial));
     if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 ||
         seconds < 10 || seconds > 120 || wb.max_stage > GIULIA_BRINGUP_MHI_SNAP ||
-        wb.crm_all_states > 1 || wb.sm_diag > WB_SM_STAGE) {
+        wb.crm_all_states > 1 || wb.sm_diag > WB_SM_STAGE || wb.watchdog_trial > WB_WATCHDOG_EXPIRY) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
         return;
     }
     if (wb.sm_diag && (wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.crm_all_states)) {
         wb_log("ace5-wifi-bringup: CESTA diagnostic requires stage 4 and default CRM profile\n");
+        return;
+    }
+    if (wb.watchdog_trial && (wb.sm_diag || wb.max_stage != GIULIA_BRINGUP_PHY_START ||
+        wb.crm_all_states || (wb.watchdog_trial == WB_WATCHDOG_EXPIRY && seconds < 75))) {
+        wb_log("ace5-wifi-bringup: watchdog trial requires isolated stage 4 and enough return time\n");
         return;
     }
     if (wb.sm_diag == WB_SM_STAGE && wb_load_cesta_profile()) {

@@ -6,15 +6,13 @@
 #include <stdio.h>
 #include <string.h>
 #include "watchdog-budget.inc"
+#include "giulia_gunyah_watchdog.h"
 
-#define VIRT_WDT_CONTROL 5
-#define VIRT_WDT_STATUS 6
-#define VIRT_WDT_PET 7
-#define VIRT_WDT_SET_TIME 8
+#define VIRT_WDT_STATUS GIULIA_WDT_STATUS
 #define print(...) ((void)0)
 
 static const uint64_t trial_order[] = {
-    VIRT_WDT_SET_TIME, VIRT_WDT_SET_TIME, VIRT_WDT_CONTROL, VIRT_WDT_PET, VIRT_WDT_STATUS
+    GIULIA_WDT_SET_TIME, GIULIA_WDT_SET_TIME, GIULIA_WDT_CONTROL, GIULIA_WDT_PET, GIULIA_WDT_STATUS
 };
 static unsigned trial_calls;
 static unsigned fail_call;
@@ -25,21 +23,21 @@ smc_call(uint64_t id, uint64_t a1, uint64_t a2, uint64_t *r1, uint64_t *r2)
 {
     assert(trial_calls < sizeof(trial_order) / sizeof(trial_order[0]));
     assert(id == trial_order[trial_calls++]);
-    if (id == VIRT_WDT_SET_TIME) {
+    if (id == GIULIA_WDT_SET_TIME) {
         assert(!r1 && !r2);
         if (trial_calls == 1) {
             assert(a1 == 11000 && a2 == 0xffff);
         } else {
             assert(a1 == 0xffff && a2 == 14000);
         }
-    } else if (id == VIRT_WDT_CONTROL) {
+    } else if (id == GIULIA_WDT_CONTROL) {
         assert(a1 == 3 && a2 == 0 && !r1 && !r2);
-    } else if (id == VIRT_WDT_PET) {
+    } else if (id == GIULIA_WDT_PET) {
         assert(!a1 && !a2 && !r1 && !r2);
     } else {
-        assert(!a1 && !a2 && r1 && r2);
+        assert(!a1 && !a2 && r1);
         *r1 = status_bits;
-        *r2 = 1;
+        if (r2) *r2 = 1;
     }
     return trial_calls == fail_call;
 }
@@ -69,8 +67,8 @@ int main(void)
     puts("PASS: actual observer watchdog budget handles unlimited, finite and overflow boundaries");
     assert(!watchdog_trial_reply && GIULIA_WDT_FALLBACK_SECONDS * 1000 > GIULIA_WDT_BITE_MS);
     uint64_t detail;
-    const char *errors[] = {"SET_BARK ret", "SET_BITE ret", "ENABLE ret", "PET ret", "STATUS ret"};
-    status_bits = WDT_CTL_ENABLED;
+    const char *errors[] = {"SET_BARK", "SET_BITE", "ENABLE", "PET", "STATUS"};
+    status_bits = GIULIA_WDT_ENABLED;
     for (fail_call = 1; fail_call <= 5; fail_call++) {
         trial_calls = 0;
         assert(strcmp(giulia_wdt_arm_trial(&detail), errors[fail_call - 1]) == 0);
@@ -80,10 +78,10 @@ int main(void)
     assert(giulia_wdt_arm_trial(&detail) == NULL && trial_calls == 5);
     trial_calls = 0;
     status_bits = 0;
-    assert(strcmp(giulia_wdt_arm_trial(&detail), "STATUS ctl") == 0 && detail == 0);
+    assert(strcmp(giulia_wdt_arm_trial(&detail), "STATUS_CTL") == 0 && detail == 0);
     trial_calls = 0;
-    status_bits = WDT_CTL_ENABLED | WDT_CTL_EXPIRED;
-    assert(strcmp(giulia_wdt_arm_trial(&detail), "STATUS ctl") == 0 && detail == status_bits);
+    status_bits = GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED;
+    assert(strcmp(giulia_wdt_arm_trial(&detail), "STATUS_CTL") == 0 && detail == status_bits);
     puts("PASS: Giulia watchdog trial checks each SMC and verifies enabled, unexpired status");
     return 0;
 }
