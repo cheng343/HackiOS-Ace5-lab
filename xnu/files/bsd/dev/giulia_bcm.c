@@ -75,13 +75,15 @@ int giulia_bcm_pcie0_plan(const uint8_t *db,uint32_t bytes,uint32_t version,
     static const char *const names[5]={"MC0","SH0","SH1","SN4","ACV"};
     static const uint32_t node[5]={0,1,2,3,5},width[5]={4,16,16,16,4},channels[5]={4,4,1,1,4};
     struct giulia_bcm_pcie0_plan plan={0}; int rc;
-    if (!out || policy>GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES) return GIULIA_BCM_ARGUMENT;
+    if (!out || policy>GIULIA_BCM_PCIE0_FIXED_500_800_STOCK_STARTUP) return GIULIA_BCM_ARGUMENT;
     *out=plan;
     unsigned states=policy==GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES ? GIULIA_CRM_STATES : 2u;
     uint64_t avg=policy==GIULIA_BCM_PCIE0_GEN1_X1_250000_0 ? 250000 : 500;
     uint64_t peak=policy==GIULIA_BCM_PCIE0_GEN1_X1_250000_0 ? 0 : 800;
+    unsigned perf = policy == GIULIA_BCM_PCIE0_FIXED_500_800_STOCK_STARTUP ?
+        GIULIA_PCIE_STOCK_STARTUP_PERF : GIULIA_PCIE_BOOT_PERF;
     for (unsigned st=0;st<states;st++)
-        plan.patch[st]=(struct giulia_crm_patch){0,st,0,7,GIULIA_PCIE_BOOT_PERF};
+        plan.patch[st]=(struct giulia_crm_patch){0,st,0,7,perf};
     for (unsigned i=0;i<5;i++) {
         if ((rc=giulia_bcm_resolve(db,bytes,version,names[i],&plan.resource[i])) ||
             (rc=giulia_bcm_encode(&plan.resource[i],avg,peak,width[i],channels[i],i==2 || i==4,&plan.vote[i])))

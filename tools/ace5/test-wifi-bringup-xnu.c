@@ -250,7 +250,12 @@ int giulia_bcm_pcie0_plan(__unused const uint8_t *db,__unused uint32_t bytes,
 }
 int giulia_crm_start_empty_keep(__unused struct giulia_crm *p,__unused const struct giulia_crm_io *io,
     __unused const struct giulia_crm_patch *patch,unsigned count)
-{ assert(allow_prepare); crm_patches_seen=count; return 0; }
+{
+    assert(allow_prepare);
+    if (bcm_policy_seen == GIULIA_BCM_PCIE0_FIXED_500_800_STOCK_STARTUP)
+        assert(wb.early_reset_armed && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED);
+    crm_patches_seen=count; return 0;
+}
 int giulia_arc_resolve(__unused const uint8_t *db,__unused uint32_t bytes,__unused uint32_t version,
     const char *name,struct giulia_arc_resource *r)
 {
@@ -382,6 +387,40 @@ static void noc_prepare(void)
     assert(cx_level_seen==256u && !crm_patches_seen && !rpmh_cx_sel_seen);
 }
 
+static void stock_startup_perf(void)
+{
+    setup();
+    wb_map(&wb.shared, shared_pa, sizeof(struct loader_firmware_quiet), VM_WIMG_WCOMB);
+    wb.quiet = (void *)wb.shared.address;
+    wb_map(&wb.gic, 0x17100000u, 0x10000u, VM_WIMG_IO);
+    wb_map(&wb.tlmm, GIULIA_WIFI_GPIO_PA, GIULIA_WIFI_GPIO_SIZE, VM_WIMG_IO);
+    uint32_t *perst = (void *)(wb.tlmm.address + 94u * 0x1000u);
+    wb.quiet->request = 1;
+    wb_test_barrier();
+    assert(wb_irq_acquire());
+    wb.stock_perf = wb.cold_reset = allow_prepare = 1;
+    wb.sm_diag = WB_SM_ENDPOINT;
+    wb.bringup.stage = GIULIA_BRINGUP_NOC_STAGE;
+    wb.bringup.supply.state = GIULIA_SUPPLY_HOST_PREPARED;
+    wb.bringup.supply.power.state = GIULIA_POWER_HOST_PREPARED;
+    wb.bringup.supply.gpio.state = GIULIA_WGPIO_ON;
+    perst[0] = 1u << 9;
+    perst[1] = 1;
+    wb.quiet->reset_capability = 1;
+    mock_reset_response = LOADER_QUIET_RESET_ARMED;
+    assert(wb_prepare_noc(0, &wb.bringup.supply) != 0 && !crm_patches_seen && !wb.quiet->reset_request);
+    perst[1] = 0;
+    wb.quiet->reset_capability = 0;
+    assert(wb_prepare_noc(0, &wb.bringup.supply) != 0 && !crm_patches_seen);
+    wb.quiet->reset_capability = 1;
+    assert(wb_prepare_noc(0, &wb.bringup.supply) == 0 && wb.early_reset_armed);
+    assert(bcm_policy_seen == GIULIA_BCM_PCIE0_FIXED_500_800_STOCK_STARTUP);
+    assert(crm_patches_seen == GIULIA_BCM_PCIE0_PATCHES);
+    assert(wb_arm_early_reset() == 0);
+    wb.quiet->reset_ack = LOADER_QUIET_RESET_FAILED;
+    assert(wb_arm_early_reset() != 0);
+}
+
 static void noc_after_phy(void)
 {
     setup();
@@ -485,6 +524,13 @@ static void noc_after_phy(void)
     wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
     wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
     wb.sm_diag = WB_SM_ENDPOINT;
+    wb.stock_perf = 1;
+    perf[0x4 / 4] = GIULIA_PCIE_STOCK_STARTUP_PERF;
+    assert(wb_cesta_pre_dbi() == GIULIA_LINK_PREREQUISITE && !endpoint_identifies);
+    perf[0xc / 4] = GIULIA_PCIE_STOCK_STARTUP_PERF;
+    perf[0x4 / 4] = GIULIA_PCIE_BOOT_PERF;
+    assert(wb_cesta_pre_dbi() == GIULIA_LINK_PREREQUISITE && !endpoint_identifies);
+    perf[0x4 / 4] = GIULIA_PCIE_STOCK_STARTUP_PERF;
     assert(wb_cesta_pre_dbi() == 0 && endpoint_identifies == 1);
     assert(strstr(messages, "endpoint pins held en=0x3 sw=0 wlan_sw=0 perst=0 clkreq="));
     assert(strstr(messages, "PCIe training samples=2 first=0 last=17 seen_lo=0x20001 seen_hi=0"));
@@ -492,20 +538,23 @@ static void noc_after_phy(void)
     assert(strstr(messages, "endpoint pins after-training en=0x3 sw=0 wlan_sw=0 perst=0x2 clkreq="));
     assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
     assert(wb.bringup.link.endpoint_id == GIULIA_PCIE_LINK_EP_ID);
+    wb.stock_perf = 0;
+    perf[0xc / 4] = perf[0x4 / 4] = GIULIA_PCIE_BOOT_PERF;
+    assert(wb_cesta_pre_dbi() == 0 && endpoint_identifies == 2);
     wb.bringup.link.state = GIULIA_LINK_PARF_READY;
     wb.bringup.pipe_checked = 0;
     wb.bringup.supply.power.state = GIULIA_POWER_READY;
     wb.pcs_first = 1;
     wb.quiet->reset_request = wb.quiet->reset_ack = 0;
     wb.quiet->reset_capability = 0;
-    assert(wb_arm_pcs_first() != 0 && !wb.pcs_first_armed && !wb.quiet->reset_request);
+    assert(wb_arm_pcs_first() != 0 && !wb.early_reset_armed && !wb.quiet->reset_request);
     wb.quiet->reset_capability = 1;
-    assert(wb_arm_pcs_first() == 0 && wb.pcs_first_armed && wb.quiet->reset_request == 1);
+    assert(wb_arm_pcs_first() == 0 && wb.early_reset_armed && wb.quiet->reset_request == 1);
     assert(strstr(messages, "PCS-before-PIPE reset armed before PHY access"));
     assert(wb_arm_cold_reset(0) != 0);
     wb.bringup.pipe_checked = 1;
     assert(wb_arm_cold_reset(0) == 0);
-    wb.pcs_first_armed = wb.pcs_first = 0;
+    wb.early_reset_armed = wb.pcs_first = 0;
     perst[1] = 2;
     assert(wb_cesta_read_cold() == GIULIA_CESTA_LEASE && wb.guard_failed);
     wb.guard_failed = 0;
@@ -524,7 +573,7 @@ static void noc_after_phy(void)
 }
 int main(void)
 {
-    admission();cleanup();single_access();noc_cleanup();noc_prepare();noc_after_phy();setup();
+    admission();cleanup();single_access();noc_cleanup();noc_prepare();stock_startup_perf();noc_after_phy();setup();
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");
     puts("Wi-Fi XNU adapter: quiet watchdog read-only status, bounded expiry and disarm passed");

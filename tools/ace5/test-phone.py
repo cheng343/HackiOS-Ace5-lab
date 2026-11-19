@@ -21,7 +21,7 @@ FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect
              'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments',
              'ace5_crm_test_arguments', 'ace5_pdc_test_arguments', 'ace5_cx_vote_arguments',
              'ace5_rpmh_read_arguments', 'check_rpmh_read_log', 'check_rpmh_read_profile',
-             'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log'}
+             'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf'}
 
 
 class Clock:
@@ -86,6 +86,15 @@ class PhoneTests(unittest.TestCase):
         endpoint = dbi + ('PCIe endpoint identify rc=0 id=0x110717cb lnk=0x2011\n'
                           'PCIe endpoint reset reassert rc=0\n')
         check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True)
+        stock = endpoint.replace('current=0x2 aggregate=0x2', 'current=0x4 aggregate=0x4')
+        with self.assertRaisesRegex(RuntimeError, 'startup PERF 4 unconfirmed'):
+            check(True, 4, stock, 'yes', self.log, sm_diag=7, cold_reset=True, stock_perf=True)
+        stock = 'ace5-wifi-bringup: stock D0 reset armed before PERF vote\n' + stock
+        check(True, 4, stock, 'yes', self.log, sm_diag=7, cold_reset=True, stock_perf=True)
+        for field in ['current', 'aggregate']:
+            with self.assertRaisesRegex(RuntimeError, 'startup PERF 4 unconfirmed'):
+                check(True, 4, stock.replace(field + '=0x4', field + '=0x2'), 'yes', self.log,
+                      sm_diag=7, cold_reset=True, stock_perf=True)
         with self.assertRaisesRegex(RuntimeError, 'PCS-before-PIPE trial unconfirmed'):
             check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True, pcs_first=True)
         check(True, 4, endpoint + 'ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access\n',
@@ -130,6 +139,10 @@ class PhoneTests(unittest.TestCase):
         fn = self.namespace['ace5_wifi_bringup_arguments']
         table = self.directory / 'pdc.bin'
         table.write_bytes(bytes(508))
+        with self.assertRaisesRegex(RuntimeError, 'require --wifi-bringup-test'):
+            fn(False, None, 1, 'kernel', 60, False, False, stock_perf_dtb=table)
+        with self.assertRaisesRegex(RuntimeError, 'requires --wifi-cesta-endpoint'):
+            fn(True, table, 1, 'kernel', 60, False, False, 4, cold_reset=True, stock_perf_dtb=table)
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4),
                          ' ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4')
         self.assertEqual(fn(True, table, 1, 'kernel', 30, False, False, 4, watchdog=1),
@@ -159,6 +172,18 @@ class PhoneTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): fn(False, None, 1, 'kernel', 30, False, False, 4)
         table.write_bytes(bytes(507))
         with self.assertRaises(RuntimeError): fn(True, table, 1, 'kernel', 30, False, False)
+
+    def test_stock_perf_requires_rc0_three_row_profile(self):
+        import struct
+        check = self.namespace['check_stock_startup_perf']
+        path = '/soc/qcom,pcie@1c00000'
+        profile = struct.pack('>9I', 64,64,19200000, 64,64,19200000, 256,256,100000000)
+        rc = {'compatible': b'qcom,pci-msm\0', 'reg-names': b'dm_core\0pcie_sm\0', 'qcom,bw-scale': profile}
+        check({path: rc})
+        for bad in ({'/soc/qcom,pcie@1c08000': rc}, {path: dict(rc, compatible=b'qcom,pcie\0')},
+                    {path: {**rc, 'reg-names': b'dm_core\0'}}, {path: {**rc, 'qcom,bw-scale': profile[:-12]}}):
+            with self.assertRaisesRegex(RuntimeError, 'three-row'):
+                check(bad)
 
     def test_rpmh_read_profile_uses_current_dt(self):
         fn=self.namespace['check_rpmh_read_profile']

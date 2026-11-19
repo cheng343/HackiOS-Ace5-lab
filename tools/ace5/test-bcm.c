@@ -75,6 +75,14 @@ static void plans(void)
         }
     }
     for (unsigned i=0;i<2;i++) assert(p.patch[i].kind==0 && p.patch[i].state==i && p.patch[i].value==2);
+    struct giulia_bcm_pcie0_plan startup;
+    assert(giulia_bcm_pcie0_plan(db,sizeof(db),1,GIULIA_BCM_PCIE0_FIXED_500_800_STOCK_STARTUP,&startup)==0);
+    assert(startup.patch_count == p.patch_count);
+    for (unsigned i = 0; i < startup.patch_count; i++) {
+        const struct giulia_crm_patch *a = &p.patch[i], *b = &startup.patch[i];
+        assert(a->kind == b->kind && a->state == b->state && a->resource == b->resource && a->mask == b->mask);
+        assert(b->value == (i < 2 ? 4u : a->value));
+    }
     assert(giulia_bcm_pcie0_plan(db,sizeof(db),1,GIULIA_BCM_PCIE0_GEN1_X1_250000_0,&p)==0);
     assert(p.patch_count==GIULIA_BCM_PCIE0_PATCHES);
     assert(p.vote[0].saturated && p.vote[1].saturated && p.vote[3].saturated);

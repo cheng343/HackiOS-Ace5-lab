@@ -25,7 +25,9 @@ enum giulia_bcm_pcie0_policy {
     GIULIA_BCM_PCIE0_GEN1_X1_250000_0,
     /* Experimental comparison: populate all five CRM rows with the same
      * PERF/BW entries. Raw PWR_IDX_STATUS does not identify the applied row. */
-    GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES
+    GIULIA_BCM_PCIE0_FIXED_500_800_ALL_STATES,
+    /* Same two HW states and ICC vote as FIXED_500_800, with vendor D0 PERF. */
+    GIULIA_BCM_PCIE0_FIXED_500_800_STOCK_STARTUP
 };
 #define GIULIA_BCM_PCIE0_PATCHES 12u
 #define GIULIA_BCM_PCIE0_ALL_STATES_PATCHES 30u
