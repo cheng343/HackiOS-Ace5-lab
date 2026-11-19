@@ -76,6 +76,7 @@
 #define LNKSTA 0x12u
 #define SLTCAP 0x14u
 #define LNKCTL2 0x30u
+#define LINK_TRAINING BIT(11)
 #define DLLLA BIT(13)
 
 static uint32_t r32(struct giulia_pcie_link *s, unsigned r, uint32_t o)
@@ -123,6 +124,11 @@ static int link_up(struct giulia_pcie_link *s)
     return v != 0xffffu && (v & DLLLA) != 0;
 }
 
+/* A live link can still be retraining. Only training/config admission
+ * requires LT clear; ownership and shutdown must still see DLLLA as busy. */
+static int link_ready(struct giulia_pcie_link *s)
+{ return link_up(s) && !(s->link_status & LINK_TRAINING); }
+
 static int profile_matches(struct giulia_pcie_link *s)
 {
     return (s->link_status & 0x0fu) == GIULIA_PCIE_BOOT_SPEED &&
@@ -140,7 +146,7 @@ static int xmlh_link_up(struct giulia_pcie_link *s)
  * cannot prevent an asynchronous link-down SError between check and access.
  */
 static int cfg_ok(struct giulia_pcie_link *s)
-{ return s->config_atu_enabled && link_up(s) && profile_matches(s) && xmlh_link_up(s); }
+{ return s->config_atu_enabled && link_ready(s) && profile_matches(s) && xmlh_link_up(s); }
 static int cr32(struct giulia_pcie_link *s, uint32_t o, uint32_t *v)
 {
     if (!cfg_ok(s)) return 0;
@@ -620,15 +626,24 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     if (!change32(s, GIULIA_LINK_PARF, PARF_LTSSM, 0, BIT(8), BIT(8)))
         return fail(s, GIULIA_LINK_READBACK);
     for (s->polls = 0; s->polls <= 1000u; s->polls++) {
-        if (link_up(s) && xmlh_link_up(s)) break;
+        int ready = link_ready(s);
+        if (s->link_status == UINT16_MAX) return fail(s, GIULIA_LINK_READBACK);
+        if (s->vendor_training) {
+            int xmlh = xmlh_link_up(s);
+            if (s->elbi_status == UINT32_MAX) return fail(s, GIULIA_LINK_READBACK);
+            unsigned state = (s->elbi_status >> 12) & 0x3fu;
+            if (!s->train_samples) s->train_ltssm_first = state;
+            s->train_samples++;
+            s->train_ltssm_last = state;
+            s->train_ltssm_seen[state / 32u] |= BIT(state % 32u);
+            ready = ready && xmlh;
+        }
+        if (ready) break;
         if (s->polls < 1000u) delay(s, 1000);
     }
     s->debug0 = r32(s, GIULIA_LINK_DBI, DBI_DEBUG0);
     s->debug1 = r32(s, GIULIA_LINK_DBI, DBI_DEBUG1);
-    if (s->polls > 1000u) {
-        (void)xmlh_link_up(s);
-        return fail(s, GIULIA_LINK_TIMEOUT);
-    }
+    if (s->polls > 1000u) return fail(s, GIULIA_LINK_TIMEOUT);
     if (!profile_matches(s)) return fail(s, GIULIA_LINK_PROFILE);
     s->stage = GIULIA_LINK_STAGE_CONFIG_ATU;
     s->atu_touched = 1;

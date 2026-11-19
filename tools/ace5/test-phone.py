@@ -94,6 +94,12 @@ class PhoneTests(unittest.TestCase):
             check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True, native_width=True)
         check(True, 4, endpoint.replace('lnk=0x2011', 'lnk=0x2021'), 'yes', self.log,
               sm_diag=7, cold_reset=True, native_width=True)
+        for native, stable, training in ((False, '0x3011', '0x3811'), (True, '0x3021', '0x3821')):
+            check(True, 4, endpoint.replace('0x2011', stable), 'yes', self.log,
+                  sm_diag=7, cold_reset=True, native_width=native)
+            with self.subTest(native=native), self.assertRaisesRegex(RuntimeError, 'WCN7850 identity or reset'):
+                check(True, 4, endpoint.replace('0x2011', training), 'yes', self.log,
+                      sm_diag=7, cold_reset=True, native_width=native)
         with self.assertRaisesRegex(RuntimeError, 'WCN7850 identity or reset'):
             check(True, 4, endpoint.replace('lnk=0x2011', 'lnk=0x2022'),
                   'yes', self.log, sm_diag=7, cold_reset=True)

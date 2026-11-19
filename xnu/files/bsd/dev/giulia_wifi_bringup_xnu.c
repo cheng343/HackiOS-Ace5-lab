@@ -605,6 +605,22 @@ static int wb_cesta_observe(void)
     return GIULIA_CESTA_OK;
 }
 
+struct wb_gpio_sample {
+    int rc;
+    struct giulia_wifi_gpio_signals pins;
+};
+
+static void wb_log_gpio_sample(const char *phase, const struct wb_gpio_sample *sample)
+{
+    if (sample->rc) {
+        wb_log("ace5-wifi-bringup: endpoint pins %s rc=%d\n", phase, sample->rc);
+        return;
+    }
+    const struct giulia_wifi_gpio_signals *p = &sample->pins;
+    wb_log("ace5-wifi-bringup: endpoint pins %s en=%#x sw=%#x wlan_sw=%#x perst=%#x clkreq=%#x wake=%#x\n",
+        phase, p->wlan_en, p->sw_ctrl, p->wlan_sw_ctrl, p->perst, p->clkreq, p->wake);
+}
+
 static int wb_pcie_identify_endpoint(void)
 {
     struct giulia_pcie_link *link = &wb.bringup.link;
@@ -619,12 +635,18 @@ static int wb_pcie_identify_endpoint(void)
     if (wb_stage4_reset_lease() || wb.quiet->reset_ack != LOADER_QUIET_RESET_ARMED)
         return GIULIA_LINK_PREREQUISITE;
 
+    struct wb_gpio_sample before, released, trained;
+    before.rc = giulia_wifi_gpio_snapshot(gpio, &before.pins);
+    int attempted = 0;
     wb.endpoint_reset_unconfirmed = 1;
     int release = giulia_wifi_gpio_perst_release(gpio,
         GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
     wb_log("ace5-wifi-bringup: PCIe endpoint reset release rc=%d\n", release);
     if (!release && wb_guard() && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED) {
+        released.rc = giulia_wifi_gpio_snapshot(gpio, &released.pins);
+        attempted = 1;
         rc = giulia_pcie_link_identify(link, GIULIA_LINK_TRAIN_REQUIRED);
+        trained.rc = wb_guard() ? giulia_wifi_gpio_snapshot(gpio, &trained.pins) : GIULIA_WGPIO_PREREQUISITE;
         wb_log("ace5-wifi-bringup: PCIe endpoint identify rc=%d id=%#x lnk=%#x stage=%u fail=%u polls=%u debug=%#x/%#x elbi=%#x ltssm=%#x\n",
             rc, link->endpoint_id, link->link_status, link->stage, link->failure_stage,
             link->polls, link->debug0, link->debug1, link->elbi_status,
@@ -639,6 +661,14 @@ static int wb_pcie_identify_endpoint(void)
     if (!held && (wb_mmio(&wb.tlmm, 94u * 0x1000u + 4u) & 3u))
         held = GIULIA_WGPIO_READBACK;
     wb_log("ace5-wifi-bringup: PCIe endpoint reset reassert rc=%d\n", held);
+    wb_log_gpio_sample("held", &before);
+    if (attempted) {
+        wb_log("ace5-wifi-bringup: PCIe training samples=%u first=%u last=%u seen_lo=%#x seen_hi=%#x\n",
+            link->train_samples, link->train_ltssm_first, link->train_ltssm_last,
+            link->train_ltssm_seen[0], link->train_ltssm_seen[1]);
+        wb_log_gpio_sample("released", &released);
+        wb_log_gpio_sample("after-training", &trained);
+    }
     if (!held) wb.endpoint_reset_unconfirmed = 0;
     return held ? held : rc;
 }

@@ -397,8 +397,10 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
             endpoint = re.findall(r'PCIe endpoint identify rc=(-?\d+) id=([0-9a-fx]+) lnk=([0-9a-fx]+)', text)
             held = re.findall(r'PCIe endpoint reset reassert rc=(-?\d+)', text)
             expected_link = 0x2021 if native_width else 0x2011
+            # Include Link Training (bit 11) alongside DLL Active, speed and width.
+            # Slot Clock Configuration (bit 12) is independent of link readiness.
             if (not endpoint or any(rc != '0' or int(value, 16) != 0x110717cb or
-                                    (int(link, 16) & 0x23ff) != expected_link for rc, value, link in endpoint) or
+                                    (int(link, 16) & 0x2bff) != expected_link for rc, value, link in endpoint) or
                     not held or any(rc != '0' for rc in held)):
                 raise RuntimeError(f'WCN7850 identity or reset unconfirmed; preserve {log} and cold reboot')
         return

@@ -170,6 +170,15 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     s->state = GIULIA_LINK_PREPARED;
     return 0;
 }
+int giulia_wifi_gpio_snapshot(const struct giulia_wifi_gpio *g, struct giulia_wifi_gpio_signals *pins)
+{
+    assert(wb_guard() && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED);
+    assert(g->state == GIULIA_WGPIO_ON || g->state == GIULIA_WGPIO_RELEASED);
+    *pins = (struct giulia_wifi_gpio_signals){
+        .wlan_en = 3, .perst = *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u)
+    };
+    return 0;
+}
 int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *g, uint32_t flags)
 {
     assert(flags == (GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
@@ -193,6 +202,10 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     endpoint_identifies++;
     s->endpoint_id = GIULIA_PCIE_LINK_EP_ID;
     s->link_status = 0x2011;
+    s->train_samples = 2;
+    s->train_ltssm_first = 0;
+    s->train_ltssm_last = 17;
+    s->train_ltssm_seen[0] = (1u << 17) | 1u;
     return 0;
 }
 
@@ -473,6 +486,10 @@ static void noc_after_phy(void)
     wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
     wb.sm_diag = WB_SM_ENDPOINT;
     assert(wb_cesta_pre_dbi() == 0 && endpoint_identifies == 1);
+    assert(strstr(messages, "endpoint pins held en=0x3 sw=0 wlan_sw=0 perst=0 clkreq="));
+    assert(strstr(messages, "PCIe training samples=2 first=0 last=17 seen_lo=0x20001 seen_hi=0"));
+    assert(strstr(messages, "endpoint pins released en=0x3 sw=0 wlan_sw=0 perst=0x2 clkreq="));
+    assert(strstr(messages, "endpoint pins after-training en=0x3 sw=0 wlan_sw=0 perst=0x2 clkreq="));
     assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
     assert(wb.bringup.link.endpoint_id == GIULIA_PCIE_LINK_EP_ID);
     wb.bringup.link.state = GIULIA_LINK_PARF_READY;

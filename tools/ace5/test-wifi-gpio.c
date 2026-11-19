@@ -139,6 +139,58 @@ static void off_hold(void)
     assert(!memcmp(m.regs,m.original,sizeof(m.regs)));
     puts("Ace5 Wi-Fi GPIO: WLAN off retains reset snapshots; live controls checked without writes");
 }
+
+static void snapshot(void)
+{
+    struct mock m;
+    struct giulia_wifi_gpio g;
+    struct giulia_wifi_gpio_signals signals = {0};
+    const unsigned signal_pins[] = {16, 18, 19, 94, 95, 96};
+    setup(&m, &g);
+    assert(giulia_wifi_gpio_snapshot(NULL, &signals) == GIULIA_WGPIO_ARGUMENT);
+    assert(giulia_wifi_gpio_snapshot(&g, NULL) == GIULIA_WGPIO_ARGUMENT);
+    assert(giulia_wifi_gpio_snapshot(&g, &signals) == GIULIA_WGPIO_STATE);
+    assert(!m.reads && !m.writes);
+    begin(&m, &g);
+    assert(!giulia_wifi_gpio_snapshot(&g, &signals));
+    assert(!giulia_wifi_gpio_wlan_on(&g, GIULIA_WGPIO_ON_REQUIRED));
+    assert(!giulia_wifi_gpio_snapshot(&g, &signals));
+    assert(!giulia_wifi_gpio_perst_release(&g, GIULIA_WGPIO_RELEASE_REQUIRED));
+
+    /* Give each register a distinct value, including an output latch high
+     * with input low and a low CLKREQ# input while in alternate mode. */
+    m.regs[16][1] = 0x102;
+    m.regs[18][1] = 0x201;
+    m.regs[19][1] = 0x300;
+    m.regs[94][1] = 0x403;
+    m.regs[95][1] = 0x500;
+    m.regs[96][1] = 0x601;
+    unsigned reads = m.reads, writes = m.writes, elapsed = m.delay_us;
+    assert(!giulia_wifi_gpio_snapshot(&g, &signals));
+    assert(signals.wlan_en == 0x102 && signals.sw_ctrl == 0x201 &&
+        signals.wlan_sw_ctrl == 0x300 && signals.perst == 0x403 &&
+        signals.clkreq == 0x500 && signals.wake == 0x601);
+    assert(m.reads == reads + 6 && m.writes == writes && m.delay_us == elapsed);
+
+    const struct giulia_wifi_gpio_signals previous = signals;
+    for (unsigned i = 0; i < sizeof(signal_pins) / sizeof(signal_pins[0]); ++i)
+        m.regs[signal_pins[i]][1] = 0;
+    for (unsigned i = 0; i < sizeof(signal_pins) / sizeof(signal_pins[0]); ++i) {
+        m.bad_read = PIN(signal_pins[i], 4);
+        reads = m.reads;
+        assert(giulia_wifi_gpio_snapshot(&g, &signals) == GIULIA_WGPIO_READBACK);
+        assert(!memcmp(&signals, &previous, sizeof(signals)));
+        assert(m.reads == reads + i + 1 && m.writes == writes && m.delay_us == elapsed);
+        assert(g.state == GIULIA_WGPIO_RELEASED && !g.error);
+    }
+    m.bad_read = UINT32_MAX;
+    assert(!giulia_wifi_gpio_stop(&g, GIULIA_WGPIO_STOP_REQUIRED));
+    reads = m.reads;
+    assert(giulia_wifi_gpio_snapshot(&g, &signals) == GIULIA_WGPIO_STATE);
+    assert(m.reads == reads);
+    puts("Ace5 Wi-Fi GPIO: sideband samples preserve input and latch bits; read failure keeps the prior snapshot");
+}
+
 int main(void)
 {
     struct mock m;
@@ -146,6 +198,7 @@ int main(void)
     struct giulia_wifi_gpio_io io = {&m, rd, wr, fence, delay};
     bluetooth_reset();
     off_hold();
+    snapshot();
     setup(&m, &g);
     assert(giulia_wifi_gpio_begin(&g, 0, &io) == GIULIA_WGPIO_PREREQUISITE);
     assert(!m.reads && !m.writes);

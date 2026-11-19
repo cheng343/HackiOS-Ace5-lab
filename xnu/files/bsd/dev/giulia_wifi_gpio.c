@@ -13,8 +13,29 @@
 #define OE (1u << 9)
 #define OUT 2u
 static const unsigned pins[5] = {16, 94, 95, 96, 17};
-static uint32_t read_pin(struct giulia_wifi_gpio *g, unsigned pin, unsigned reg)
+static uint32_t read_pin(const struct giulia_wifi_gpio *g, unsigned pin, unsigned reg)
 { return g->io.read32(g->io.cookie, pin * 0x1000u + reg); }
+
+int giulia_wifi_gpio_snapshot(const struct giulia_wifi_gpio *g,
+    struct giulia_wifi_gpio_signals *signals)
+{
+    struct giulia_wifi_gpio_signals sample;
+    const struct { unsigned pin; uint32_t *word; } fields[] = {
+        {16, &sample.wlan_en}, {18, &sample.sw_ctrl}, {19, &sample.wlan_sw_ctrl},
+        {94, &sample.perst}, {95, &sample.clkreq}, {96, &sample.wake}
+    };
+    if (!g || !signals) return GIULIA_WGPIO_ARGUMENT;
+    if (g->state != GIULIA_WGPIO_HELD && g->state != GIULIA_WGPIO_ON &&
+        g->state != GIULIA_WGPIO_RELEASED) return GIULIA_WGPIO_STATE;
+    if (!g->io.read32) return GIULIA_WGPIO_ARGUMENT;
+    for (unsigned i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        uint32_t value = read_pin(g, fields[i].pin, 4);
+        if (value == UINT32_MAX) return GIULIA_WGPIO_READBACK;
+        *fields[i].word = value;
+    }
+    *signals = sample;
+    return GIULIA_WGPIO_OK;
+}
 static int change(struct giulia_wifi_gpio *g, unsigned i, unsigned reg,
     uint32_t mask, uint32_t value)
 {

@@ -41,6 +41,15 @@ struct giulia_wifi_gpio {
     uint32_t sw_ctrl, wlan_sw_ctrl;
     int error;
 };
+/* Raw TLMM IN_OUT words. Bit 0 samples the input and bit 1 stores the output
+ * latch. The six pins are read in sequence and may change between reads. */
+struct giulia_wifi_gpio_signals {
+    uint32_t wlan_en, sw_ctrl, wlan_sw_ctrl, perst, clkreq, wake;
+};
+/* Sample during HELD, ON or RELEASED under the caller's existing pin lease.
+ * Publish a complete sample only if every read succeeds. */
+int giulia_wifi_gpio_snapshot(const struct giulia_wifi_gpio *,
+    struct giulia_wifi_gpio_signals *);
 /* Caller serializes operations and owns pins 16,94,95,96. Refuses a running
  * WLAN/BT, active pin interrupts or eGPIO ownership. Saves then configures
  * WLAN_EN low, PERST# low, CLKREQ# mux and WAKE# input; holds WLAN low 5 ms.

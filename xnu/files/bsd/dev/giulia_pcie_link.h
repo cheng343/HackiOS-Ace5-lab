@@ -99,6 +99,10 @@ struct giulia_pcie_link {
     uint32_t state, stage, failure_stage;
     int error;
     uint32_t root_id, endpoint_id, link_status, debug0, debug1, elbi_status;
+    /* Only paired, readable DBI/ELBI samples from the training loop.
+     * First/last are meaningful when train_samples is nonzero. */
+    uint32_t train_samples, train_ltssm_first, train_ltssm_last;
+    uint32_t train_ltssm_seen[2];
     uint32_t polls, bar0_mask, bar0_mask_hi;
     uint16_t root_pcie_cap, endpoint_pcie_cap, endpoint_msi_cap;
     uint16_t endpoint_msix_cap;

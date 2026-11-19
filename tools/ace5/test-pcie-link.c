@@ -15,6 +15,8 @@ struct fake {
     char memory_events[64];
     unsigned memory_event_count;
     unsigned link_reads, link_after, crs_reads, drop_link_after;
+    unsigned training_on_read, elbi_reads, elbi_sequence_count;
+    const uint32_t *elbi_sequence;
     uint16_t negotiated_profile;
     unsigned profile_drift_after_cfg;
     uint64_t delay_total;
@@ -107,6 +109,11 @@ static uint32_t read32(void *p, unsigned r, uint32_t o)
     if (r != GIULIA_LINK_PARF) f->core_reads++;
     if (!aperture_decodes(f, r, o, 4)) return 0xffffffffu;
     v = f->regs[r][o / 4];
+    if (r == GIULIA_LINK_DBI && o == 0xf28) {
+        if (f->elbi_reads < f->elbi_sequence_count)
+            v = f->elbi_sequence[f->elbi_reads];
+        f->elbi_reads++;
+    }
     if (r == GIULIA_LINK_CFG && o == 0 && f->crs_reads) {
         f->crs_reads--;
         v = 0xffff0001u;
@@ -129,6 +136,8 @@ static uint16_t read16(void *p, unsigned r, uint32_t o)
     if (r == GIULIA_LINK_DBI && o == 0x82) {
         if (f->regs[GIULIA_LINK_PARF][0x1b0 / 4] & BIT(8)) f->link_reads++;
         v = up(f) ? (uint16_t)(BIT(13) | f->negotiated_profile) : 0;
+        if (f->training_on_read && f->training_on_read == f->link_reads)
+            v |= BIT(11);
     }
     if (fault_read(f, r, o)) v = 0xffffu;
     after_cfg(f, r);
@@ -405,6 +414,7 @@ static void test_timeout_and_link_loss(void)
     assert(giulia_pcie_link_train(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_TIMEOUT);
     assert(s.state == GIULIA_LINK_FAULT && s.failure_stage == GIULIA_LINK_STAGE_TRAIN);
     assert(f.cfg_accesses == 0 && f.delay_total == 1000000);
+    assert(!f.elbi_reads && !s.train_samples);
     stop(&f, &s);
     init(&f, &s); prepare(&f, &s); f.drop_link_after = 1;
     assert(giulia_pcie_link_train(&s, GIULIA_LINK_TRAIN_REQUIRED) != 0);
@@ -511,8 +521,9 @@ static void test_all_ones_reads(void)
     /* DLLLA in an inaccessible all-ones word must never count as link up. */
     init(&f, &s); prepare(&f, &s);
     f.fault_on = 1; f.fault_region = GIULIA_LINK_DBI; f.fault_offset = 0x82;
-    assert(giulia_pcie_link_train(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_TIMEOUT);
+    assert(giulia_pcie_link_train(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_READBACK);
     assert(s.state == GIULIA_LINK_FAULT && f.cfg_accesses == 0);
+    assert(!f.delay_total && !s.train_samples);
     f.fault_on = 0; stop(&f, &s);
     /* Inaccessible status is not confirmed-down during teardown either. */
     init(&f, &s); prepare(&f, &s);
@@ -754,6 +765,94 @@ static void test_vendor_training(void)
     }
 }
 
+static void prepare_vendor_training(struct fake *f, struct giulia_pcie_link *s,
+    uint32_t elbi)
+{
+    init(f, s);
+    f->regs[GIULIA_LINK_DBI][0xf28 / 4] = elbi;
+    f->original[GIULIA_LINK_DBI][0xf28 / 4] = elbi;
+    struct giulia_pcie_link_io io = io_for(f);
+    const uint32_t flags = GIULIA_LINK_PARF_REQUIRED |
+        GIULIA_LINK_EXACT_ROOT_ID | GIULIA_LINK_VENDOR_TRAINING;
+    assert(prepare_fixture(s, flags, &io) == GIULIA_LINK_OK);
+}
+
+static void test_training_samples(void)
+{
+    struct fake f;
+    struct giulia_pcie_link s;
+    const uint32_t states[] = {1u, 31u << 12, 32u << 12 | BIT(10), 63u << 12};
+    const uint32_t up_status = 0x11u << 12 | BIT(10);
+
+    /* Transient ELBI states, including XMLH, while DLLLA never rises.
+     * Both ends of the capture show Detect.Quiet. */
+    prepare_vendor_training(&f, &s, 1u);
+    f.never_link = 1;
+    f.elbi_sequence = states;
+    f.elbi_sequence_count = sizeof(states) / sizeof(states[0]);
+    assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_TIMEOUT);
+    assert(s.train_samples == 1001 && f.elbi_reads == 1001 && f.delay_total == 1000000);
+    assert(s.train_ltssm_first == 0 && s.train_ltssm_last == 0);
+    assert(s.train_ltssm_seen[0] == (BIT(0) | BIT(31)));
+    assert(s.train_ltssm_seen[1] == (BIT(0) | BIT(31)));
+    assert(!f.cfg_accesses && !s.atu_touched);
+    stop(&f, &s);
+
+    /* An invalid word terminates the capture without inventing state 63. */
+    const uint32_t unreadable[] = {2u << 12, UINT32_MAX};
+    prepare_vendor_training(&f, &s, 1u);
+    f.elbi_sequence = unreadable;
+    f.elbi_sequence_count = sizeof(unreadable) / sizeof(unreadable[0]);
+    assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_READBACK);
+    assert(f.elbi_reads == 2 && f.delay_total == 1000 && s.elbi_status == UINT32_MAX);
+    assert(s.train_samples == 1 && s.train_ltssm_first == 2 && s.train_ltssm_last == 2);
+    assert(s.train_ltssm_seen[0] == BIT(2) && !s.train_ltssm_seen[1]);
+    assert(!f.cfg_accesses && !s.atu_touched);
+    stop(&f, &s);
+
+    /* The final poll is still eligible. The CFG guard's extra sample must
+     * not be counted as part of training. */
+    prepare_vendor_training(&f, &s, up_status);
+    f.link_after = 1001;
+    f.negotiated_profile |= BIT(12); /* Slot Clock Configuration */
+    assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_OK);
+    assert(s.polls == 1000 && s.train_samples == 1001 && f.elbi_reads == 1002);
+    assert(f.delay_total == 1000000 && f.cfg_accesses == 1);
+    stop(&f, &s);
+}
+
+static void test_retraining(void)
+{
+    struct fake f;
+    struct giulia_pcie_link s;
+    const uint32_t up_status = 0x11u << 12 | BIT(10);
+
+    /* Both link-up indications can coexist with Link Training. Wait for
+     * LT to clear before opening CFG0; recheck before the ID transaction. */
+    for (unsigned retrain = 1; retrain <= 2; retrain++) {
+        prepare_vendor_training(&f, &s, up_status);
+        f.link_after = 1;
+        f.training_on_read = retrain;
+        int rc = giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED);
+        if (retrain == 1) {
+            assert(rc == GIULIA_LINK_OK && s.train_samples == 2);
+            assert(f.cfg_accesses == 1 && f.delay_total == 1000);
+        } else {
+            assert(rc == GIULIA_LINK_DOWN && s.train_samples == 1);
+            assert(!f.cfg_accesses && !f.delay_total);
+        }
+        stop(&f, &s);
+    }
+
+    /* An already-active retraining link is busy during admission. */
+    init(&f, &s);
+    f.stuck_link = 1;
+    f.negotiated_profile |= BIT(11);
+    struct giulia_pcie_link_io io = io_for(&f);
+    assert(prepare_fixture(&s, GIULIA_LINK_PARF_REQUIRED, &io) == GIULIA_LINK_BUSY);
+    assert(!f.core_writes);
+}
+
 static void test_native_width(void)
 {
     struct fake f;
@@ -889,6 +988,8 @@ int main(void)
     test_deferred_parf_restore();
     test_split_prepare();
     test_vendor_training();
+    test_training_samples();
+    test_retraining();
     test_native_width();
     test_parf_drift_before_dbi();
     test_boot_profile();
