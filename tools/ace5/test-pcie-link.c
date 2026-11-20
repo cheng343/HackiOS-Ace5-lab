@@ -10,7 +10,7 @@
 struct fake {
     uint32_t regs[4][0x3000 / 4];
     uint32_t original[4][0x3000 / 4];
-    unsigned reads, writes, cfg_accesses, bar_probes, barriers;
+    unsigned reads, writes, cfg_accesses, bar_probes, barriers, lane_writes;
     unsigned core_reads, core_writes, cold_aperture, allow_memory, perst_asserted, core_dark;
     char memory_events[64];
     unsigned memory_event_count;
@@ -164,6 +164,10 @@ static void write32(void *p, unsigned r, uint32_t o, uint32_t v)
         assert((raw16(f, GIULIA_LINK_CFG, 4) & 7u) == 0);
         assert((raw16(f, GIULIA_LINK_CFG, 0x52) & 1u) == 0);
         if (o == 0x10 && v == 0xffffffffu) f->bar_probes++;
+    }
+    if (r == GIULIA_LINK_DBI && o == 0x80cu) {
+        assert(!(v & BIT(17)));
+        f->lane_writes++;
     }
     v = dropped(f, r, o, v, f->regs[r][o / 4]);
     f->regs[r][o / 4] = v;
@@ -886,6 +890,52 @@ static void test_native_width(void)
     }
 }
 
+static void test_stock_train_lanes(void)
+{
+    struct fake f;
+    struct giulia_pcie_link s;
+    uint32_t flags = GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID |
+        GIULIA_LINK_VENDOR_TRAINING | GIULIA_LINK_STOCK_TRAIN_LANES;
+    init(&f, &s);
+    assert(giulia_pcie_link_prepare(&s, flags) == GIULIA_LINK_PREREQUISITE && !f.reads && !f.writes);
+    flags |= GIULIA_LINK_NATIVE_WIDTH;
+    for (unsigned trial = 0; trial < 5; trial++) {
+        init(&f, &s);
+        struct giulia_pcie_link_io io = io_for(&f);
+        uint32_t base = trial == 0 ? 0x110190u : 0x110290u;
+        f.regs[GIULIA_LINK_DBI][0x7c / 4] = 0x22c23u;
+        f.regs[GIULIA_LINK_DBI][0x710 / 4] = 3u << 16;
+        f.regs[GIULIA_LINK_DBI][0x80c / 4] = base;
+        f.regs[GIULIA_LINK_DBI][0xf28 / 4] = BIT(10);
+        f.negotiated_profile = 0x21u;
+        assert(giulia_pcie_link_prepare_parf(&s, GIULIA_LINK_PARF_REQUIRED, &io) == 0);
+        assert(giulia_pcie_link_prepare(&s, flags) == 0 && s.expected_lanes == 2);
+        assert(s.snapshot_lanes == ((base >> 8) & 31u) && !f.lane_writes);
+        assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED & ~GIULIA_LINK_PERST_RELEASED_SETTLED)
+            == GIULIA_LINK_PREREQUISITE && !f.lane_writes && !s.train_lanes_verified);
+        if (trial == 2) { f.drop_region = GIULIA_LINK_DBI; f.drop_offset = 0x80c; f.drop_mask = 0x1f00; f.drop_on = 1; }
+        if (trial == 3) f.regs[GIULIA_LINK_DBI][0x80c / 4] |= BIT(17);
+        if (trial == 4) f.never_link = 1;
+        int rc = giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED);
+        assert(rc == (trial == 2 ? GIULIA_LINK_READBACK : trial == 3 ? GIULIA_LINK_BUSY :
+                       trial == 4 ? GIULIA_LINK_TIMEOUT : GIULIA_LINK_OK));
+        assert(f.lane_writes == (unsigned)(trial == 1 || trial == 2 || trial == 4));
+        assert(f.cfg_accesses == (unsigned)(trial < 2) && !f.bar_probes);
+        if (trial == 2 || trial == 3) assert(!s.train_lanes_verified && !s.train_samples);
+        else {
+            assert(s.train_lanes_verified && s.train_samples && s.train_lanes_after == 1);
+            assert(s.train_lanes_before == ((base >> 8) & 31u));
+            assert(f.regs[GIULIA_LINK_DBI][0x80c / 4] == 0x110190u);
+        }
+        assert(f.regs[GIULIA_LINK_DBI][0x7c / 4] == 0x22c21u);
+        assert(f.regs[GIULIA_LINK_DBI][0x710 / 4] == ((3u << 16) | BIT(5)));
+        f.drop_on = 0;
+        assert(quiesce_then_stop(&f, &s) == 0);
+        assert(f.regs[GIULIA_LINK_DBI][0x80c / 4] == base);
+    }
+    puts("PASS: native x2 stock training field, conditional write, action guard and restore");
+}
+
 static void test_parf_drift_before_dbi(void)
 {
     const uint32_t offsets[] = {0x350u, 0x634u, 0x358u, 0x1b0u, 0x22cu};
@@ -991,6 +1041,7 @@ int main(void)
     test_training_samples();
     test_retraining();
     test_native_width();
+    test_stock_train_lanes();
     test_parf_drift_before_dbi();
     test_boot_profile();
     puts("SM8650 PCIe link: ownership, training, config, BAR and rollback mocks passed");

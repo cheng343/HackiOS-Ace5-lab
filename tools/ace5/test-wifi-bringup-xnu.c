@@ -167,7 +167,11 @@ int giulia_pcie_link_read_root_id(struct giulia_pcie_link *s, uint32_t flags)
 int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
 {
     assert(wb.sm_diag == WB_SM_ENDPOINT && flags ==
-        (GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID | GIULIA_LINK_VENDOR_TRAINING));
+        (GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID | GIULIA_LINK_VENDOR_TRAINING |
+         (wb.native_width ? GIULIA_LINK_NATIVE_WIDTH : 0u) |
+         (wb.stock_train ? GIULIA_LINK_STOCK_TRAIN_LANES : 0u)));
+    s->snapshot_lanes = 2;
+    s->train_lanes_verified = 0;
     assert(wb.dbi.address && wb.atu.address && wb.cfg.address && !wb.bar0.address);
     s->root_id = wb_link_r32(0, GIULIA_LINK_DBI, 0);
     s->state = GIULIA_LINK_PREPARED;
@@ -216,6 +220,9 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     endpoint_identifies++;
     s->endpoint_id = GIULIA_PCIE_LINK_EP_ID;
     s->link_status = 0x2011;
+    s->train_lanes_verified = !!wb.stock_train;
+    s->train_lanes_before = 2;
+    s->train_lanes_after = 1;
     s->train_samples = 2;
     s->train_ltssm_first = 0;
     s->train_ltssm_last = 17;
@@ -553,8 +560,11 @@ static void noc_after_phy(void)
     assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
     assert(wb.bringup.link.endpoint_id == GIULIA_PCIE_LINK_EP_ID);
     wb.stock_perf = 0;
+    wb.native_width = wb.stock_train = 1;
     perf[0xc / 4] = perf[0x4 / 4] = GIULIA_PCIE_BOOT_PERF;
     assert(wb_cesta_pre_dbi() == 0 && endpoint_identifies == 2);
+    assert(strstr(messages, "stock train lanes before=2 after=1"));
+    assert(strstr(messages, "native train lanes snapshot=2"));
     /* A low input with a high output latch is not a released endpoint.
      * Neither snapshot failures nor an unreliable WLAN_EN may start LTSSM. */
     static const struct { enum pin_fault fault; unsigned released; int error; } refusals[] = {
@@ -570,12 +580,14 @@ static void noc_after_phy(void)
         assert(wb_cesta_pre_dbi() == refusals[i].error && endpoint_identifies == 2);
         assert(strstr(messages, refusals[i].released ? "pin gate refused released" : "pin gate refused held"));
         assert(!strstr(messages, "PCIe endpoint identify") && !strstr(messages, "PCIe training samples"));
+        assert(!strstr(messages, "stock train lanes before="));
         assert(endpoint_releases == releases + refusals[i].released && endpoint_reasserts == reasserts + 1);
         assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
     }
     injected_pin_fault = REASSERT_STUCK_HIGH;
     assert(wb_cesta_pre_dbi() == GIULIA_WGPIO_READBACK && endpoint_identifies == 3);
     assert(wb.endpoint_reset_unconfirmed && perst[1] == 1);
+    wb.native_width = wb.stock_train = 0;
     /* End this synthetic stuck-pin scenario before testing unrelated leases. */
     perst[1] = 0; wb.endpoint_reset_unconfirmed = 0; injected_pin_fault = PIN_OK;
     wb.bringup.link.state = GIULIA_LINK_PARF_READY;

@@ -64,7 +64,9 @@ enum giulia_pcie_link_prerequisite {
     /* Apply the stock pre-PERST controls and check PCIe0 ELBI link status. */
     GIULIA_LINK_VENDOR_TRAINING = 1u << 10,
     /* Preserve the native two-lane fields in a guarded developer trial. */
-    GIULIA_LINK_NATIVE_WIDTH = 1u << 11
+    GIULIA_LINK_NATIVE_WIDTH = 1u << 11,
+    /* OnePlus RC0 vendor training aims NUM_OF_LANES=1 with native x2 capability. */
+    GIULIA_LINK_STOCK_TRAIN_LANES = 1u << 12
 };
 #define GIULIA_LINK_PARF_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
     GIULIA_LINK_RAILS_NOC_READY | GIULIA_LINK_CLOCKS_RC_RESET_READY | \
@@ -109,7 +111,8 @@ struct giulia_pcie_link {
     uint8_t saved_count, config_atu_enabled, atu_touched;
     uint8_t parf_count, parf_owned, core_owned;
     uint8_t memory_owned, memory_enabled, mask_int_owned, vendor_training;
-    uint8_t expected_lanes;
+    uint8_t expected_lanes, stock_train, snapshot_lanes;
+    uint8_t train_lanes_before, train_lanes_after, train_lanes_verified;
     struct giulia_pcie_link_saved saved[48];
 };
 

@@ -56,6 +56,7 @@
 #define DBI_DEBUG0 0x728u
 #define DBI_DEBUG1 0x72cu
 #define DBI_WIDTH 0x80cu
+#define DBI_WIDTH_LANES (0x1fu << 8)
 #define DBI_MSI_ENABLE 0x828u
 #define DBI_RO 0x8bcu
 #define DBI_VERSION 0x8f8u
@@ -232,7 +233,10 @@ static int save(struct giulia_pcie_link *s, unsigned r, uint32_t o,
     v->offset = o;
     v->value = value;
     /* Directed speed-change is a self-clearing action, not saved state. */
-    if (r == GIULIA_LINK_DBI && o == DBI_WIDTH) v->value &= ~BIT(17);
+    if (r == GIULIA_LINK_DBI && o == DBI_WIDTH) {
+        s->snapshot_lanes = (uint8_t)((value & DBI_WIDTH_LANES) >> 8);
+        v->value &= ~BIT(17);
+    }
     s->saved_count++;
     return 1;
 }
@@ -456,6 +460,8 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
         return GIULIA_LINK_PREREQUISITE;
     if ((flags & GIULIA_LINK_NATIVE_WIDTH) && !(flags & GIULIA_LINK_VENDOR_TRAINING))
         return GIULIA_LINK_PREREQUISITE;
+    if ((flags & GIULIA_LINK_STOCK_TRAIN_LANES) && !(flags & GIULIA_LINK_NATIVE_WIDTH))
+        return GIULIA_LINK_PREREQUISITE;
     int rc = giulia_pcie_link_read_root_id(s, flags);
     if (rc) return rc;
     if ((r16(s, GIULIA_LINK_DBI, PCI_HEADER) & 0x7fu) != 1u)
@@ -494,6 +500,8 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
             return record_failure(s, GIULIA_LINK_BUSY);
     }
     s->vendor_training = !!(flags & GIULIA_LINK_VENDOR_TRAINING);
+    s->stock_train = !!(flags & GIULIA_LINK_STOCK_TRAIN_LANES);
+    s->train_lanes_verified = 0;
     if (!snapshot_core(s)) return record_failure(s, GIULIA_LINK_READBACK);
     s->core_owned = 1;
     s->parf_count += s->vendor_training ? 2 : 1;
@@ -623,6 +631,22 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
         (flags & GIULIA_LINK_PERST_ASSERTED)) return GIULIA_LINK_PREREQUISITE;
     if (s->state != GIULIA_LINK_PREPARED) return GIULIA_LINK_STATE;
     s->stage = GIULIA_LINK_STAGE_TRAIN;
+    if (s->stock_train) {
+        /* Vendor RC0 sets only NUM_OF_LANES before enabling LTSSM. Keep
+         * LNKCAP/PORT_LINK_MODE at x2, and never replay a speed-change request. */
+        uint32_t v = r32(s, GIULIA_LINK_DBI, DBI_WIDTH);
+        if (v == UINT32_MAX) return fail(s, GIULIA_LINK_READBACK);
+        if (v & BIT(17)) return fail(s, GIULIA_LINK_BUSY);
+        s->train_lanes_before = (uint8_t)((v & DBI_WIDTH_LANES) >> 8);
+        if (s->train_lanes_before != 1u) {
+            uint32_t updated = (v & ~DBI_WIDTH_LANES) | BIT(8);
+            w32(s, GIULIA_LINK_DBI, DBI_WIDTH, updated);
+            v = r32(s, GIULIA_LINK_DBI, DBI_WIDTH);
+            if (v != updated) return fail(s, GIULIA_LINK_READBACK);
+        }
+        s->train_lanes_after = (uint8_t)((v & DBI_WIDTH_LANES) >> 8);
+        s->train_lanes_verified = 1;
+    }
     if (!change32(s, GIULIA_LINK_PARF, PARF_LTSSM, 0, BIT(8), BIT(8)))
         return fail(s, GIULIA_LINK_READBACK);
     for (s->polls = 0; s->polls <= 1000u; s->polls++) {
