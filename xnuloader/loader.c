@@ -966,6 +966,9 @@ static struct loader_firmware_quiet firmware_quiet = {
 static int firmware_quiet_enabled;
 #ifdef HACKIOS_GIULIA
 static void quiet_reset_on_request(uint64_t base);
+static int log_reboot_owned;
+static char log_reboot_nonce[17];
+static void log_reboot_check_startup(uint64_t started);
 #endif
 /* A selected first CRM channel has no verified select-none rollback. Keep
  * the payload/ownership reserved after XNU returns; only inspection/upload
@@ -2331,6 +2334,9 @@ observer_firmware_quiet(uint64_t started, uint64_t budget, uint64_t *last_pet)
 {
     uint64_t daif, group1, base = (uint64_t)(uintptr_t)&firmware_quiet;
     uint32_t request;
+#ifdef HACKIOS_GIULIA
+    log_reboot_check_startup(started);
+#endif
     if (!firmware_quiet_enabled) return 0;
     flush_dcache(base, base + 128);
     request = firmware_quiet.request;
@@ -2349,6 +2355,7 @@ observer_firmware_quiet(uint64_t started, uint64_t budget, uint64_t *last_pet)
             flush_dcache((uint64_t)(uintptr_t)&other_cpu_done, (uint64_t)(uintptr_t)&other_cpu_done + 8);
             if (other_cpu_done || firmware_quiet.request != request) break;
 #ifdef HACKIOS_GIULIA
+            log_reboot_check_startup(started);
             if (firmware_quiet.reset_capability && firmware_quiet.reset_request == 1 &&
                 !firmware_quiet.reset_ack)
                 quiet_reset_on_request(base);
@@ -2579,26 +2586,107 @@ quiet_watchdog_disarm(void)
     return (ctl & GIULIA_WDT_ENABLED) ? -1 : 0;
 }
 
+/* The narrow timer is acquired once, with the original verified SMC sequence.
+ * While owned, update both deadlines without disabling or re-enabling it.
+ * Lengthen bite first or shorten bark first, preserving bark < bite. */
+static inline void log_reboot_yield(void) { __asm__ volatile("yield"); }
+
+static void __attribute__((noreturn))
+log_reboot_force_reset(void)
+{
+    psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+    /* PSCI can return an error. Leave the hardware watchdog running. */
+    for (;;) __asm__ volatile("yield");
+}
+
+static void
+log_reboot_retime(int startup)
+{
+    uint64_t ctl = 0;
+    uint64_t bark = startup ? 55000u : GIULIA_WDT_BARK_MS;
+    uint64_t bite = startup ? 60000u : GIULIA_WDT_BITE_MS;
+    if (smc_call(GIULIA_WDT_SET_TIME, startup ? GIULIA_WDT_NO_CHANGE : bark,
+            startup ? bite : GIULIA_WDT_NO_CHANGE, NULL, NULL) ||
+        smc_call(GIULIA_WDT_SET_TIME, startup ? bark : GIULIA_WDT_NO_CHANGE,
+            startup ? GIULIA_WDT_NO_CHANGE : bite, NULL, NULL) ||
+        smc_call(GIULIA_WDT_PET, 0, 0, NULL, NULL) ||
+        smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
+        (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED)) != GIULIA_WDT_ENABLED)
+        log_reboot_force_reset();
+}
+
+static int
+log_reboot_arm(void)
+{
+    uint64_t ctl = 0, detail;
+    if (!READ_SYSREG(CNTFRQ_EL0) || smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
+        (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED))) return 0;
+    if (giulia_wdt_configure(smc_call, &detail)) {
+        if (quiet_watchdog_disarm()) log_reboot_force_reset();
+        return 0;
+    }
+    log_reboot_owned = 1;
+    log_reboot_retime(1);
+    print("log-reboot: startup watchdog armed\n");
+    return 1;
+}
+
+static void
+log_reboot_check_startup(uint64_t started)
+{
+    if (log_reboot_owned && !firmware_quiet.reset_ack && seconds_since(started) >= 45u)
+        log_reboot_force_reset();
+}
+
+/* Accept a single lower-case 64-bit hex tag, used only to identify the
+ * current record in the dedicated log partition after Android returns. */
+static int
+log_reboot_parse_nonce(const char *cmdline, char nonce[17])
+{
+    const char prefix[] = "ace5_run_nonce=";
+    int found = 0;
+    for (const char *c = cmdline; *c; c++) {
+        if (c != cmdline && c[-1] != ' ') continue;
+        unsigned i = 0;
+        while (prefix[i] && c[i] == prefix[i]) i++;
+        if (prefix[i]) continue;
+        const char *p = c + i;
+        if (found) return 0;
+        for (i = 0; i < 16; i++) {
+            if (!((p[i] >= '0' && p[i] <= '9') || (p[i] >= 'a' && p[i] <= 'f'))) return 0;
+            nonce[i] = p[i];
+        }
+        if (p[16] && p[16] != ' ') return 0;
+        nonce[16] = 0;
+        found = 1;
+    }
+    return found;
+}
+
 /* Runs with firmware interrupts masked. Only PSCI/SMC and cached RAM are used.
- * Once acknowledged, only the assembly return from the borrowed core can cancel. */
+ * Legacy mode cancels on assembly return. Log-reboot mode retains the timer through storage. */
 static void
 quiet_reset_on_request(uint64_t base)
 {
     const uint64_t done = (uint64_t)(uintptr_t)&other_cpu_done;
     uint64_t ctl = 0, detail;
-    if (!READ_SYSREG(CNTFRQ_EL0) ||
-        smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
-        (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED))) {
-        firmware_quiet.reset_ack = LOADER_QUIET_RESET_FAILED;
-        clean_dcache(base + 128, base + sizeof(firmware_quiet));
-        return;
-    }
-    if (giulia_wdt_configure(smc_call, &detail)) {
-        if (quiet_watchdog_disarm())
-            psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
-        firmware_quiet.reset_ack = LOADER_QUIET_RESET_FAILED;
-        clean_dcache(base + 128, base + sizeof(firmware_quiet));
-        return;
+    if (log_reboot_owned) {
+        log_reboot_retime(0);
+    } else {
+        if (!READ_SYSREG(CNTFRQ_EL0) ||
+            smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
+            (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED))) {
+            firmware_quiet.reset_ack = LOADER_QUIET_RESET_FAILED;
+            clean_dcache(base + 128, base + sizeof(firmware_quiet));
+            return;
+        }
+        if (giulia_wdt_configure(smc_call, &detail)) {
+            if (quiet_watchdog_disarm())
+                psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+            firmware_quiet.reset_ack = LOADER_QUIET_RESET_FAILED;
+            clean_dcache(base + 128, base + sizeof(firmware_quiet));
+            return;
+        }
     }
     const uint64_t started = READ_SYSREG(CNTVCT_EL0);
     firmware_quiet.reset_ack = LOADER_QUIET_RESET_ARMED;
@@ -2606,17 +2694,23 @@ quiet_reset_on_request(uint64_t base)
     while (seconds_since(started) < LOADER_QUIET_RESET_SECONDS) {
         flush_dcache(done, done + sizeof(other_cpu_done));
         if (other_cpu_done) {
+            if (log_reboot_owned) {
+                /* Give storage a fresh bounded interval. No USB is needed. */
+                if (smc_call(GIULIA_WDT_PET, 0, 0, NULL, NULL)) log_reboot_force_reset();
+                return;
+            }
             if (quiet_watchdog_disarm() == 0) return;
             break;
         }
-        __asm__ volatile("yield");
+        log_reboot_yield();
     }
+    if (log_reboot_owned) log_reboot_force_reset();
     psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
     /* A failed PSCI leaves the watchdog armed unless the kernel safely returns. */
     for (;;) {
         flush_dcache(done, done + sizeof(other_cpu_done));
         if (other_cpu_done && quiet_watchdog_disarm() == 0) return;
-        __asm__ volatile("yield");
+        log_reboot_yield();
     }
 }
 #endif
@@ -3205,6 +3299,20 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
             kernel_budget >= 60 && kernel_budget <= 120 && !wdt_armed;
     }
 #endif
+#ifdef HACKIOS_GIULIA
+    int log_reboot_requested = checkpoint != CHECKPOINT_SELFTEST &&
+        quiet_flag_present(pi.cmdline, "ace5_wifi_log_reboot=1");
+    if (log_reboot_requested &&
+        (checkpoint != 0 || !firmware_quiet.reset_capability ||
+        kernel_mpidr != (1ULL << PLAT->core_shift) ||
+        !quiet_flag_present(pi.cmdline, "cpus=1") ||
+        !(quiet_flag_present(pi.cmdline, "ace5_wifi_sm_diag=5") ||
+          quiet_flag_present(pi.cmdline, "ace5_wifi_sm_diag=7")) ||
+        !log_reboot_parse_nonce(pi.cmdline, log_reboot_nonce))) {
+        print("log-reboot: unsupported trial or invalid run nonce\n");
+        return 0;
+    }
+#endif
     if (firmware_quiet_enabled) {
         firmware_quiet.request = firmware_quiet.ack = firmware_quiet.active = 0;
         firmware_quiet.reset_request = firmware_quiet.reset_ack = 0;
@@ -3467,6 +3575,12 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			jump_to_kernel((uint64_t)(uintptr_t)&loader_return_stub, 0);
 		}
 		if (kernel_mpidr != this_mpidr) {
+#ifdef HACKIOS_GIULIA
+            if (log_reboot_requested && !log_reboot_arm()) {
+                print("log-reboot: startup watchdog unavailable\n");
+                return 0;
+            }
+#endif
 			int64_t status = run_on_other_cpu(kernel_mpidr, entry_va + slide, ba_pa, kernel_live, slide, kernel_budget);
 
 			wdt_set_ms(WDT_BITE_MS);
@@ -3480,6 +3594,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 				    (uint64_t)SILENCE_SECONDS);
 				set_result("hung", loader_ctx[CTX_LOG_LEN], 0);
 				write_logs((const char *)loader_ctx[CTX_LOG_PA], loader_ctx[CTX_LOG_LEN]);
+#ifdef HACKIOS_GIULIA
+                if (log_reboot_owned) log_reboot_force_reset();
+#endif
 				return 1;
 			} else if (status != 0) {
 				/* the kernel was told it would be on that core (return path, device tree): no second try */
@@ -3490,6 +3607,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 				}
 				set_result("no-such-core", (uint64_t)(status < 0 ? -status : status), 0);
 				write_logs(NULL, 0);
+#ifdef HACKIOS_GIULIA
+                if (log_reboot_owned) log_reboot_force_reset();
+#endif
 				return 1;
 			}
 		} else {
@@ -3565,7 +3685,14 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			set_result("returned", klog_len, 0);
 		}
 	}
+#ifdef HACKIOS_GIULIA
+    if (log_reboot_owned && reason == 0)
+        print("ace5-log-reboot: completed id=%s\n", log_reboot_nonce);
+#endif
 	write_logs(klog, klog_len);
+#ifdef HACKIOS_GIULIA
+    if (log_reboot_owned) log_reboot_force_reset();
+#endif
 	return 1;
 }
 
@@ -3865,6 +3992,10 @@ fb_command(char *cmd)
 				fb_reply("OKAY", "diagnostic");
 #else
 				fb_reply("OKAY", "kernel");
+#endif
+#if defined(HACKIOS_GIULIA) && !defined(HACKIOS_DIAGNOSTIC)
+            } else if (str_eq(var, "wifi-log-reboot")) {
+                fb_reply("OKAY", "1");
 #endif
 			} else if (str_eq(var, "crm-reset-required")) {
 				fb_reply("OKAY",crm_reset_required ? "yes" : "no");

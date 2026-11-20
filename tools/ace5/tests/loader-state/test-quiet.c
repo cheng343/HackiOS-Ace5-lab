@@ -27,6 +27,7 @@ static void select_trial(const char *cmd,int other_cpu)
 static uint64_t seconds_since(uint64_t start) { (void)start; return ticks; }
 static int observer_watchdog_within_budget(uint64_t elapsed, uint64_t budget)
 { return !budget || elapsed < budget + 60; }
+static void log_reboot_check_startup(uint64_t started) { (void)started; }
 static void wdt_pet(void) { assert(masked); pets++; }
 static void quiet_interrupts_mask(uint64_t *d, uint64_t *g)
 { assert(!masked); *d = 7; *g = 9; masked = 1; }

@@ -72,7 +72,7 @@ def main() -> int:
         quiet_args = section(text, 'static int\nquiet_flag_present(', 'static int\nobserver_firmware_quiet(', source)
         (build / 'quiet-args.inc').write_text(quiet_args, encoding='utf8')
         quiet_enable=section(text,'    firmware_quiet_enabled = 0;',
-                             '    if (firmware_quiet_enabled) {',source)
+                             '#ifdef HACKIOS_GIULIA\n    int log_reboot_requested =',source)
         (build / 'quiet-enable.inc').write_text(quiet_enable,encoding='utf8')
         prefix = section(text, 'static int\nstarts_with(', '/*\n * One command from the host.', source)
         gate = section(text, 'static int\ncrm_command_allowed(', 'static void\nfb_command(', source)
@@ -81,7 +81,10 @@ def main() -> int:
             raise ValueError('CRM retained-lifetime gate must precede all command dispatch')
         if '\twhile (status == 0) {\n        if (observer_firmware_quiet(started, budget, &last_pet)) continue;' not in text:
             raise ValueError('firmware quiet must gate every observer iteration before firmware services')
-        for name in ("download", "run", "watchdog", "quiet"):
+        log_guard = section(text, 'static void\nlog_reboot_retime(',
+                            '#endif\n\n#if defined(HACKIOS_GIULIA) && defined(HACKIOS_DIAGNOSTIC)\n#define GIULIA_WDT_FALLBACK_SECONDS', source)
+        (build / 'log-reboot.inc').write_text(log_guard, encoding='utf8')
+        for name in ("download", "run", "watchdog", "quiet", "log-reboot"):
             exe = build / (name + (".exe" if sys.platform == "win32" else ""))
             run(args.cc + ["-std=c11", "-O1", "-UNDEBUG", "-Wall", "-Wextra",
                            "-I", str(build), "-I", str(root/'xnu/files/bsd/sys'),
