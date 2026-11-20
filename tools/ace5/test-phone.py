@@ -21,7 +21,7 @@ FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect
              'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments',
              'ace5_crm_test_arguments', 'ace5_pdc_test_arguments', 'ace5_cx_vote_arguments',
              'ace5_rpmh_read_arguments', 'check_rpmh_read_log', 'check_rpmh_read_profile',
-             'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf', 'finish_log_reboot_launch'}
+             'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf', 'check_stock_train_cmdline', 'finish_log_reboot_launch'}
 
 
 class Clock:
@@ -103,6 +103,17 @@ class PhoneTests(unittest.TestCase):
             check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True, native_width=True)
         check(True, 4, endpoint.replace('lnk=0x2011', 'lnk=0x2021'), 'yes', self.log,
               sm_diag=7, cold_reset=True, native_width=True)
+        ep2 = endpoint.replace('lnk=0x2011', 'lnk=0x2021')
+        marker = 'ace5-wifi-bringup: stock train lanes before=2 after=1\n'
+        def verify_ep(data):
+            check(True, 4, data, 'yes', self.log, sm_diag=7, cold_reset=True, native_width=True, stock_train_lanes=True)
+        verify_ep(ep2 + '\n' + marker + marker)
+        for suffix in ('', marker + marker.replace('after=1', 'after=2'),
+                       marker + marker.replace('before=2', 'before=32'), marker + marker.replace('after=1', 'after=1bad')):
+            with self.assertRaisesRegex(RuntimeError, 'train-lanes readback'):
+                verify_ep(ep2 + '\n' + suffix)
+        with self.assertRaisesRegex(RuntimeError, 'WCN7850 identity or reset'):
+            verify_ep(endpoint + '\n' + marker)
         for native, stable, training in ((False, '0x3011', '0x3811'), (True, '0x3021', '0x3821')):
             check(True, 4, endpoint.replace('0x2011', stable), 'yes', self.log,
                   sm_diag=7, cold_reset=True, native_width=native)
@@ -203,6 +214,29 @@ class PhoneTests(unittest.TestCase):
         with self.assertRaises(RuntimeError): fn(False, None, 1, 'kernel', 30, False, False, 4)
         table.write_bytes(bytes(507))
         with self.assertRaises(RuntimeError): fn(True, table, 1, 'kernel', 30, False, False)
+
+    def test_stock_train_lanes_isolated_and_bounded(self):
+        fn = self.namespace['ace5_wifi_bringup_arguments']
+        limit = self.namespace['check_stock_train_cmdline']
+        table, profile = self.directory / 'pdc', self.directory / 'sm'
+        table.write_bytes(bytes(508))
+        profile.write_bytes(bytes(80))
+        args = dict(stage=4, sm_diag=7, sm_profile=profile, cold_reset=True, native_width=True)
+        with self.assertRaisesRegex(RuntimeError, 'CESTA profile'):
+            fn(True, table, 1, 'kernel', 60, False, False, **args, stock_train_lanes=True)
+        digest = Mock()
+        digest.sha256.return_value.hexdigest.return_value = 'b3ed154a6cabba921d99cf703d70255e2239977683153992c4a8f1cc5211d90e'
+        self.namespace['hashlib'] = digest
+        legacy = fn(True, table, 1, 'kernel', 60, False, False, **args)
+        self.assertEqual(fn(True, table, 1, 'kernel', 60, False, False, **args, stock_train_lanes=True),
+                         legacy + ' ace5_wifi_stock_train=1')
+        for override in (dict(native_width=False), dict(sm_diag=5), dict(cold_reset=False),
+                         dict(sm_profile=None), dict(stage=3)):
+            with self.assertRaises(RuntimeError):
+                fn(True, table, 1, 'kernel', 60, False, False, **(args | override), stock_train_lanes=True)
+        n = 607 - len('debug=0x8 rd=md0 ')
+        limit('x' * n)
+        with self.assertRaisesRegex(RuntimeError, '608-byte'): limit('x' * (n+1))
 
     def test_stock_perf_requires_rc0_three_row_profile(self):
         import struct
