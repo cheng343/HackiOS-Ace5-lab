@@ -21,7 +21,7 @@ FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect
              'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments',
              'ace5_crm_test_arguments', 'ace5_pdc_test_arguments', 'ace5_cx_vote_arguments',
              'ace5_rpmh_read_arguments', 'check_rpmh_read_log', 'check_rpmh_read_profile',
-             'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf'}
+             'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf', 'finish_log_reboot_launch'}
 
 
 class Clock:
@@ -134,6 +134,37 @@ class PhoneTests(unittest.TestCase):
                 (report() + 'ace5-wifi-bringup: cleanup complete; firmware resumed (cold reboot required)', 'yes')):
             with self.subTest(text=text, reset=reset), self.assertRaises(RuntimeError):
                 check(True, 4, text, reset, self.log)
+
+    def test_log_reboot_requires_a_supported_profile_and_fresh_hex_identifier(self):
+        fn = self.namespace['ace5_wifi_bringup_arguments']
+        table = self.directory / 'pdc.bin'
+        table.write_bytes(bytes(508))
+        profile = self.directory / 'sm.bin'
+        profile.write_bytes(bytes(80))
+        # The digest of the private DT profile is checked by a separate test.
+        digest = Mock()
+        digest.sha256.return_value.hexdigest.return_value = 'b3ed154a6cabba921d99cf703d70255e2239977683153992c4a8f1cc5211d90e'
+        self.namespace['hashlib'] = digest
+        nonce = '0a1b2c3d4e5f6789'
+        for mode in (5, 7):
+            args = fn(True, table, 1, 'kernel', 60, False, False, 4, sm_diag=mode,
+                      sm_profile=profile, cold_reset=True, log_reboot_nonce=nonce)
+            self.assertIn(' ace5_wifi_log_reboot=1 ace5_run_nonce=' + nonce, args)
+        for mode, run_id in ((6, nonce), (5, ''), (7, 'A' * 16), (7, nonce + '\n'), (7, nonce[:-1])):
+            with self.subTest(mode=mode, run_id=run_id), self.assertRaises(RuntimeError):
+                fn(True, table, 1, 'kernel', 60, False, False, 4, sm_diag=mode,
+                   sm_profile=profile, cold_reset=True, log_reboot_nonce=run_id)
+        with self.assertRaises(RuntimeError):
+            fn(False, table, 1, 'kernel', 60, False, False, log_reboot_nonce=nonce)
+
+    def test_log_reboot_ack_exits_with_observation_pending(self):
+        finish = self.namespace['finish_log_reboot_launch']
+        with self.assertRaises(SystemExit) as pending:
+            finish('OKAY [  0.000s]\nFinished. Total time: 0.001s\n', '0a1b2c3d4e5f6789')
+        self.assertEqual(pending.exception.code, 75)
+        for reply in ('', 'INFO: MAYBE OKAY', 'OKAYISH'):
+            with self.assertRaisesRegex(RuntimeError, 'acknowledgement missing'):
+                finish(reply, '0a1b2c3d4e5f6789')
 
     def test_wifi_bringup_profile_is_explicit_and_isolated(self):
         fn = self.namespace['ace5_wifi_bringup_arguments']

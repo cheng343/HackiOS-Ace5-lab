@@ -106,6 +106,15 @@ def validate_run_timing(seconds, bootcpu, gpu_probe, gpu_direct, gpu_keep, gpu_s
     return persistent
 
 
+def finish_log_reboot_launch(reply, nonce):
+    # The Android observer takes over here. A zero exit status is reserved for
+    # completed operations; an acknowledged OEM launch is not a test result.
+    if not re.search(r'^OKAY(?:[ \t]|\r?$)', reply, re.M):
+        raise RuntimeError('Log-reboot launch acknowledgement missing; inspect device before retrying')
+    print(f'Wi-Fi log-reboot launch acknowledged id={nonce}; recovery and logdump pending.', flush=True)
+    raise SystemExit(75)
+
+
 def check_kernel_log(saved_log, log):
     if 'panic(cpu ' in saved_log or re.search(
             r'ace5-gpu: (stage [0-9]+ FAILED|.*cleanup FAILED|live failure)', saved_log):
@@ -304,9 +313,10 @@ def check_stock_startup_perf(nodes):
 
 def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log,
                                stage=0, crm_all_states=False, sm_diag=0, sm_profile=None,
-                               watchdog=0, cold_reset=False, pcs_first=False, native_width=False, stock_perf_dtb=None):
+                               watchdog=0, cold_reset=False, pcs_first=False, native_width=False, stock_perf_dtb=None,
+                               log_reboot_nonce=None):
     if not enabled:
-        if stage or crm_all_states or sm_diag or sm_profile or watchdog or cold_reset or pcs_first or native_width or stock_perf_dtb:
+        if stage or crm_all_states or sm_diag or sm_profile or watchdog or cold_reset or pcs_first or native_width or stock_perf_dtb or log_reboot_nonce is not None:
             raise RuntimeError('Wi-Fi stage, CRM and CESTA options require --wifi-bringup-test')
         return ''
     if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
@@ -324,6 +334,11 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         raise RuntimeError('Cold-reset profile requires isolated Stage 4 and 60..120 seconds')
     if (pcs_first or native_width) and (sm_diag != 7 or not cold_reset or not sm_profile):
         raise RuntimeError('PCS and native-width trials require --wifi-cesta-endpoint')
+    if log_reboot_nonce is not None:
+        if not re.fullmatch('[0-9a-f]{16}', log_reboot_nonce):
+            raise RuntimeError('--wifi-log-reboot requires a fresh 16-character lowercase hexadecimal run ID')
+        if not cold_reset or sm_diag not in (5, 7) or not sm_profile:
+            raise RuntimeError('--wifi-log-reboot requires --wifi-cesta-perf or --wifi-cesta-endpoint')
     if stock_perf_dtb:
         if sm_diag != 7 or not cold_reset or not sm_profile:
             raise RuntimeError('Stock startup PERF requires --wifi-cesta-endpoint')
@@ -352,6 +367,8 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         out += ' ace5_wifi_native_width=1'
     if stock_perf_dtb:
         out += ' ace5_wifi_stock_perf=1'
+    if log_reboot_nonce is not None:
+        out += f' ace5_wifi_log_reboot=1 ace5_run_nonce={log_reboot_nonce}'
     return out
 
 
@@ -493,6 +510,10 @@ run.add_argument('--wifi-pcs-first', action='store_true',
                  help='Arm independent reset before starting PCS ahead of PIPE; requires --wifi-cesta-endpoint')
 run.add_argument('--wifi-native-width', action='store_true',
                  help='Keep native x2 lane fields at Gen1 during --wifi-cesta-endpoint')
+run.add_argument('--wifi-log-reboot', metavar='RUN_ID',
+                 help='Launch a Stage 4 PERF or endpoint trial that saves logdump and reboots on-device. '
+                      'Use a fresh 16-digit lowercase hex ID. Exit 75 means launch acknowledged; '
+                      'the caller must verify a fresh Android boot and matching logdump.')
 run.add_argument('--wifi-stock-startup-perf', metavar='CURRENT_DTB', type=Path,
                  help='Use the stock RC0 startup resource level during --wifi-cesta-endpoint, with the current Android DTB')
 run.add_argument('--crm-channel-test', action='store_true',
@@ -672,7 +693,9 @@ try:
                 args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test or args.wlan_pdc_test,
                 args.live_log, args.wifi_bringup_stage, args.wifi_crm_all_states,
                 sm_mode, cesta_profile, args.wifi_watchdog, cold_reset, args.wifi_pcs_first,
-                args.wifi_native_width, args.wifi_stock_startup_perf)
+                args.wifi_native_width, args.wifi_stock_startup_perf, args.wifi_log_reboot)
+            if args.wifi_log_reboot is not None and getvar('wifi-log-reboot') != '1':
+                raise RuntimeError('Loader does not advertise wifi-log-reboot support; no payload staged')
         if args.command == 'run' and args.touch:
             if not args.kernel:
                 raise RuntimeError('--touch requires an explicit locally built --kernel')
@@ -744,7 +767,10 @@ try:
             fb('stage', args.wlan_pdc_table, timeout=15)
             print(fb('oem', 'wlan-pdc-table'), flush=True)
         fb('stage', payload, timeout=60)
-        print(fb('oem', 'run' if args.command == 'run' else 'selftest'), flush=True)
+        launch_reply = fb('oem', 'run' if args.command == 'run' else 'selftest')
+        print(launch_reply, flush=True)
+        if args.command == 'run' and args.wifi_log_reboot is not None:
+            finish_log_reboot_launch(launch_reply, args.wifi_log_reboot)
         log = logs / (time.strftime('%Y%m%d-%H%M%S') + '-' + args.command + '.log')
         if persistent:
             observe_persistent_startup(logs, log)
