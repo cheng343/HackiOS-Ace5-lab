@@ -646,6 +646,17 @@ static void wb_log_gpio_sample(const char *phase, const struct wb_gpio_sample *s
         phase, p->wlan_en, p->sw_ctrl, p->wlan_sw_ctrl, p->perst, p->clkreq, p->wake);
 }
 
+/* TLMM IO bit 0 is the sampled input and bit 1 is the output latch.
+ * The latch can change without the line following it. Gate LTSSM on both
+ * observations, using the samples already taken for diagnostics. */
+static int wb_endpoint_pin_gate(const struct wb_gpio_sample *sample, uint32_t perst)
+{
+    if (sample->rc) return GIULIA_LINK_READBACK;
+    if ((sample->pins.wlan_en & 3u) != 3u || (sample->pins.perst & 3u) != perst)
+        return GIULIA_LINK_PREREQUISITE;
+    return GIULIA_LINK_OK;
+}
+
 static int wb_pcie_identify_endpoint(void)
 {
     struct giulia_pcie_link *link = &wb.bringup.link;
@@ -662,13 +673,25 @@ static int wb_pcie_identify_endpoint(void)
 
     struct wb_gpio_sample before, released, trained;
     before.rc = giulia_wifi_gpio_snapshot(gpio, &before.pins);
-    int attempted = 0;
+    int attempted = 0, sampled_release = 0;
     wb.endpoint_reset_unconfirmed = 1;
-    int release = giulia_wifi_gpio_perst_release(gpio,
-        GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
-    wb_log("ace5-wifi-bringup: PCIe endpoint reset release rc=%d\n", release);
-    if (!release && wb_guard() && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED) {
-        released.rc = giulia_wifi_gpio_snapshot(gpio, &released.pins);
+    rc = wb_endpoint_pin_gate(&before, 0u);
+    if (rc) {
+        wb_log("ace5-wifi-bringup: endpoint pin gate refused held rc=%d; training skipped\n", rc);
+    } else {
+        int release = giulia_wifi_gpio_perst_release(gpio,
+            GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
+        wb_log("ace5-wifi-bringup: PCIe endpoint reset release rc=%d\n", release);
+        rc = GIULIA_LINK_PREREQUISITE;
+        if (!release && wb_guard() && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED) {
+            sampled_release = 1;
+            released.rc = giulia_wifi_gpio_snapshot(gpio, &released.pins);
+            rc = wb_endpoint_pin_gate(&released, 3u);
+            if (rc)
+                wb_log("ace5-wifi-bringup: endpoint pin gate refused released rc=%d; training skipped\n", rc);
+        }
+    }
+    if (!rc) {
         attempted = 1;
         rc = giulia_pcie_link_identify(link, GIULIA_LINK_TRAIN_REQUIRED);
         trained.rc = wb_guard() ? giulia_wifi_gpio_snapshot(gpio, &trained.pins) : GIULIA_WGPIO_PREREQUISITE;
@@ -676,8 +699,6 @@ static int wb_pcie_identify_endpoint(void)
             rc, link->endpoint_id, link->link_status, link->stage, link->failure_stage,
             link->polls, link->debug0, link->debug1, link->elbi_status,
             (link->elbi_status >> 12) & 0x3fu);
-    } else {
-        rc = GIULIA_LINK_PREREQUISITE;
     }
     if (!wb_guard())
         return GIULIA_LINK_PREREQUISITE;
@@ -691,9 +712,9 @@ static int wb_pcie_identify_endpoint(void)
         wb_log("ace5-wifi-bringup: PCIe training samples=%u first=%u last=%u seen_lo=%#x seen_hi=%#x\n",
             link->train_samples, link->train_ltssm_first, link->train_ltssm_last,
             link->train_ltssm_seen[0], link->train_ltssm_seen[1]);
-        wb_log_gpio_sample("released", &released);
-        wb_log_gpio_sample("after-training", &trained);
     }
+    if (sampled_release) wb_log_gpio_sample("released", &released);
+    if (attempted) wb_log_gpio_sample("after-training", &trained);
     if (!held) wb.endpoint_reset_unconfirmed = 0;
     return held ? held : rc;
 }

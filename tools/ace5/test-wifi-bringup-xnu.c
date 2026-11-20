@@ -47,7 +47,10 @@ static uint64_t watchdog_ctl;
 static unsigned watchdog_reads, watchdog_writes, watchdog_cannot_cancel;
 static unsigned cold_reset, mock_reset_response, loader_returns;
 static unsigned root_id_reads;
-static unsigned endpoint_identifies;
+static unsigned endpoint_identifies, endpoint_releases, endpoint_reasserts;
+enum pin_fault { PIN_OK, HELD_READ_FAIL, HELD_EN_LOW, HELD_PERST_HIGH,
+    RELEASE_READ_FAIL, RELEASE_PERST_LOW, RELEASE_EN_LOW, REASSERT_STUCK_HIGH };
+static enum pin_fault injected_pin_fault;
 static char messages[16384];
 static struct { uintptr_t va; vm_size_t size; } allocation[24];
 static void wb_test_barrier(void);
@@ -174,8 +177,14 @@ int giulia_wifi_gpio_snapshot(const struct giulia_wifi_gpio *g, struct giulia_wi
 {
     assert(wb_guard() && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED);
     assert(g->state == GIULIA_WGPIO_ON || g->state == GIULIA_WGPIO_RELEASED);
+    int held = g->state == GIULIA_WGPIO_ON;
+    if ((held && injected_pin_fault == HELD_READ_FAIL) ||
+        (!held && injected_pin_fault == RELEASE_READ_FAIL)) return GIULIA_WGPIO_READBACK;
     *pins = (struct giulia_wifi_gpio_signals){
-        .wlan_en = 3, .perst = *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u)
+        .wlan_en = (held && injected_pin_fault == HELD_EN_LOW) ||
+            (!held && injected_pin_fault == RELEASE_EN_LOW) ? 2u : 3u,
+        .perst = held && injected_pin_fault == HELD_PERST_HIGH ? 1u :
+            *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u)
     };
     return 0;
 }
@@ -183,15 +192,20 @@ int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *g, uint32_t flags)
 {
     assert(flags == (GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
     assert(g->state == GIULIA_WGPIO_ON && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED);
-    *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u) = 2;
+    endpoint_releases++;
+    *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u) =
+        injected_pin_fault == RELEASE_PERST_LOW ? 2u : 3u;
     g->state = GIULIA_WGPIO_RELEASED;
     return 0;
 }
 int giulia_wifi_gpio_perst_assert(struct giulia_wifi_gpio *g, uint32_t flags)
 {
     assert(flags == (GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
-    assert(g->state == GIULIA_WGPIO_RELEASED && wb.endpoint_reset_unconfirmed);
-    *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u) = 0;
+    assert((g->state == GIULIA_WGPIO_RELEASED || g->state == GIULIA_WGPIO_ON) &&
+        wb.endpoint_reset_unconfirmed);
+    endpoint_reasserts++;
+    *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u) =
+        injected_pin_fault == REASSERT_STUCK_HIGH ? 1u : 0u;
     g->state = GIULIA_WGPIO_ON;
     return 0;
 }
@@ -297,7 +311,7 @@ static void setup(void)
     watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
     cold_reset=mock_reset_response=loader_returns=0;
     root_id_reads=0;
-    endpoint_identifies=0;
+    endpoint_identifies=endpoint_releases=endpoint_reasserts=0;injected_pin_fault=PIN_OK;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
     allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=cx_nominal_unavailable=0;
 }
@@ -534,13 +548,36 @@ static void noc_after_phy(void)
     assert(wb_cesta_pre_dbi() == 0 && endpoint_identifies == 1);
     assert(strstr(messages, "endpoint pins held en=0x3 sw=0 wlan_sw=0 perst=0 clkreq="));
     assert(strstr(messages, "PCIe training samples=2 first=0 last=17 seen_lo=0x20001 seen_hi=0"));
-    assert(strstr(messages, "endpoint pins released en=0x3 sw=0 wlan_sw=0 perst=0x2 clkreq="));
-    assert(strstr(messages, "endpoint pins after-training en=0x3 sw=0 wlan_sw=0 perst=0x2 clkreq="));
+    assert(strstr(messages, "endpoint pins released en=0x3 sw=0 wlan_sw=0 perst=0x3 clkreq="));
+    assert(strstr(messages, "endpoint pins after-training en=0x3 sw=0 wlan_sw=0 perst=0x3 clkreq="));
     assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
     assert(wb.bringup.link.endpoint_id == GIULIA_PCIE_LINK_EP_ID);
     wb.stock_perf = 0;
     perf[0xc / 4] = perf[0x4 / 4] = GIULIA_PCIE_BOOT_PERF;
     assert(wb_cesta_pre_dbi() == 0 && endpoint_identifies == 2);
+    /* A low input with a high output latch is not a released endpoint.
+     * Neither snapshot failures nor an unreliable WLAN_EN may start LTSSM. */
+    static const struct { enum pin_fault fault; unsigned released; int error; } refusals[] = {
+        {HELD_READ_FAIL, 0, GIULIA_LINK_READBACK}, {HELD_EN_LOW, 0, GIULIA_LINK_PREREQUISITE},
+        {HELD_PERST_HIGH, 0, GIULIA_LINK_PREREQUISITE},
+        {RELEASE_READ_FAIL, 1, GIULIA_LINK_READBACK}, {RELEASE_PERST_LOW, 1, GIULIA_LINK_PREREQUISITE},
+        {RELEASE_EN_LOW, 1, GIULIA_LINK_PREREQUISITE}
+    };
+    for (unsigned i = 0; i < sizeof(refusals)/sizeof(refusals[0]); i++) {
+        unsigned releases = endpoint_releases, reasserts = endpoint_reasserts;
+        messages[0] = 0;
+        injected_pin_fault = refusals[i].fault;
+        assert(wb_cesta_pre_dbi() == refusals[i].error && endpoint_identifies == 2);
+        assert(strstr(messages, refusals[i].released ? "pin gate refused released" : "pin gate refused held"));
+        assert(!strstr(messages, "PCIe endpoint identify") && !strstr(messages, "PCIe training samples"));
+        assert(endpoint_releases == releases + refusals[i].released && endpoint_reasserts == reasserts + 1);
+        assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
+    }
+    injected_pin_fault = REASSERT_STUCK_HIGH;
+    assert(wb_cesta_pre_dbi() == GIULIA_WGPIO_READBACK && endpoint_identifies == 3);
+    assert(wb.endpoint_reset_unconfirmed && perst[1] == 1);
+    /* End this synthetic stuck-pin scenario before testing unrelated leases. */
+    perst[1] = 0; wb.endpoint_reset_unconfirmed = 0; injected_pin_fault = PIN_OK;
     wb.bringup.link.state = GIULIA_LINK_PARF_READY;
     wb.bringup.pipe_checked = 0;
     wb.bringup.supply.power.state = GIULIA_POWER_READY;
