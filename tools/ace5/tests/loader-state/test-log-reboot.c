@@ -45,6 +45,18 @@ static void psci_call(uint64_t n, uint64_t a, uint64_t b, uint64_t c)
 int main(void)
 {
     char nonce[17];
+#define ARGS "cpus=1 bootcpu=1 ace5_wifi_bringup=1 ace5_wifi_bringup_stage=4 ace5_wifi_sm_diag=5 ace5_wifi_cold_reset=1 ace5_wifi_log_reboot=1"
+    assert(log_reboot_args_unambiguous(ARGS " loader_return_after=60", 60));
+    assert(log_reboot_args_unambiguous(ARGS " loader_return_after=120", 120));
+    assert(!log_reboot_args_unambiguous(ARGS " loader_return_after=120xxx", 120));
+    assert(!log_reboot_args_unambiguous(ARGS " loader_return_after=60", 120));
+    assert(!log_reboot_args_unambiguous(ARGS " loader_return_after=75 cpus=4", 75));
+    assert(!log_reboot_args_unambiguous(ARGS " loader_return_after=75 ace5_wifi_sm_diag=7", 75));
+    assert(!log_reboot_args_unambiguous(ARGS " loader_return_after=75 cpumask=0xf", 75));
+    assert(!log_reboot_args_unambiguous(ARGS " loader_return_after=75 hv_wdt_pet=1", 75));
+    assert(!log_reboot_args_unambiguous(ARGS " loader_return_after=75 hv_wdt_pet", 75));
+    assert(!log_reboot_args_unambiguous(ARGS " loader_return_after=75	foo=1", 75));
+    assert(!log_reboot_args_unambiguous(ARGS, 75));
     assert(log_reboot_parse_nonce("x=1 ace5_run_nonce=a21c4a5f00b81234 end", nonce));
     assert(!strcmp(nonce, "a21c4a5f00b81234"));
     assert(!log_reboot_parse_nonce("ace5_run_nonce=a21", nonce));

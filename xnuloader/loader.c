@@ -2663,6 +2663,48 @@ log_reboot_parse_nonce(const char *cmdline, char nonce[17])
     return found;
 }
 
+/* XNU takes the first matching option, while different loader parsers may
+ * select the last one. Do not allow ambiguous ownership, timing or modes. */
+static int
+log_reboot_args_unambiguous(const char *line, uint64_t budget)
+{
+    const char *keys[] = {"cpus", "bootcpu", "loader_return_after", "ace5_wifi_bringup",
+        "ace5_wifi_bringup_stage", "ace5_wifi_sm_diag", "ace5_wifi_cold_reset",
+        "ace5_wifi_log_reboot"};
+    unsigned seen = 0;
+    for (const char *p = line; *p;) {
+        if (*p == ' ') { p++; continue; }
+        const char *end = p;
+        while (*end && *end != ' ') {
+            if ((unsigned char)*end < 0x21 || (unsigned char)*end > 0x7e) return 0;
+            end++;
+        }
+        const char *deny[] = {"cpumask", "hv_wdt_pet", "ace5_wifi_watchdog", "ace5_wifi_crm_all_states"};
+        for (unsigned i = 0; i < sizeof(deny)/sizeof(deny[0]); i++) {
+            const char *q = p, *k = deny[i];
+            while (q != end && *k && *q == *k) { q++; k++; }
+            if (!*k && (q == end || *q == '=')) return 0;
+        }
+        for (unsigned i = 0; i < sizeof(keys)/sizeof(keys[0]); i++) {
+            const char *q = p, *k = keys[i];
+            while (q != end && *k && *q == *k) { q++; k++; }
+            if (*k || (q != end && *q != '=')) continue;
+            if (q == end || (seen & (1u << i))) return 0;
+            seen |= 1u << i;
+            if (i == 2) {
+                uint64_t v = 0;
+                for (++q; q != end; q++) {
+                    if (*q < '0' || *q > '9' || v > 120) return 0;
+                    v = v * 10 + (unsigned)(*q - '0');
+                }
+                if (v != budget || v < 60 || v > 120) return 0;
+            }
+        }
+        p = end;
+    }
+    return seen == (1u << (sizeof(keys)/sizeof(keys[0]))) - 1u;
+}
+
 /* Runs with firmware interrupts masked. Only PSCI/SMC and cached RAM are used.
  * Legacy mode cancels on assembly return. Log-reboot mode retains the timer through storage. */
 static void
@@ -3245,8 +3287,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		}
 		if (n < BOOT_LINE_LENGTH - 1) ba->commandLine[n++] = ' ';
 	}
-	for (const char *c = pi.cmdline; *c && n < BOOT_LINE_LENGTH - 1; c++) {
-		ba->commandLine[n++] = *c;
+	const char *payload_arg = pi.cmdline;
+	for (; *payload_arg && n < BOOT_LINE_LENGTH - 1; payload_arg++) {
+		ba->commandLine[n++] = *payload_arg;
 	}
 
 	/* --- device tree ---------------------------------------------------- */
@@ -3303,7 +3346,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
     int log_reboot_requested = checkpoint != CHECKPOINT_SELFTEST &&
         quiet_flag_present(pi.cmdline, "ace5_wifi_log_reboot=1");
     if (log_reboot_requested &&
-        (checkpoint != 0 || !firmware_quiet.reset_capability ||
+        (checkpoint != 0 || PLAT != &platform_giulia || *payload_arg ||
+        !firmware_quiet.reset_capability || !log_reboot_args_unambiguous(pi.cmdline, kernel_budget) ||
         kernel_mpidr != (1ULL << PLAT->core_shift) ||
         !quiet_flag_present(pi.cmdline, "cpus=1") ||
         !(quiet_flag_present(pi.cmdline, "ace5_wifi_sm_diag=5") ||
@@ -3995,7 +4039,7 @@ fb_command(char *cmd)
 #endif
 #if defined(HACKIOS_GIULIA) && !defined(HACKIOS_DIAGNOSTIC)
             } else if (str_eq(var, "wifi-log-reboot")) {
-                fb_reply("OKAY", "1");
+                fb_reply("OKAY", PLAT == &platform_giulia ? "1" : "0");
 #endif
 			} else if (str_eq(var, "crm-reset-required")) {
 				fb_reply("OKAY",crm_reset_required ? "yes" : "no");
