@@ -322,7 +322,7 @@ static int hc_log_skips;                /* logs not written this run (said twice
 static void hc_print_state(const char *when);
 static void hc_take_back(const char *when);
 
-static void
+static int
 write_logs(const char *klog, uint64_t klog_len)
 {
 	efi_block_io *bio = find_log_partition();
@@ -337,11 +337,11 @@ write_logs(const char *klog, uint64_t klog_len)
 			}
 			print("\n== END OF LOG ==\n");
 		}
-		return;
+		return 0;
 	}
 	uint64_t bs = bio->media->block_size;
 	uint64_t len = (staged_len + 1 + bs - 1) / bs * bs;
-	efi_status ws, rs = 0;
+	efi_status ws, fs = 0, rs = 0;
 	int same = 0;
 
 	/* only through UEFI's own transfer list (see hc_take_back) */
@@ -351,12 +351,12 @@ write_logs(const char *klog, uint64_t klog_len)
 			print("log: NOT WRITTEN to logdump: UEFI's transfer list is not the one in the controller\n");
 		}
 		compose_logs(klog, klog_len);
-		return;
+		return 0;
 	}
 	ws = bio->write_blocks(bio, bio->media->media_id, 0, len, out_buf);
 
 	if (!EFI_ERROR(ws)) {
-		bio->flush_blocks(bio);
+		fs = bio->flush_blocks(bio);
 		/*
 		 * And read back: that the log is in the partition is what a run of the kernel's own UFS
 		 * driver must leave possible (the controller is shared with this one). The line goes into
@@ -370,6 +370,7 @@ write_logs(const char *klog, uint64_t klog_len)
 	print("log: %d bytes written to logdump (%x), read back %s (%x)\n", len, ws,
 	    EFI_ERROR(ws) ? "not tried" : same ? "the same" : "DIFFERENT", rs);
 	compose_logs(klog, klog_len);
+	return same && !EFI_ERROR(fs);
 }
 
 static void
@@ -2586,9 +2587,8 @@ quiet_watchdog_disarm(void)
     return (ctl & GIULIA_WDT_ENABLED) ? -1 : 0;
 }
 
-/* The narrow timer is acquired once, with the original verified SMC sequence.
- * While owned, update both deadlines without disabling or re-enabling it.
- * Lengthen bite first or shorten bark first, preserving bark < bite. */
+/* Acquire the long startup timer once while disabled. Only the XNU handshake
+ * shortens it in place; the owned watchdog remains enabled through storage. */
 static inline void log_reboot_yield(void) { __asm__ volatile("yield"); }
 
 static void __attribute__((noreturn))
@@ -2600,15 +2600,12 @@ log_reboot_force_reset(void)
 }
 
 static void
-log_reboot_retime(int startup)
+log_reboot_retime(void)
 {
     uint64_t ctl = 0;
-    uint64_t bark = startup ? 55000u : GIULIA_WDT_BARK_MS;
-    uint64_t bite = startup ? 60000u : GIULIA_WDT_BITE_MS;
-    if (smc_call(GIULIA_WDT_SET_TIME, startup ? GIULIA_WDT_NO_CHANGE : bark,
-            startup ? bite : GIULIA_WDT_NO_CHANGE, NULL, NULL) ||
-        smc_call(GIULIA_WDT_SET_TIME, startup ? bark : GIULIA_WDT_NO_CHANGE,
-            startup ? GIULIA_WDT_NO_CHANGE : bite, NULL, NULL) ||
+    /* Lower bark first, while bite still has its longer startup interval. */
+    if (smc_call(GIULIA_WDT_SET_TIME, GIULIA_WDT_BARK_MS, GIULIA_WDT_NO_CHANGE, NULL, NULL) ||
+        smc_call(GIULIA_WDT_SET_TIME, GIULIA_WDT_NO_CHANGE, GIULIA_WDT_BITE_MS, NULL, NULL) ||
         smc_call(GIULIA_WDT_PET, 0, 0, NULL, NULL) ||
         smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
         (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED)) != GIULIA_WDT_ENABLED)
@@ -2618,16 +2615,35 @@ log_reboot_retime(int startup)
 static int
 log_reboot_arm(void)
 {
-    uint64_t ctl = 0, detail;
+    uint64_t ctl = 0, detail = 0;
     if (!READ_SYSREG(CNTFRQ_EL0) || smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
         (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED))) return 0;
-    if (giulia_wdt_configure(smc_call, &detail)) {
-        if (quiet_watchdog_disarm()) log_reboot_force_reset();
+    /* Still disabled: put the long bite in place before increasing bark. */
+    if (smc_call(GIULIA_WDT_SET_TIME, GIULIA_WDT_NO_CHANGE, 60000u, NULL, NULL) ||
+        smc_call(GIULIA_WDT_SET_TIME, 55000u, GIULIA_WDT_NO_CHANGE, NULL, NULL))
+        return 0;
+    if (giulia_wdt_enable_checked(smc_call, &detail, &log_reboot_owned)) {
+        if (log_reboot_owned) log_reboot_force_reset();
         return 0;
     }
-    log_reboot_owned = 1;
-    log_reboot_retime(1);
     print("log-reboot: startup watchdog armed\n");
+    return 1;
+}
+
+/* Only before loader_save_ctx/cache cleaning and CPU_ON: UEFI still owns
+ * storage. No storage access is added to the firmware-quiet handshake. */
+static int
+log_reboot_preflight(const char *nonce)
+{
+    if (!log_reboot_arm()) {
+        /* Never disarm a pre-existing watchdog or spin relying on one we
+         * failed to acquire. If PSCI rejects reset, return to loader. */
+        print("log-reboot: pre-arm refused id=%s\n", nonce);
+        psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+        return 0;
+    }
+    print("log-reboot: pre-arm verified id=%s\n", nonce);
+    if (!write_logs(NULL, 0)) log_reboot_force_reset();
     return 1;
 }
 
@@ -2713,7 +2729,7 @@ quiet_reset_on_request(uint64_t base)
     const uint64_t done = (uint64_t)(uintptr_t)&other_cpu_done;
     uint64_t ctl = 0, detail;
     if (log_reboot_owned) {
-        log_reboot_retime(0);
+        log_reboot_retime();
     } else {
         if (!READ_SYSREG(CNTFRQ_EL0) ||
             smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
@@ -3585,11 +3601,17 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	if (kernel_mpidr != this_mpidr) {
 		print("the kernel will run on core %x (this is core %x)\n", kernel_mpidr, this_mpidr);
 	}
+#ifdef HACKIOS_GIULIA
+    if (log_reboot_requested) print("log-reboot: pre-arm pending id=%s\n", log_reboot_nonce);
+#endif
 	print("jumping to %x\n", entry_va + slide);
 	flush_log();
 	/* From here on the kernel feeds the watchdog (boot-arg hv_wdt_pet, see loader_return.c in XNU). */
 	wdt_set_ms(60000);
 
+#ifdef HACKIOS_GIULIA
+    if (log_reboot_requested && !log_reboot_preflight(log_reboot_nonce)) return 0;
+#endif
 	/* --- hand off (UEFI is left resident, see loader_save_ctx) ------------ */
 	if (loader_save_ctx() == 0) {
 		/*
@@ -3619,12 +3641,6 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 			jump_to_kernel((uint64_t)(uintptr_t)&loader_return_stub, 0);
 		}
 		if (kernel_mpidr != this_mpidr) {
-#ifdef HACKIOS_GIULIA
-            if (log_reboot_requested && !log_reboot_arm()) {
-                print("log-reboot: startup watchdog unavailable\n");
-                return 0;
-            }
-#endif
 			int64_t status = run_on_other_cpu(kernel_mpidr, entry_va + slide, ba_pa, kernel_live, slide, kernel_budget);
 
 			wdt_set_ms(WDT_BITE_MS);

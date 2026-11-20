@@ -81,6 +81,15 @@ def main() -> int:
             raise ValueError('CRM retained-lifetime gate must precede all command dispatch')
         if '\twhile (status == 0) {\n        if (observer_firmware_quiet(started, budget, &last_pet)) continue;' not in text:
             raise ValueError('firmware quiet must gate every observer iteration before firmware services')
+        # C execution checks the real preflight. Check its integration as
+        # well: its durable write must precede cache cleaning and CPU_ON.
+        handoff = section(text, 'print("jumping to %x', '/* --- the kernel came back', source)
+        markers = ['flush_log();', 'log_reboot_preflight(log_reboot_nonce)',
+                   'if (loader_save_ctx() == 0)', 'BS->get_memory_map',
+                   'flush_dcache(phys_base, top)', 'run_on_other_cpu(kernel_mpidr']
+        indices = [handoff.index(m) for m in markers]
+        if indices != sorted(indices) or text.count(markers[1]) != 1:
+            raise ValueError('pre-arm checkpoint must precede cache clean/CPU1 and follow the pending record')
         log_guard = section(text, 'static void\nlog_reboot_retime(',
                             '#endif\n\n#if defined(HACKIOS_GIULIA) && defined(HACKIOS_DIAGNOSTIC)\n#define GIULIA_WDT_FALLBACK_SECONDS', source)
         (build / 'log-reboot.inc').write_text(log_guard, encoding='utf8')
