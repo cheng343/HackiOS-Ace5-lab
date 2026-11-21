@@ -13,7 +13,10 @@
 #define GIULIA_PCIE_LINK_DBI_PA 0x60000000u
 #define GIULIA_PCIE_LINK_ATU_PA 0x60001000u
 #define GIULIA_PCIE_LINK_CFG_PA 0x60100000u
+/* Entire board CPU-side resource, used for host mapping. A single directly
+ * attached BDF exposes only one 4 KiB PCI configuration function aperture. */
 #define GIULIA_PCIE_LINK_CFG_SIZE 0x00100000u
+#define GIULIA_PCIE_LINK_CFG0_SIZE 0x00001000u
 #define GIULIA_PCIE_LINK_BAR0_PA 0x60400000u
 #define GIULIA_PCIE_LINK_BAR0_SIZE 0x00200000u
 #define GIULIA_PCIE_LINK_ROOT_ID 0x011317cbu

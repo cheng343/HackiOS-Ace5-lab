@@ -716,7 +716,7 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     s->stage = GIULIA_LINK_STAGE_CONFIG_ATU;
     s->atu_touched = 1;
     if (!program_atu(s, 0, GIULIA_PCIE_LINK_CFG_PA, 0x01000000u,
-        GIULIA_PCIE_LINK_CFG_SIZE, 4)) return fail(s, GIULIA_LINK_READBACK);
+        GIULIA_PCIE_LINK_CFG0_SIZE, 4)) return fail(s, GIULIA_LINK_READBACK);
     s->config_atu_enabled = 1;
     s->stage = GIULIA_LINK_STAGE_ENDPOINT;
     /* Allow the endpoint's reset/configuration readiness interval. */
@@ -728,6 +728,20 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
             return fail(s, GIULIA_LINK_ENDPOINT);
         if (i == 100) return fail(s, GIULIA_LINK_ENDPOINT);
         delay(s, 1000);
+    }
+    /* A successful completion proves that the ID was observed, not that
+     * the link is still eligible at publication. Sample only the same RC
+     * gates again; do not read the endpoint twice. Keep the observed ID
+     * even when the lease has changed. No guard prevents later link loss. */
+    if (!cfg_ok(s)) {
+        /* cfg_ok short-circuits after LNKSTA and then profile: classify only
+         * reached observations, never an old/non-sampled ELBI result. */
+        if (s->link_status == UINT16_MAX) return fail(s, GIULIA_LINK_READBACK);
+        if (!(s->link_status & DLLLA) || (s->link_status & LINK_TRAINING))
+            return fail(s, GIULIA_LINK_DOWN);
+        if (!profile_matches(s)) return fail(s, GIULIA_LINK_PROFILE);
+        return fail(s, s->vendor_training && s->elbi_status == UINT32_MAX ?
+            GIULIA_LINK_READBACK : GIULIA_LINK_DOWN);
     }
     s->state = GIULIA_LINK_IDENTIFIED;
     return GIULIA_LINK_OK;
@@ -781,7 +795,7 @@ static int atu_matches(struct giulia_pcie_link *s, unsigned region,
 static int config_window_matches(struct giulia_pcie_link *s)
 {
     return s->config_atu_enabled && atu_matches(s, 0, GIULIA_PCIE_LINK_CFG_PA,
-        0x01000000u, GIULIA_PCIE_LINK_CFG_SIZE, 4);
+        0x01000000u, GIULIA_PCIE_LINK_CFG0_SIZE, 4);
 }
 
 /* Read-only admission for CPU decoding. An enabled DMA/IRQ source is a

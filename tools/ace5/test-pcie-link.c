@@ -7,7 +7,11 @@
 #include "giulia_pcie_link.h"
 
 #define BIT(n) (1u << (n))
+enum post_id_event { ID_STABLE, ID_DLL_LOST, ID_RETRAIN, ID_WIDTH_DRIFT,
+    ID_SPEED_DRIFT, ID_XMLH_LOST, ID_LNKSTA_INVALID, ID_ELBI_INVALID };
 struct fake {
+    enum post_id_event post_id;
+    unsigned exact_id_completions;
     uint32_t regs[4][0x3000 / 4];
     uint32_t original[4][0x3000 / 4];
     unsigned reads, writes, cfg_accesses, bar_probes, barriers, lane_writes, lnkcap_writes;
@@ -128,6 +132,22 @@ static uint32_t read32(void *p, unsigned r, uint32_t o)
     if (r == GIULIA_LINK_CFG && o == 0x10 && v == 0xffffffffu)
         v = f->bar_mask;
     if (fault_read(f, r, o)) v = 0xffffffffu;
+    /* Change only RC observations, AFTER obtaining the actual matching CFG
+     * completion. A CRS or unrelated configuration transaction cannot trigger it. */
+    if (r == GIULIA_LINK_CFG && !o && v == GIULIA_PCIE_LINK_EP_ID) {
+        f->exact_id_completions++;
+        switch (f->post_id) {
+        case ID_STABLE: break;
+        case ID_DLL_LOST: f->lost_link = 1; break;
+        case ID_RETRAIN: f->training_on_read = f->link_reads + 1; break;
+        case ID_WIDTH_DRIFT: f->negotiated_profile = 0x21; break;
+        case ID_SPEED_DRIFT: f->negotiated_profile = 0x12; break;
+        case ID_XMLH_LOST: f->regs[GIULIA_LINK_DBI][0xf28 / 4] = 0; break;
+        case ID_ELBI_INVALID: f->regs[GIULIA_LINK_DBI][0xf28 / 4] = UINT32_MAX; break;
+        case ID_LNKSTA_INVALID:
+            f->fault_on = 1; f->fault_region = GIULIA_LINK_DBI; f->fault_offset = 0x82; break;
+        }
+    }
     after_cfg(f, r);
     return v;
 }
@@ -372,7 +392,10 @@ static void test_success(void)
     assert(f.regs[GIULIA_LINK_ATU][0] == 4);
     assert(f.regs[GIULIA_LINK_ATU][0x14 / 4] == 0x01000000u);
     assert(f.regs[GIULIA_LINK_ATU][0x08 / 4] == 0x60100000u);
-    assert(f.regs[GIULIA_LINK_ATU][0x10 / 4] == 0x601fffffu);
+    /* The CPU resource is 1 MiB; only one BDF may be routed through CFG0.
+     * No change to the two MiB BAR0 MEM region below. */
+    assert(GIULIA_PCIE_LINK_CFG_SIZE == 0x00100000u && GIULIA_PCIE_LINK_CFG0_SIZE == 4096u);
+    assert(f.regs[GIULIA_LINK_ATU][0x10 / 4] == 0x60100fffu);
     assert(f.regs[GIULIA_LINK_ATU][0x200 / 4] == 0);
     assert(f.regs[GIULIA_LINK_ATU][0x214 / 4] == 0x60400000u);
     assert(f.regs[GIULIA_LINK_ATU][0x210 / 4] == 0x605fffffu);
@@ -632,6 +655,12 @@ static void test_memory_guard_failures(void)
 {
     struct fake f; struct giulia_pcie_link s;
     unsigned writes, accesses;
+    ready_for_memory(&f, &s);
+    f.regs[GIULIA_LINK_ATU][0x10 / 4] = 0x601fffffu; /* legacy broad CFG0 */
+    writes = f.writes; accesses = f.cfg_accesses;
+    assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_READBACK);
+    assert(f.writes == writes && f.cfg_accesses == accesses && !s.memory_owned && !s.memory_enabled);
+    stop(&f, &s);
     ready_for_memory(&f, &s);
     f.regs[GIULIA_LINK_ATU][0x14 / 4] ^= 0x01000000u;
     writes = f.writes; accesses = f.cfg_accesses;
@@ -956,6 +985,51 @@ static void test_native_width(void)
     }
 }
 
+static void test_id_publication(void)
+{
+    struct fake f; struct giulia_pcie_link s;
+    const uint32_t flags = GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID |
+        GIULIA_LINK_VENDOR_TRAINING | GIULIA_LINK_NATIVE_WIDTH | GIULIA_LINK_NATIVE_X1_ID |
+        GIULIA_LINK_STOCK_TRAIN_LANES;
+    const struct { enum post_id_event event; int rc; } cases[] = {
+        {ID_STABLE, GIULIA_LINK_OK}, {ID_DLL_LOST, GIULIA_LINK_DOWN},
+        {ID_RETRAIN, GIULIA_LINK_DOWN}, {ID_WIDTH_DRIFT, GIULIA_LINK_PROFILE},
+        {ID_SPEED_DRIFT, GIULIA_LINK_PROFILE}, {ID_XMLH_LOST, GIULIA_LINK_DOWN},
+        {ID_LNKSTA_INVALID, GIULIA_LINK_READBACK}, {ID_ELBI_INVALID, GIULIA_LINK_READBACK}
+    };
+    for (unsigned n = 0; n < sizeof(cases)/sizeof(cases[0]); n++) {
+        for (unsigned retries = 0; retries <= 2; retries += 2) {
+            init(&f,&s); struct giulia_pcie_link_io io = io_for(&f);
+            f.regs[GIULIA_LINK_DBI][0x7c / 4] = 0x22c23u;
+            f.regs[GIULIA_LINK_DBI][0x710 / 4] = 3u << 16;
+            f.regs[GIULIA_LINK_DBI][0x80c / 4] = 2u << 8;
+            f.regs[GIULIA_LINK_DBI][0xf28 / 4] = BIT(10);
+            f.negotiated_profile = 0x11; f.link_after = 1; /* Gen1 x1 on x2-capable port */
+            f.crs_reads = retries; f.post_id = cases[n].event;
+            assert(!giulia_pcie_link_prepare_parf(&s,GIULIA_LINK_PARF_REQUIRED,&io));
+            assert(!giulia_pcie_link_prepare(&s,flags));
+            assert(giulia_pcie_link_identify(&s,GIULIA_LINK_TRAIN_REQUIRED) == cases[n].rc);
+            /* One real ID even with prior CRS; the publication check is root-only. */
+            assert(s.endpoint_id == GIULIA_PCIE_LINK_EP_ID && f.exact_id_completions == 1 &&
+                f.cfg_accesses == retries+1 && !f.crs_reads && !f.bar_probes);
+            assert(!s.memory_enabled && !s.memory_owned && !f.regs[GIULIA_LINK_ATU][0x204/4]);
+            assert(!memcmp(f.regs[GIULIA_LINK_CFG],f.original[GIULIA_LINK_CFG],sizeof(f.regs[0])));
+            assert(s.id_lanes == 1 && s.train_lanes_verified);
+            if (cases[n].rc) {
+                assert(s.state == GIULIA_LINK_FAULT && s.failure_stage == GIULIA_LINK_STAGE_ENDPOINT &&
+                    s.error == cases[n].rc && !s.config_atu_enabled);
+            } else {
+                assert(s.state == GIULIA_LINK_IDENTIFIED && s.config_atu_enabled);
+                assert(f.regs[GIULIA_LINK_ATU][0x14/4] == 0x01000000u &&
+                    f.regs[GIULIA_LINK_ATU][0x10/4] == 0x60100fffu);
+            }
+            f.fault_on = 0; /* allow an independent owner to restore the mock */
+            assert(!quiesce_then_stop(&f,&s));
+        }
+    }
+    puts("PASS: exact endpoint ID completion requires a final live Gen1/profile/XMLH sample");
+}
+
 static void test_native_x1_id(void)
 {
     struct fake f;
@@ -1205,6 +1279,7 @@ int main(void)
     test_retraining();
     test_native_width();
     test_native_x1_id();
+    test_id_publication();
     test_stock_train_lanes();
     test_preserve_speed_cap();
     test_parf_drift_before_dbi();
