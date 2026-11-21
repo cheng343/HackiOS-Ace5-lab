@@ -75,5 +75,8 @@ int giulia_kiwi_read_soc_info(const struct giulia_kiwi_bar_io *io,
 const char *giulia_kiwi_fw_name(const struct giulia_kiwi_soc_info *info)
 {
     if (!info) return 0;
-    return info->major == 2u ? "amss20.bin" : "amss.bin";
+    /* OnePlus CNSS2, pci.c: cnss_get_mhi_soc_info masks major with 0xf
+     * before cnss_pci_update_fw_name selects the KIWI v2 filename.
+     * Keep the actual register byte in info->major for hardware reporting. */
+    return (info->major & 0x0fu) == 2u ? "amss20.bin" : "amss.bin";
 }

@@ -72,9 +72,24 @@ int main(void)
     assert(giulia_kiwi_read_soc_info(&io, &info) == GIULIA_KIWI_OK);
     assert(strcmp(giulia_kiwi_fw_name(&info), "amss.bin") == 0);
 
+    /* Every upper nibble carries the same sixteen firmware-selection cases.
+     * Exercise the public BAR decode and retain the unmodified raw register. */
+    for (unsigned upper = 0; upper < 16; ++upper) {
+        for (unsigned revision = 0; revision < 16; ++revision) {
+            unsigned major = (upper << 4) | revision;
+            b.low_word = 0x41100001u | ((uint32_t)major << 8);
+            assert(giulia_kiwi_read_soc_info(&io, &info) == GIULIA_KIWI_OK);
+            assert(info.raw == b.low_word && info.major == major);
+            assert(strcmp(giulia_kiwi_fw_name(&info),
+                revision == 2 ? "amss20.bin" : "amss.bin") == 0);
+        }
+    }
+    assert(giulia_kiwi_fw_name(NULL) == NULL);
+
     b.low_word = 0xffffffffu;
     assert(giulia_kiwi_read_soc_info(&io, &info) == GIULIA_KIWI_READBACK);
 
+    puts("PASS: KIWI firmware revision selection, all 256 raw major bytes");
     puts("KIWI BAR0 windowed reg & SoC info tests passed");
     return 0;
 }

@@ -41,7 +41,8 @@ int giulia_kiwi_reg_read(const struct giulia_kiwi_bar_io *io, uint32_t soc_addr,
 int giulia_kiwi_reg_write(const struct giulia_kiwi_bar_io *io, uint32_t soc_addr,
     uint32_t value);
 
-/* Read BAR0 + 0x224 SoC identity and pick amss20.bin (major==2) vs amss.bin. */
+/* Read BAR0+0x224 without altering its raw major byte; the firmware selector
+ * uses only the low nibble of that byte (effective revision 2: amss20.bin). */
 int giulia_kiwi_read_soc_info(const struct giulia_kiwi_bar_io *io,
     struct giulia_kiwi_soc_info *out);
 const char *giulia_kiwi_fw_name(const struct giulia_kiwi_soc_info *info);
