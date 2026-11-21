@@ -49,6 +49,9 @@ def main():
         (drivers/'giulia_mhi_snapshot.c', root/'tools/ace5/test-mhi-snapshot.c'),
         (drivers/'giulia_mhi_firmware.c', root/'tools/ace5/test-mhi-firmware.c'),
         (drivers/'giulia_mhi_firmware.c', drivers/'giulia_mhi_staging.c', root/'tools/ace5/test-mhi-staging.c'),
+        (drivers/'giulia_mhi_s1.c', root/'tools/ace5/test-giulia-mhi-s1.c'),
+        (root/'tools/ace5/test-mhi-wired.c',),
+        (drivers/'giulia_mhi_s1.c', drivers/'giulia_mhi_private.c', root/'tools/ace5/test-mhi-private.c'),
         (drivers/'giulia_aop.c', drivers/'giulia_pcie_noc.c', drivers/'giulia_bcm.c', drivers/'giulia_arc.c', drivers/'giulia_arc_votes.c',
          drivers/'giulia_crm.c', root/'tools/ace5/test-wifi-probe.c'),
     ]
