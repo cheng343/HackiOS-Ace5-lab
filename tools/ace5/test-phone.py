@@ -103,6 +103,25 @@ class PhoneTests(unittest.TestCase):
             check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True, native_width=True)
         check(True, 4, endpoint.replace('lnk=0x2011', 'lnk=0x2021'), 'yes', self.log,
               sm_diag=7, cold_reset=True, native_width=True)
+        hold = 'ace5-wifi-bringup: pre-PHY clock hold before=0x361c after=0x365e rc=0\n'
+        armed = endpoint + 'ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access\n'
+        def verify_hold(data, **override):
+            kwargs = dict(sm_diag=7, cold_reset=True, pcs_first=True, pre_phy_clocks=True) | override
+            check(True, 4, data, 'yes', self.log, **kwargs)
+        verify_hold(armed + hold + hold)
+        for extra in ('', hold.replace('365e', '361e'), hold.replace('365e', '365f'),
+                      hold.replace('rc=0', 'rc=-1'), hold.replace('rc=0', 'rc=00'),
+                      hold.replace('361c', 'ffffffbd').replace('365e', 'ffffffff'),
+                      hold + 'ace5-wifi-bringup: pre-PHY clock hold refused\n',
+                      hold + hold.replace('361c','365e')):
+            with self.subTest(hold=extra), self.assertRaisesRegex(RuntimeError, 'clock hold readback'):
+                verify_hold(armed + extra)
+        with self.assertRaisesRegex(RuntimeError, 'clock hold readback'):
+            verify_hold(armed + hold, pcs_first=False)
+        with self.assertRaisesRegex(RuntimeError, 'PCS-before-PIPE'):
+            verify_hold(endpoint + hold)
+        with self.assertRaisesRegex(RuntimeError, 'WCN7850 identity or reset'):
+            verify_hold(armed.replace('0x110717cb', '0xffffffff') + hold)
         ep2 = endpoint.replace('lnk=0x2011', 'lnk=0x2021')
         marker = 'ace5-wifi-bringup: stock train lanes before=2 after=1\n'
         def verify_ep(data):
@@ -237,6 +256,29 @@ class PhoneTests(unittest.TestCase):
         n = 607 - len('debug=0x8 rd=md0 ')
         limit('x' * n)
         with self.assertRaisesRegex(RuntimeError, '608-byte'): limit('x' * (n+1))
+
+    def test_pre_phy_clocks_isolated_and_optional(self):
+        fn = self.namespace['ace5_wifi_bringup_arguments']
+        table, profile = self.directory / 'pdc', self.directory / 'sm'
+        table.write_bytes(bytes(508))
+        profile.write_bytes(bytes(80))
+        args = dict(enabled=True, table=table, bootcpu=1, kernel='kernel', seconds=60,
+                    other_hardware=False, live_log=False, stage=4, sm_diag=7,
+                    sm_profile=profile, cold_reset=True, pcs_first=True)
+        with self.assertRaisesRegex(RuntimeError, 'CESTA profile'):
+            fn(**args, pre_phy_clocks=True)
+        digest = Mock()
+        digest.sha256.return_value.hexdigest.return_value = 'b3ed154a6cabba921d99cf703d70255e2239977683153992c4a8f1cc5211d90e'
+        self.namespace['hashlib'] = digest
+        base = fn(**args)
+        self.assertNotIn('pre_phy', base)
+        self.assertEqual(fn(**args, pre_phy_clocks=True), base + ' ace5_wifi_pre_phy_clks=1')
+        for override in (dict(enabled=False), dict(pcs_first=False), dict(sm_diag=5),
+                         dict(stage=3), dict(sm_profile=None), dict(cold_reset=False), dict(bootcpu=0),
+                         dict(seconds=59), dict(seconds=121), dict(other_hardware=True),
+                         dict(live_log=True), dict(watchdog=1), dict(crm_all_states=True)):
+            with self.subTest(override=override), self.assertRaises(RuntimeError):
+                fn(**(args | override), pre_phy_clocks=True)
 
     def test_stock_perf_requires_rc0_three_row_profile(self):
         import struct

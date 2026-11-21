@@ -305,7 +305,7 @@ def ace5_pdc_test_arguments(enabled, table, bootcpu, kernel, seconds, other_hard
 def check_stock_train_cmdline(commandline):
     # Giulia kernel loader prepends these two words for this CPU1 RAM-disk profile.
     if len(('debug=0x8 rd=md0 ' + commandline).encode('utf-8')) + 1 > 608:
-        raise RuntimeError('Stock train-lanes boot arguments exceed the 608-byte XNU command line')
+        raise RuntimeError('Guarded PCIe boot arguments exceed the 608-byte XNU command line')
 
 
 def check_stock_startup_perf(nodes):
@@ -320,9 +320,9 @@ def check_stock_startup_perf(nodes):
 def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log,
                                stage=0, crm_all_states=False, sm_diag=0, sm_profile=None,
                                watchdog=0, cold_reset=False, pcs_first=False, native_width=False, stock_perf_dtb=None,
-                               log_reboot_nonce=None, stock_train_lanes=False):
+                               log_reboot_nonce=None, stock_train_lanes=False, pre_phy_clocks=False):
     if not enabled:
-        if stage or crm_all_states or sm_diag or sm_profile or watchdog or cold_reset or pcs_first or native_width or stock_perf_dtb or log_reboot_nonce is not None or stock_train_lanes:
+        if stage or crm_all_states or sm_diag or sm_profile or watchdog or cold_reset or pcs_first or native_width or stock_perf_dtb or log_reboot_nonce is not None or stock_train_lanes or pre_phy_clocks:
             raise RuntimeError('Wi-Fi stage, CRM and CESTA options require --wifi-bringup-test')
         return ''
     if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
@@ -340,6 +340,8 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         raise RuntimeError('Cold-reset profile requires isolated Stage 4 and 60..120 seconds')
     if (pcs_first or native_width) and (sm_diag != 7 or not cold_reset or not sm_profile):
         raise RuntimeError('PCS and native-width trials require --wifi-cesta-endpoint')
+    if pre_phy_clocks and (not pcs_first or sm_diag != 7 or not cold_reset or not sm_profile):
+        raise RuntimeError('--wifi-pre-phy-clocks requires PCS-first and a guarded current-DT endpoint trial')
     if stock_train_lanes and (not native_width or sm_diag != 7 or not cold_reset or not sm_profile):
         raise RuntimeError('--wifi-stock-train-lanes requires native width and a guarded current-DT endpoint trial')
     if log_reboot_nonce is not None:
@@ -375,6 +377,8 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         out += ' ace5_wifi_native_width=1'
     if stock_train_lanes:
         out += ' ace5_wifi_stock_train=1'
+    if pre_phy_clocks:
+        out += ' ace5_wifi_pre_phy_clks=1'
     if stock_perf_dtb:
         out += ' ace5_wifi_stock_perf=1'
     if log_reboot_nonce is not None:
@@ -384,9 +388,19 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
 
 def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=False,
                            watchdog=0, cold_reset=False, pcs_first=False, native_width=False, stock_perf=False,
-                           stock_train_lanes=False):
+                           stock_train_lanes=False, pre_phy_clocks=False):
     if not enabled:
         return
+    if pre_phy_clocks:
+        prefix = 'ace5-wifi-bringup: pre-PHY clock hold'
+        records = [line.split(prefix, 1)[1] for line in text.splitlines() if prefix in line]
+        pattern = r' before=0x([0-9a-f]{1,8}) after=0x([0-9a-f]{1,8}) rc=0'
+        matches = [re.fullmatch(pattern, record) for record in records]
+        values = {(int(m[1], 16), int(m[2], 16)) for m in matches if m}
+        if (stage != 4 or sm_diag != 7 or not cold_reset or not pcs_first or
+                not all(matches) or len(values) != 1 or
+                any(after == 0xffffffff or after != (before | 0x42) for before, after in values)):
+            raise RuntimeError(f'Pre-PHY clock hold readback unconfirmed; preserve {log} and cold reboot')
     if stock_train_lanes:
         prefix = 'ace5-wifi-bringup: stock train lanes '
         records = [line.split(prefix, 1)[1] for line in text.splitlines() if prefix in line]
@@ -528,6 +542,8 @@ run.add_argument('--wifi-pcs-first', action='store_true',
                  help='Arm independent reset before starting PCS ahead of PIPE; requires --wifi-cesta-endpoint')
 run.add_argument('--wifi-native-width', action='store_true',
                  help='Keep native x2 lane fields at Gen1 during --wifi-cesta-endpoint')
+run.add_argument('--wifi-pre-phy-clocks', action='store_true',
+                 help='Test the pre-PHY clock hold only with guarded --wifi-cesta-endpoint --wifi-pcs-first')
 run.add_argument('--wifi-stock-train-lanes', action='store_true',
                  help='Test stock DBI 0x80c training field with guarded --wifi-native-width --wifi-cesta-endpoint')
 run.add_argument('--wifi-log-reboot', metavar='RUN_ID',
@@ -713,7 +729,8 @@ try:
                 args.wifi_probe or args.touch or args.battery or args.cpu_khz or args.gpu_probe or args.aop_channel_test or args.crm_channel_test or args.crm_bandwidth_test or args.aop_cx_vote_test or args.rpmh_read_test or args.wlan_pdc_test,
                 args.live_log, args.wifi_bringup_stage, args.wifi_crm_all_states,
                 sm_mode, cesta_profile, args.wifi_watchdog, cold_reset, args.wifi_pcs_first,
-                args.wifi_native_width, args.wifi_stock_startup_perf, args.wifi_log_reboot, args.wifi_stock_train_lanes)
+                args.wifi_native_width, args.wifi_stock_startup_perf, args.wifi_log_reboot, args.wifi_stock_train_lanes,
+                args.wifi_pre_phy_clocks)
             if args.wifi_log_reboot is not None and getvar('wifi-log-reboot') != '1':
                 raise RuntimeError('Loader does not advertise wifi-log-reboot support; no payload staged')
         if args.command == 'run' and args.touch:
@@ -769,7 +786,7 @@ try:
             raise RuntimeError('--live-interval must be between 0.1 and 60 seconds')
         if args.command == 'run' and args.bootcpu:
             commandline += f' bootcpu={args.bootcpu}'
-        if args.command == 'run' and args.wifi_stock_train_lanes:
+        if args.command == 'run' and (args.wifi_stock_train_lanes or args.wifi_pre_phy_clocks):
             check_stock_train_cmdline(commandline)
         kernel = args.kernel if args.kernel else ROOT / 'prebuilt/mach.development.bcm2837'
         if not kernel.is_file():
@@ -813,7 +830,7 @@ try:
             check_wifi_bringup_log(args.wifi_bringup_test, args.wifi_bringup_stage, saved_log,
                 getvar('power-reset-required') if args.wifi_bringup_test else None, log,
                 sm_mode, args.wifi_watchdog, cold_reset, args.wifi_pcs_first, args.wifi_native_width,
-                bool(args.wifi_stock_startup_perf), args.wifi_stock_train_lanes)
+                bool(args.wifi_stock_startup_perf), args.wifi_stock_train_lanes, args.wifi_pre_phy_clocks)
             check_rpmh_read_log(args.rpmh_read_test,saved_log,
                 getvar('power-reset-required') if args.rpmh_read_test else None,log)
             if (args.aop_channel_test or args.aop_cx_vote_test) and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:
