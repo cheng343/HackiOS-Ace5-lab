@@ -1291,6 +1291,13 @@ stop:
     }
 
 release:
+    if (wb.bringup.perst_unconfirmed) {
+        /* The core cannot prove the endpoint is isolated. No handoff, GPIO or
+         * bus access here; leave an already armed independent reset alone. */
+        wb.guard_failed = 1;
+        wb_log("ace5-wifi-bringup: PERST# unconfirmed; link cleanup withheld, IRQ37 and firmware quiet retained until cold reset\n");
+        goto retained;
+    }
     if (wb.early_reset_armed) {
         wb.guard_failed = 1;
         if (!wb.endpoint_reset_unconfirmed)

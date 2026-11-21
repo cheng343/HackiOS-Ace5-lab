@@ -49,6 +49,10 @@ class PhoneTests(unittest.TestCase):
         clean = 'ace5-wifi-bringup: cleanup complete; IRQ37 restored and firmware resumed (cold reboot required)'
         good = report() + held
         check(True, 4, good, 'yes', self.log)
+        unsafe = 'ace5-wifi-bringup: PERST# unconfirmed; link cleanup withheld'
+        for mixed in (unsafe + '\n' + good, good + '\n' + unsafe):
+            with self.assertRaisesRegex(RuntimeError, 'PERST# unconfirmed'):
+                check(True, 4, mixed, 'yes', self.log)
         status = good + '\nace5-wifi-bringup: quiet watchdog status ret=0 ctl=0 since=0x11\n'
         check(True, 4, status, 'yes', self.log, watchdog=1)
         with self.assertRaisesRegex(RuntimeError, 'Idle Gunyah watchdog status'):

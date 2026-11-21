@@ -79,6 +79,9 @@ struct giulia_wifi_bringup {
     struct giulia_mhi_snapshot mhi;
     struct giulia_kiwi_image fw_image; /* invalidated by stop; no DMA */
     uint32_t stage, failed_stage, noc_started;
+    /* Sticky until a separate cold session: an endpoint reset edge could not
+     * be confirmed. No cleanup is allowed to infer isolation from GPIO_FAULT. */
+    uint32_t perst_unconfirmed;
     uint32_t pipe_checked, pipe_cbcr;
     int error, sub_error, cleanup_error;
 };

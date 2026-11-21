@@ -11,6 +11,10 @@ static char trace[256];
 static unsigned tlen;
 static int fail_at = -1;
 static char stop_fail, lose_bar;
+/* Hidden mock pin level: 1 ignores the requested write, 2 applies it;
+ * the callback in both cases loses its readback and returns exactly FAULT. */
+static unsigned release_unknown, assert_unknown, mock_pin_high;
+static unsigned attempted_edges, failed_readbacks;
 static int noc_release_rc;
 static unsigned host_on, noc_owned, stable_pbl, file_calls, file_present;
 static const uint8_t cpu_fixture[]={0x5c,0x72,0x4a};
@@ -61,9 +65,37 @@ int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t f, const struct gi
 int giulia_pcie_phy_stop(struct giulia_pcie_phy *p, uint32_t f)
 { (void)f; int rc=ev('y',GIULIA_PHY_TIMEOUT); if(rc){p->state=GIULIA_PHY_FAULT;return rc;} assert(!p->io.pipe_disable(p->io.cookie)); p->state = GIULIA_PHY_STOPPED; return 0; }
 int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *g, uint32_t f)
-{ (void)f; int rc = ev('R', GIULIA_WGPIO_BUSY); if (!rc) g->state = GIULIA_WGPIO_RELEASED; return rc; }
+{
+    (void)f;
+    int rc = ev('R', GIULIA_WGPIO_BUSY);
+    if (rc) return rc; /* known refusal before an attempted edge */
+    attempted_edges++;
+    if (release_unknown) {
+        if (release_unknown == 2) mock_pin_high = 1;
+        ++failed_readbacks;
+        g->state = GIULIA_WGPIO_FAULT;
+        return g->error = GIULIA_WGPIO_READBACK;
+    }
+    mock_pin_high = 1;
+    g->state = GIULIA_WGPIO_RELEASED;
+    return 0;
+}
 int giulia_wifi_gpio_perst_assert(struct giulia_wifi_gpio *g, uint32_t f)
-{ (void)f; int rc=ev('r',GIULIA_WGPIO_BUSY); if(!rc)g->state = GIULIA_WGPIO_HELD; return rc; }
+{
+    (void)f;
+    int rc = ev('r', GIULIA_WGPIO_BUSY);
+    if (rc) return rc;
+    attempted_edges++;
+    if (assert_unknown) {
+        if (assert_unknown == 2) mock_pin_high = 0;
+        ++failed_readbacks;
+        g->state = GIULIA_WGPIO_FAULT;
+        return g->error = GIULIA_WGPIO_READBACK;
+    }
+    mock_pin_high = 0;
+    g->state = GIULIA_WGPIO_HELD;
+    return 0;
+}
 int giulia_pcie_link_train(struct giulia_pcie_link *l, uint32_t f)
 { (void)f; int rc = ev('T', GIULIA_LINK_TIMEOUT); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_READY;
   if (!rc) l->endpoint_id=GIULIA_PCIE_LINK_EP_ID;
@@ -184,6 +216,54 @@ int main(void)
     cfg.bar.cookie = cfg.mhi.cookie = NULL;
     cfg.bar.read32 = cfg.mhi.read32 = b_r32;
     puts("PASS: lost KIWI/MHI BAR lease retains the bus without cleanup transactions");
+
+    /* An indeterminate GPIO result cannot prove either electrical outcome.
+     * Include two cold fixtures per case: write reached pin / did not reach.
+     * Trace covers every lower-level callback of the coordinator that could
+     * quiesce the endpoint or release a power/NoC owner (not the adapter GIC). */
+    for (unsigned fault = 1; fault <= 2; ++fault) {
+        memset(&b,0,sizeof(b)); memset(trace,0,sizeof(trace)); tlen=0;
+        release_unknown=fault; mock_pin_high=attempted_edges=failed_readbacks=0;
+        assert(giulia_wifi_bringup_start(&b,&cfg)==GIULIA_BRINGUP_GPIO);
+        assert(b.failed_stage==GIULIA_BRINGUP_PERST_RELEASE && b.error==GIULIA_BRINGUP_GPIO &&
+            b.sub_error==GIULIA_WGPIO_READBACK && !b.cleanup_error);
+        assert(b.perst_unconfirmed && b.stage==GIULIA_BRINGUP_HELD &&
+            b.supply.gpio.state==GIULIA_WGPIO_FAULT && b.supply.gpio.error==GIULIA_WGPIO_READBACK);
+        assert(mock_pin_high==(fault==2) && attempted_edges==1 && failed_readbacks==1);
+        assert(tlen==9 && !strcmp(trace,"SNPAYECLR") && host_on && noc_owned);
+        assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_RETAINED &&
+            giulia_wifi_bringup_start(&b,&cfg)==GIULIA_BRINGUP_STATE);
+        assert(tlen==9 && attempted_edges==1 && failed_readbacks==1 && !b.cleanup_error);
+        host_on=noc_owned=release_unknown=0; /* separate cold fixture */
+    }
+    for (unsigned fault = 1; fault <= 2; ++fault) {
+        memset(&b,0,sizeof(b)); memset(trace,0,sizeof(trace)); tlen=0;
+        assert_unknown=fault; mock_pin_high=attempted_edges=failed_readbacks=0;
+        assert(giulia_wifi_bringup_start(&b,&cfg)==GIULIA_BRINGUP_OK);
+        assert(tlen==13 && attempted_edges==1 && mock_pin_high);
+        /* MEM disable happened before reset assertion was attempted; no stage
+         * after the first failed reassert may stop a resource or retry MMIO. */
+        assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_GPIO);
+        assert(b.perst_unconfirmed && b.stage==GIULIA_BRINGUP_HELD &&
+            b.cleanup_error==GIULIA_BRINGUP_GPIO && b.supply.gpio.error==GIULIA_WGPIO_READBACK);
+        assert(tlen==15 && !strcmp(trace,"SNPAYECLRTMIHmr") && mock_pin_high==(fault==1));
+        assert(attempted_edges==2 && failed_readbacks==1 && host_on && noc_owned);
+        assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_RETAINED &&
+            giulia_wifi_bringup_start(&b,&cfg)==GIULIA_BRINGUP_STATE);
+        assert(tlen==15 && attempted_edges==2 && failed_readbacks==1 &&
+            b.cleanup_error==GIULIA_BRINGUP_GPIO);
+        host_on=noc_owned=assert_unknown=0; /* separate cold fixture */
+    }
+    /* Negative control: a proven pre-write rejection returns BUSY and leaves
+     * GPIO_ON; the coordinator must keep its old reassert and normal unwind. */
+    memset(&b,0,sizeof(b)); memset(trace,0,sizeof(trace)); tlen=0;
+    fail_at=9; attempted_edges=failed_readbacks=0;
+    assert(giulia_wifi_bringup_start(&b,&cfg)==GIULIA_BRINGUP_GPIO);
+    assert(!b.perst_unconfirmed && b.failed_stage==GIULIA_BRINGUP_PERST_RELEASE &&
+        b.sub_error==GIULIA_WGPIO_BUSY && attempted_edges==1 && !failed_readbacks);
+    assert(!strcmp(trace,"SNPAYECLRrqyelnps") && !host_on && !noc_owned);
+    fail_at=-1;
+    puts("PASS: ambiguous PERST release and reassert retain all lower owners without cleanup retries");
 
     /* Failure at link train triggers clean reverse unwind. */
     tlen = 0; memset(trace, 0, sizeof(trace)); memset(&b,0,sizeof(b)); fail_at = 10;

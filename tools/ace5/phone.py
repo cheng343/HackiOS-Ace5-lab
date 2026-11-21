@@ -399,6 +399,8 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
                            stock_train_lanes=False, pre_phy_clocks=False, native_x1_id=False, preserve_speed_cap=False):
     if not enabled:
         return
+    if 'ace5-wifi-bringup: PERST# unconfirmed' in text:
+        raise RuntimeError(f'PCIe PERST# unconfirmed; link cleanup was withheld; preserve {log} and cold reboot')
     # The endpoint ID, PERST readback, and even an older follow-up may all
     # precede final lease validation in merged/persisted console logs.
     if sm_diag == 7 and 'ace5-wifi-bringup: endpoint lease lost' in text:

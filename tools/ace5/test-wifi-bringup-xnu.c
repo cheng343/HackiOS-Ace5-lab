@@ -375,7 +375,10 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,const struct giulia_
         assert(!!wb.cfg.address == (sm_diag == WB_SM_ENDPOINT));
         assert(!!wb.dbi.address == (sm_diag >= WB_SM_DBI_ID));
     }
-    if(start_rc){b->stage=GIULIA_BRINGUP_FAULT;b->cleanup_error=GIULIA_BRINGUP_SUPPLY;}
+    if(start_rc==GIULIA_BRINGUP_GPIO) {
+        b->perst_unconfirmed=1; b->stage=GIULIA_BRINGUP_HELD;
+        b->failed_stage=GIULIA_BRINGUP_PERST_RELEASE;
+    } else if(start_rc){b->stage=GIULIA_BRINGUP_FAULT;b->cleanup_error=GIULIA_BRINGUP_SUPPLY;}
     return start_rc;
 }
 int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b)
@@ -383,6 +386,7 @@ int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b)
     stop_calls++;assert(wb_guard());
     b->stage=stop_rc<0?GIULIA_BRINGUP_FAULT:stop_rc?GIULIA_BRINGUP_HELD:GIULIA_BRINGUP_STOPPED;
     b->cleanup_error=stop_rc<0?stop_rc:0;
+    if(stop_rc==GIULIA_BRINGUP_GPIO){b->stage=GIULIA_BRINGUP_HELD;b->perst_unconfirmed=1;}
     if(pending_irq)((uint32_t *)wb.gic.address)[0x204/4]=WB_IRQ;
     if(lost_guard)wb.guard_failed=1;
     return stop_rc;
@@ -534,6 +538,17 @@ static void cleanup(void)
     assert(!unmaps && wb_quiet_ok() && wb.irq_dirty && strstr(messages,"cleanup FAILED;") && !strstr(messages,"cleanup complete;"));
     setup();start_rc=GIULIA_BRINGUP_LINK;giulia_wifi_bringup_init();
     assert(!stop_calls && !unmaps && wb_quiet_ok() && !strstr(messages,"requested stage complete;"));
+    for(unsigned at_stop=0; at_stop<2; at_stop++) {
+        setup();
+        if(at_stop) stop_rc=GIULIA_BRINGUP_GPIO;
+        else start_rc=GIULIA_BRINGUP_GPIO;
+        giulia_wifi_bringup_init();
+        assert(stop_calls==at_stop && !unmaps && !loader_returns && wb.guard_failed &&
+            !(gic_enabled & WB_IRQ) && wb.irq_dirty && wb_quiet_ok() &&
+            strstr(messages,"PERST# unconfirmed; link cleanup withheld") &&
+            !strstr(messages,"cleanup complete;") && !strstr(messages,"firmware resumed"));
+    }
+    puts("PASS: uncertain PERST keeps IRQ37 isolated, firmware quiet and mappings retained");
     setup();pending_irq=1;giulia_wifi_bringup_init();
     assert(!unmaps && wb_quiet_ok() && wb.irq_dirty && strstr(messages,"cleanup FAILED;"));
     setup();lost_guard=1;giulia_wifi_bringup_init();assert(!unmaps && wb_quiet_ok() && wb.irq_dirty);

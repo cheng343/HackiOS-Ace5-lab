@@ -111,7 +111,13 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     b->stage = GIULIA_BRINGUP_PERST_RELEASE;
     rc = giulia_wifi_gpio_perst_release(&b->supply.gpio,
         GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
-    if (rc) return fail_stop(b, GIULIA_BRINGUP_PERST_RELEASE, GIULIA_BRINGUP_GPIO, rc);
+    if (rc) {
+        /* FAULT does not say whether the release reached the pin. A simple
+         * refusal leaving GPIO_ON is different and retains its existing unwind. */
+        if (b->supply.gpio.state == GIULIA_WGPIO_FAULT)
+            b->perst_unconfirmed = 1;
+        return fail_stop(b, GIULIA_BRINGUP_PERST_RELEASE, GIULIA_BRINGUP_GPIO, rc);
+    }
     if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_LINK_TRAIN;
@@ -151,6 +157,13 @@ int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b)
         GIULIA_LINK_CLOCKS_RC_RESET_READY;
     if (!b) return GIULIA_BRINGUP_ARGUMENT;
     b->fw_image=(struct giulia_kiwi_image){0}; /* retire the borrowed view even on retained stop */
+    /* Do not call even the GPIO driver to establish ownership of a pin in an
+     * unknown state. Keep all resources until independent recovery. This
+     * precedes MEM disable and every callback, including on a repeated stop. */
+    if (b->perst_unconfirmed) {
+        b->stage = GIULIA_BRINGUP_HELD;
+        return GIULIA_BRINGUP_RETAINED;
+    }
     if (b->stage == GIULIA_BRINGUP_IDLE || b->stage == GIULIA_BRINGUP_STOPPED)
         return GIULIA_BRINGUP_OK;
     if (b->stage == GIULIA_BRINGUP_HELD) return GIULIA_BRINGUP_RETAINED;
@@ -168,6 +181,13 @@ int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b)
         b->supply.gpio.state == GIULIA_WGPIO_RELEASED) {
         rc = giulia_wifi_gpio_perst_assert(&b->supply.gpio,
             GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
+        if (rc && b->supply.gpio.state == GIULIA_WGPIO_FAULT) {
+            /* The first stop reports its own failed assertion; later stops
+             * retain the original error and must not skip past this stage. */
+            b->perst_unconfirmed = 1;
+            b->stage = GIULIA_BRINGUP_HELD;
+            return b->cleanup_error = GIULIA_BRINGUP_GPIO;
+        }
         if (rc) STOP_FAILED(GIULIA_BRINGUP_GPIO);
     }
     if (b->link.state != GIULIA_LINK_IDLE && b->link.state != GIULIA_LINK_STOPPED) {
