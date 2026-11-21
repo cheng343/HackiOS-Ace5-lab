@@ -39,7 +39,8 @@ enum giulia_pcie_power_prerequisite {
     /* Platform's actual CESTA owner permits this exclusive software GCC vote
      * sequence and retains coordination through withdrawal. It need NOT halt
      * CESTA. This is not implied by START=0 or a CRM channel ACK. Mutually
-     * exclusive with DIRECT_VOTES; no current XNU boot path asserts it. */
+     * exclusive with DIRECT_VOTES. Giulia's opt-in XNU Wi-Fi supply and
+     * bringup path uses this managed route. */
     GIULIA_POWER_CESTA_COORDINATED = 1u << 9
 };
 #define GIULIA_POWER_REQUIRED 0xffu
@@ -91,7 +92,8 @@ struct giulia_pcie_power {
  * a running-link handoff or permission to take a clock from firmware.
  * start powers domains, enables host clocks, pulses core then PHY BCR and
  * enables PHY aux/ref/rchng resources. PIPE stays disabled on the XO mux.
- * CORE BCR is held 1000 us, then settled 1000 us; PHY BCR is held 200 us.
+ * CORE BCR is held 1000 us, then settled 1000 us. The direct QMP profile
+ * holds PHY BCR for 200 us; the giulia CESTA path uses the stock 1000 us.
  * The caller may then program the QMP PHY while holding endpoint PERST#.
  * A failed start attempts rollback; inspect state/cleanup_error. A FAULT must
  * be stopped successfully before releasing mappings/rails/NoC ownership.

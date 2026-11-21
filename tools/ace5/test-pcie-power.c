@@ -223,6 +223,49 @@ static void lifecycle(void)
     assert(giulia_pcie_power_stop(&p, 0) == 0 && m.reads == count);
 }
 
+/* Compare the two admitted profiles with identical initial hardware state.
+ * Only elapsed time from the PHY release on may differ, not register traffic. */
+static void board_reset_timing(void)
+{
+    struct mock m[2];
+    struct giulia_pcie_power p[2] = {0};
+    unsigned release[2];
+    for (unsigned i = 0; i < 2; ++i) {
+        const uint32_t flags = i ? GIULIA_POWER_HOST_REQUIRED | GIULIA_POWER_CESTA_COORDINATED
+                                 : GIULIA_POWER_REQUIRED;
+        init(&m[i]);
+        /* Start with both resets deasserted so the writes produce real edges. */
+        struct reg *core = find(&m[i], GIULIA_POWER_GCC, 0x6b000);
+        core->original &= ~BIT(0);
+        core->value = core->original;
+        struct giulia_pcie_power_io v = io(&m[i]);
+        assert(!giulia_pcie_power_prepare_host(&p[i], &v, flags));
+        unsigned n = m[i].writes;
+        assert(!giulia_pcie_power_finish_reset(&p[i], flags | GIULIA_POWER_NOC_READY));
+        assert(p[i].state == GIULIA_POWER_READY);
+        unsigned ca = event_at(&m[i], 0x6b000, 1, 1, n);
+        unsigned cr = event_at(&m[i], 0x6b000, 1, 0, ca + 1);
+        unsigned pa = event_at(&m[i], 0x6c01c, 1, 1, cr + 1);
+        unsigned pr = event_at(&m[i], 0x6c01c, 1, 0, pa + 1);
+        assert(ca == n && cr == ca + 1 && pa == cr + 1 && pr == pa + 1);
+        assert(m[i].events[cr].us - m[i].events[ca].us == 1000);
+        assert(m[i].events[pa].us - m[i].events[cr].us == 1000);
+        assert(m[i].events[pr].us - m[i].events[pa].us == (i ? 1000u : 200u));
+        release[i] = pr;
+        uint32_t stop = GIULIA_POWER_STOP_REQUIRED |
+            (i ? GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET : 0u);
+        assert(!giulia_pcie_power_stop(&p[i], stop)); restored(&m[i], &p[i]);
+    }
+    assert(release[0] == release[1] && m[0].writes == m[1].writes &&
+        m[0].reads == m[1].reads && m[0].barriers == m[1].barriers);
+    for (unsigned i = 0; i < m[0].writes; ++i) {
+        const struct event *a = &m[0].events[i], *b = &m[1].events[i];
+        assert(a->block == b->block && a->off == b->off && a->value == b->value);
+        assert(b->us == a->us + (i >= release[0] ? 800u : 0u));
+    }
+    puts("SM8650 Wi-Fi: board PHY reset held for stock 1 ms, direct path preserved");
+}
+
 static void admission(void)
 {
     struct mock m;
@@ -594,6 +637,7 @@ static void host_qos_composition(void)
 int main(void)
 {
     lifecycle();
+    board_reset_timing();
     admission();
     inherited_rchng();
     timeouts();

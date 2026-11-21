@@ -401,8 +401,12 @@ giulia_pcie_power_finish_reset(struct giulia_pcie_power *p, uint32_t prerequisit
         return GIULIA_POWER_PREREQUISITE;
     p->reset_attempted = 1;
     p->state = GIULIA_POWER_FAULT;
+    /* On giulia the DT names GCC_PCIE_0_{,PHY_}BCR. The stock controller's
+     * msm_pcie_core_phy_reset holds each asserted reset for 1000..1005 us.
+     * The direct QMP profile retains its separate 200-us PHY pulse. */
+    unsigned phy_hold_us = route == GIULIA_POWER_CESTA_COORDINATED ? 1000u : 200u;
     if ((r = reset_pulse(p, CORE_RESET, 1000, 1000)) ||
-        (r = reset_pulse(p, PHY_RESET, 200, 0)) ||
+        (r = reset_pulse(p, PHY_RESET, phy_hold_us, 0)) ||
         (r = change(p, REF, B(0), B(0))))
         goto fail;
     delay(p, 10);
