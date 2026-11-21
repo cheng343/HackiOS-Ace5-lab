@@ -57,6 +57,10 @@ static enum pin_fault injected_pin_fault;
 /* Set by the fake GPIO, not by the code under test. Both sinks must stay
  * silent between a successful release and the return of a permitted reassert. */
 static int ep_critical, identify_rc, lose_owner, release_rc;
+/* Independent live-state changes in the mocked controller, not flags set in the adapter. */
+enum lease_event { LEASE_IDLE, LEASE_CONTROL, ACK_LOST, QUIET_LOST, IRQ_ACTIVE, IRQ_ENABLED, RESET_REQ_LOST };
+static enum lease_event lease_event;
+static unsigned first_lease_op;
 static unsigned ep_loader_calls, ep_console_calls;
 static char messages[16384];
 static struct { uintptr_t va; vm_size_t size; } allocation[24];
@@ -245,6 +249,62 @@ int giulia_wifi_gpio_perst_assert(struct giulia_wifi_gpio *g, uint32_t flags)
     ep_critical = 0;
     return 0;
 }
+/* Only fixture RAM is seeded/inspected directly. All access under test must
+ * pass through the production callbacks. An all-ones read alone is not proof:
+ * writes must also leave the sentinel untouched. */
+static void exercise_ep_callback(unsigned op, unsigned allowed)
+{
+    const unsigned off = 0x380;
+    const unsigned regions[] = { GIULIA_LINK_PARF, GIULIA_LINK_DBI,
+        GIULIA_LINK_ATU, GIULIA_LINK_CFG };
+    for (unsigned i=0; i < (op < 4 ? 4u : 1u); i++) {
+        unsigned reg = regions[i];
+        struct wb_map *m = op < 4 ? link_reg(reg) : &wb.tlmm;
+        assert(m->address && m->size >= off+4);
+        uint32_t *word = (uint32_t *)(m->address+off);
+        const uint32_t saved = *word, initial = 0x12345678u;
+        *word = initial;
+        switch (op) {
+        case 0: assert(wb_link_r32(0,reg,off)==(allowed ? initial : UINT32_MAX)); break;
+        case 1: wb_link_w32(0,reg,off,0x31415926u);
+                assert(*word==(allowed ? 0x31415926u : initial)); break;
+        case 2: assert(wb_link_r16(0,reg,off)==(allowed ? 0x5678u : UINT16_MAX)); break;
+        case 3: wb_link_w16(0,reg,off,0x7777);
+                assert(*word==(allowed ? 0x12347777u : initial)); break;
+        case 4: assert(wb_gpio_r(0,off)==(allowed ? initial : UINT32_MAX)); break;
+        case 5: wb_gpio_w(0,off,0x87654321u);
+                assert(*word==(allowed ? 0x87654321u : initial)); break;
+        default: assert(0);
+        }
+        *word = saved;
+    }
+}
+static void mock_lease_transition(void)
+{
+    if (lease_event == LEASE_IDLE) return;
+    if (lease_event == LEASE_CONTROL) {
+        for (unsigned op=0; op<6; op++) exercise_ep_callback(op,1);
+        assert(!wb.guard_failed); return;
+    }
+    /* Stop the fixture from automatically rewriting lost ACKs on barriers. */
+    no_ack=1;
+    uint32_t *gic=(uint32_t *)wb.gic.address;
+    switch (lease_event) {
+    case ACK_LOST: wb.quiet->reset_ack=0; break;
+    case QUIET_LOST: wb.quiet->active=0; break;
+    case IRQ_ACTIVE: gic[0x304/4] |= WB_IRQ; break;
+    case IRQ_ENABLED: gic_enabled |= WB_IRQ; gic[0x104/4]=gic_enabled; break;
+    case RESET_REQ_LOST: wb.quiet->reset_request=0; break;
+    default: assert(0);
+    }
+    if (first_lease_op < 6) {
+        exercise_ep_callback(first_lease_op,0);  /* first observer must latch it */
+        assert(wb.guard_failed);
+    }
+    /* No legal reassert now: the adapter may report only cached failed evidence. */
+    ep_critical=0;
+}
+
 int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
 {
     assert(flags == GIULIA_LINK_TRAIN_REQUIRED && wb.bringup.supply.gpio.state == GIULIA_WGPIO_RELEASED);
@@ -280,6 +340,13 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     s->train_ltssm_first = 0;
     s->train_ltssm_last = 17;
     s->train_ltssm_seen[0] = (1u << 17) | 1u;
+    /* Adversarial successful core return after real mock loss; the adapter
+     * cannot publish an endpoint or drive PERST simply because core said OK. */
+    if (lease_event != LEASE_IDLE) {
+        s->stage=GIULIA_LINK_STAGE_ENDPOINT;
+        s->state=GIULIA_LINK_IDENTIFIED;
+    }
+    mock_lease_transition();
     return 0;
 }
 
@@ -372,6 +439,7 @@ static void setup(void)
     wdt_call_count=wdt_fail_at=wdt_disables=wdt_competing=0;
     cold_reset=mock_reset_response=loader_returns=0;
     ep_critical=identify_rc=lose_owner=release_rc=0;
+    lease_event=LEASE_IDLE; first_lease_op=0;
     ep_loader_calls=ep_console_calls=0;
     keep_sls_arg=suppress_sls_latch=0;
     root_id_reads=pcs_first_arg=pre_phy_clks_arg=drop_pre_phy_clock=x1_id_arg=native_width_arg=0;
@@ -466,6 +534,14 @@ static void single_access(void)
     assert(strstr(messages,"DBI+0 access begin") && strstr(messages,"DBI+0 access returned"));
     id=UINT32_MAX;assert(wb_link_r32(0,GIULIA_LINK_DBI,0)==UINT32_MAX);
     assert(!wb.cfg.address && !wb.atu.address && !wb.parf.address);
+    /* Ordinary callbacks still need no reset mailbox and no GIC mapping. */
+    assert(!wb.quiet && !wb.gic.address);
+    uint32_t gpio=0x12345678u; wb.tlmm.address=(uintptr_t)&gpio;
+    wb_link_w32(0,GIULIA_LINK_DBI,0,0x87654321u);
+    wb_link_w16(0,GIULIA_LINK_DBI,0,0xabcd);
+    assert(wb_link_r16(0,GIULIA_LINK_DBI,0)==0xabcdu && id==0x8765abcdu);
+    assert(wb_gpio_r(0,0)==gpio); wb_gpio_w(0,0,0x19283746u);
+    assert(gpio==0x19283746u && !wb.guard_failed);
 }
 static void bar_callbacks(void)
 {
@@ -840,6 +916,44 @@ static void noc_after_phy(void)
     wb.bringup.supply.gpio.state = GIULIA_WGPIO_ON; perst[1] = 0;
     wb.native_width = wb.stock_train = wb.x1_id = 0;
     puts("PASS: guarded release-to-reassert window is silent in both sinks; failures retain their evidence");
+    /* Each iteration represents an independent synthetic boot/session. */
+    wb.native_width=wb.x1_id=wb.stock_train=1;
+    lease_event=LEASE_CONTROL; messages[0]=0;
+    assert(!wb_cesta_pre_dbi() && !wb.guard_failed && !wb.endpoint_reset_unconfirmed &&
+        strstr(messages,"endpoint identify rc=0") && strstr(messages,"native endpoint width=1"));
+    const struct { enum lease_event event; unsigned first; } losses[] = {
+        {ACK_LOST,0}, {QUIET_LOST,1}, {IRQ_ACTIVE,2}, {IRQ_ENABLED,3},
+        {RESET_REQ_LOST,4}, {ACK_LOST,5},
+        {QUIET_LOST,6}, {ACK_LOST,6}, {IRQ_ACTIVE,6}
+    };
+    for (unsigned i=0; i<sizeof(losses)/sizeof(losses[0]); i++) {
+        unsigned previous_ids=endpoint_identifies, previous_resets=endpoint_reasserts;
+        lease_event=losses[i].event; first_lease_op=losses[i].first; messages[0]=0;
+        assert(wb_cesta_pre_dbi()==GIULIA_LINK_PREREQUISITE && wb.guard_failed);
+        assert(endpoint_identifies==previous_ids+1 && endpoint_reasserts==previous_resets &&
+            wb.endpoint_reset_unconfirmed && wb.bringup.link.endpoint_id==GIULIA_PCIE_LINK_EP_ID);
+        assert(!wb.endpoint_io_window && wb.bringup.link.state==GIULIA_LINK_FAULT &&
+            wb.bringup.link.failure_stage==GIULIA_LINK_STAGE_ENDPOINT &&
+            wb.bringup.link.error==GIULIA_LINK_PREREQUISITE);
+        assert(strstr(messages,"endpoint lease lost; retained until reset, prior ID is a sample only") &&
+            !strstr(messages,"endpoint identify rc=0") && !strstr(messages,"native endpoint width=") &&
+            !strstr(messages,"endpoint reset reassert"));
+        /* Mimic firmware state looking valid again, NOT a new session token. */
+        wb.quiet->active=wb.quiet->ack=wb.quiet->request=1;
+        wb.quiet->reset_request=1; wb.quiet->reset_ack=LOADER_QUIET_RESET_ARMED;
+        gic_enabled &= ~WB_IRQ; ((uint32_t *)wb.gic.address)[0x104/4]=gic_enabled;
+        ((uint32_t *)wb.gic.address)[0x304/4] &= ~WB_IRQ;
+        no_ack=0;
+        for (unsigned op=0; op<6; op++) exercise_ep_callback(op,0);
+        assert(wb_pcie_identify_endpoint()==GIULIA_LINK_PREREQUISITE);
+        assert(wb.guard_failed && !wb.endpoint_io_window && wb.endpoint_reset_unconfirmed &&
+            endpoint_identifies==previous_ids+1 && endpoint_reasserts==previous_resets);
+        /* Explicit fixture reset, not device recovery or a successful reassert. */
+        wb.guard_failed=wb.endpoint_reset_unconfirmed=0;
+        wb.bringup.supply.gpio.state=GIULIA_WGPIO_ON; perst[1]=0;
+    }
+    wb.native_width=wb.x1_id=wb.stock_train=0; lease_event=LEASE_IDLE;
+    puts("PASS: mode7 lease loss blocks the current and subsequent callbacks even after apparent recovery");
     wb.bringup.link.state = GIULIA_LINK_PARF_READY;
     wb.bringup.pipe_checked = 0;
     wb.bringup.supply.power.state = GIULIA_POWER_READY;

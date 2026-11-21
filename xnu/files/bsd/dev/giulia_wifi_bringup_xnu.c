@@ -69,7 +69,7 @@ static struct {
     uint32_t irq_dirty, irq_prior, guard_failed, endpoint_reset_unconfirmed, db_version, max_stage;
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
     uint32_t pcs_first, early_reset_armed, native_width, stock_perf, stock_train;
-    uint32_t noc_step, pre_phy_clks, x1_id, keep_sls;
+    uint32_t noc_step, pre_phy_clks, x1_id, keep_sls, endpoint_io_window;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
 
@@ -170,11 +170,42 @@ static int wb_irq_acquire(void)
     return enabled != UINT32_MAX && active != UINT32_MAX && !((enabled | active) & WB_IRQ);
 }
 
+/* Unlike cfg_ok(), which validates negotiated PCIe link conditions,
+ * this guard checks board ownership. Shared memory can invalidate a lease
+ * without any PCIe access. Check it FIRST, before touching even the GIC. */
+static int wb_guard_shared(void)
+{
+    return !wb.guard_failed && wb.irq_dirty && wb.quiet && wb_quiet_ok() &&
+        (!wb.endpoint_io_window || (wb.quiet->reset_request == 1 &&
+         wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED));
+}
+
 static int wb_guard(void)
 {
-    uint32_t enabled = wb_mmio(&wb.gic, 0x104), active = wb_mmio(&wb.gic, 0x304);
-    return !wb.guard_failed && wb_quiet_ok() && wb.irq_dirty && enabled != UINT32_MAX &&
-        active != UINT32_MAX && !((enabled | active) & WB_IRQ);
+    if (wb_guard_shared()) {
+        uint32_t enabled = wb_mmio(&wb.gic, 0x104);
+        if (enabled != UINT32_MAX && !(enabled & WB_IRQ) &&
+            (!wb.endpoint_io_window || wb_guard_shared())) {
+            uint32_t active = wb_mmio(&wb.gic, 0x304);
+            if (active != UINT32_MAX && !(active & WB_IRQ) &&
+                (!wb.endpoint_io_window || wb_guard_shared())) return 1;
+        }
+    }
+    if (wb.endpoint_io_window) {
+        wb.guard_failed = 1;
+        wb.endpoint_reset_unconfirmed = 1; /* no further cleanup MMIO */
+    }
+    return 0;
+}
+
+/* Outside this mode-7 transaction the normal link/GPIO path incurs no
+ * added MMIO. Once revoked, do not let later core rollback callbacks or a
+ * briefly recovered shared flag turn the failed trial back into an owner.
+ * A lease check cannot cancel an already issued MMIO transaction. */
+static int wb_endpoint_io_ok(void)
+{
+    if (wb.endpoint_io_window) return wb_guard();
+    return !(wb.sm_diag == WB_SM_ENDPOINT && wb.guard_failed);
 }
 
 static int wb_irq_release(void)
@@ -200,8 +231,8 @@ static int wb_irq_release(void)
 static int wb_ext_supply(__unused void *cookie, __unused uint32_t req, __unused unsigned stage)
 { return wb_quiet_ok() ? 0 : -1; }
 
-static uint32_t wb_gpio_r(void *c, uint32_t off) { (void)c; return wb_mmio(&wb.tlmm, off); }
-static void wb_gpio_w(void *c, uint32_t off, uint32_t v) { (void)c; wb_store(&wb.tlmm, off, v); }
+static uint32_t wb_gpio_r(void *c, uint32_t off) { (void)c; return wb_endpoint_io_ok() ? wb_mmio(&wb.tlmm, off) : UINT32_MAX; }
+static void wb_gpio_w(void *c, uint32_t off, uint32_t v) { (void)c; if (wb_endpoint_io_ok()) wb_store(&wb.tlmm, off, v); }
 static uint32_t wb_aop_r(void *c, uint32_t off) { (void)c; return wb_mmio(&wb.msg, off); }
 static void wb_aop_w(void *c, uint32_t off, uint32_t v) { (void)c; wb_store(&wb.msg, off, v); }
 static int wb_aop_kick(void *c) { (void)c; wb_store(&wb.ipcc, 0xcu, 0); return 0; }
@@ -232,25 +263,35 @@ static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
     /* Only the core's requested access is allowed here. No diagnostic reads
      * of iATU/CFG/SM before admission, even when DBI returns all ones. A CPU
      * load can stall the bus, so record the checkpoint BEFORE issuing it. */
-    if (r == GIULIA_LINK_DBI && off == 0)
+    if (!wb_endpoint_io_ok()) return UINT32_MAX;
+    if (r == GIULIA_LINK_DBI && off == 0) {
         wb_log("ace5-wifi-bringup: DBI+0 access begin\n");
+        /* Logging can block: revalidate before this one dangerous load. */
+        if (!wb_endpoint_io_ok()) return UINT32_MAX;
+    }
     v = wb_mmio(link_reg(r), off);
     wb_dbg_r32[0] = r; wb_dbg_r32[1] = off; wb_dbg_r32[2] = v;
     if (r == GIULIA_LINK_DBI && off == 0)
         wb_log("ace5-wifi-bringup: DBI+0 access returned %#x\n", v);
     return v;
 }
-static void wb_link_w32(void *c, unsigned r, uint32_t off, uint32_t v) { (void)c; wb_store(link_reg(r), off, v); }
+static void wb_link_w32(void *c, unsigned r, uint32_t off, uint32_t v) { (void)c; if (wb_endpoint_io_ok()) wb_store(link_reg(r), off, v); }
 static uint16_t wb_link_r16(void *c, unsigned r, uint32_t off)
 {
-    uint16_t v = *(volatile uint16_t *)(link_reg(r)->address + off);
     (void)c;
+    if (!wb_endpoint_io_ok()) return UINT16_MAX;
+    uint16_t v = *(volatile uint16_t *)(link_reg(r)->address + off);
     wb_barrier(0);
     wb_dbg_r16[0] = r; wb_dbg_r16[1] = off; wb_dbg_r16[2] = v;
     return v;
 }
 static void wb_link_w16(void *c, unsigned r, uint32_t off, uint16_t v)
-{ (void)c; *(volatile uint16_t *)(link_reg(r)->address + off) = v; wb_barrier(0); }
+{
+    (void)c;
+    if (!wb_endpoint_io_ok()) return;
+    *(volatile uint16_t *)(link_reg(r)->address + off) = v;
+    wb_barrier(0);
+}
 
 static uint32_t wb_phy_r(void *c, uint32_t off) { (void)c; return wb_mmio(&wb.phy, off); }
 static void wb_phy_w(void *c, uint32_t off, uint32_t v) { (void)c; wb_store(&wb.phy, off, v); }
@@ -375,8 +416,8 @@ static int wb_arm_early_reset(void);
 static int wb_perst_gpio_low(void)
 {
     if (!wb.tlmm.address) return 0;
-    uint32_t cfg = wb_mmio(&wb.tlmm, 94u * 0x1000u);
-    uint32_t io = wb_mmio(&wb.tlmm, 94u * 0x1000u + 4u);
+    uint32_t cfg = wb_gpio_r(0, 94u * 0x1000u);
+    uint32_t io = wb_gpio_r(0, 94u * 0x1000u + 4u);
     return (cfg & ((1u << 12) | (1u << 9) | (15u << 2))) == (1u << 9) && !(io & 3u);
 }
 
@@ -528,7 +569,8 @@ static int wb_verify_noc(__unused void *cookie)
 
 static int wb_perst_held(void)
 {
-    if (!wb_perst_gpio_low() || (wb_mmio(&wb.parf, 0x1b0u) & (1u << 8))) {
+    if (!wb_perst_gpio_low() || !wb_endpoint_io_ok() ||
+        (wb_mmio(&wb.parf, 0x1b0u) & (1u << 8))) {
         wb.guard_failed = 1;
         return -1;
     }
@@ -761,7 +803,7 @@ static int wb_endpoint_pin_gate(const struct wb_gpio_sample *sample, uint32_t pe
     return GIULIA_LINK_OK;
 }
 
-static int wb_pcie_identify_endpoint(void)
+static int wb_endpoint_transaction(void)
 {
     struct giulia_pcie_link *link = &wb.bringup.link;
     struct giulia_wifi_gpio *gpio = &wb.bringup.supply.gpio;
@@ -793,6 +835,8 @@ static int wb_pcie_identify_endpoint(void)
     rc = wb_endpoint_pin_gate(&before, 0u);
     if (rc) {
         wb_log("ace5-wifi-bringup: endpoint pin gate refused held rc=%d; training skipped\n", rc);
+    } else if (!wb_endpoint_io_ok()) {
+        rc = GIULIA_LINK_PREREQUISITE;
     } else {
         int release = giulia_wifi_gpio_perst_release(gpio,
             GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
@@ -808,6 +852,7 @@ static int wb_pcie_identify_endpoint(void)
             release_gate_error = rc;
         }
     }
+    if (!rc && !wb_endpoint_io_ok()) rc = GIULIA_LINK_PREREQUISITE;
     if (!rc) {
         attempted = 1;
         rc = giulia_pcie_link_identify(link, GIULIA_LINK_TRAIN_REQUIRED);
@@ -822,10 +867,12 @@ static int wb_pcie_identify_endpoint(void)
     if (can_reassert) {
         held = giulia_wifi_gpio_perst_assert(gpio,
             GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE);
-        if (!held && (wb_mmio(&wb.tlmm, 94u * 0x1000u + 4u) & 3u))
+        if (!held && (wb_gpio_r(0, 94u * 0x1000u + 4u) & 3u))
             held = GIULIA_WGPIO_READBACK;
-        if (!held) wb.endpoint_reset_unconfirmed = 0;
+        if (!held && wb_endpoint_io_ok()) wb.endpoint_reset_unconfirmed = 0;
+        if (wb.guard_failed && !held) held = GIULIA_WGPIO_PREREQUISITE;
     }
+    if (wb.guard_failed && !rc) rc = GIULIA_LINK_PREREQUISITE;
     /* Report in the historical event order. An enable-bit readback is NOT
      * proof of Link Up; an attempted or skipped train alone proves neither. */
     if (released_ok)
@@ -863,6 +910,29 @@ static int wb_pcie_identify_endpoint(void)
     if (wb.x1_id && attempted && !rc && !held)
         wb_log("ace5-wifi-bringup: native endpoint width=%u\n", (unsigned)link->id_lanes);
     return held ? held : rc;
+}
+
+static int wb_pcie_identify_endpoint(void)
+{
+    if (wb.sm_diag != WB_SM_ENDPOINT || wb.endpoint_io_window)
+        return GIULIA_LINK_PREREQUISITE;
+    wb.endpoint_io_window = 1;
+    int rc = wb_endpoint_io_ok() ? wb_endpoint_transaction() : GIULIA_LINK_PREREQUISITE;
+    if (!wb_endpoint_io_ok()) {
+        /* Preserve a completed CFG ID as evidence, but never advertise a
+         * newly identified live endpoint after the board lease was lost. No
+         * core cleanup here: it would touch hardware we no longer own. */
+        struct giulia_pcie_link *link = &wb.bringup.link;
+        if (link->state == GIULIA_LINK_IDENTIFIED) {
+            link->failure_stage = link->stage;
+            link->error = GIULIA_LINK_PREREQUISITE;
+            link->state = GIULIA_LINK_FAULT;
+        }
+        wb_log("ace5-wifi-bringup: endpoint lease lost; retained until reset, prior ID is a sample only\n");
+        rc = GIULIA_LINK_PREREQUISITE;
+    }
+    wb.endpoint_io_window = 0;
+    return rc;
 }
 
 static int wb_cesta_pre_dbi(void)
