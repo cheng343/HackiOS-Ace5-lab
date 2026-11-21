@@ -778,6 +778,11 @@ static int wb_pcie_identify_endpoint(void)
         wb_log("ace5-wifi-bringup: PCIe training samples=%u first=%u last=%u seen_lo=%#x seen_hi=%#x\n",
             link->train_samples, link->train_ltssm_first, link->train_ltssm_last,
             link->train_ltssm_seen[0], link->train_ltssm_seen[1]);
+        /* Cached samples from identify; no MMIO, even after cleanup. */
+        wb_log("ace5-wifi-bringup: train evidence parf_valid=%#x parf_enable=%#x parf_timeout=%#x dllla=%u lt=%u xmlh=%u ready=%u\n",
+            link->train_parf_valid, link->train_parf_enable_raw, link->train_parf_timeout_raw,
+            link->train_dllla_samples, link->train_lt_samples,
+            link->train_xmlh_samples, link->train_ready_samples);
     }
     if (sampled_release) wb_log_gpio_sample("released", &released);
     if (attempted) wb_log_gpio_sample("after-training", &trained);

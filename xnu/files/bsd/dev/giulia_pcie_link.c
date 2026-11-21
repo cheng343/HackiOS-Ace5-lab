@@ -88,14 +88,18 @@ static void w32(struct giulia_pcie_link *s, unsigned r, uint32_t o, uint32_t v)
 { s->io.write32(s->io.cookie, r, o, v); s->io.barrier(s->io.cookie); }
 static void w16(struct giulia_pcie_link *s, unsigned r, uint32_t o, uint16_t v)
 { s->io.write16(s->io.cookie, r, o, v); s->io.barrier(s->io.cookie); }
-static int put32(struct giulia_pcie_link *s, unsigned r, uint32_t o,
-    uint32_t v, uint32_t mask)
+static int put32_observed(struct giulia_pcie_link *s, unsigned r, uint32_t o,
+    uint32_t v, uint32_t mask, uint32_t *readback)
 {
     uint32_t got;
     w32(s, r, o, v);
     got = r32(s, r, o);
+    if (readback) *readback = got;
     return got != 0xffffffffu && ((got ^ v) & mask) == 0;
 }
+static int put32(struct giulia_pcie_link *s, unsigned r, uint32_t o,
+    uint32_t v, uint32_t mask)
+{ return put32_observed(s, r, o, v, mask, 0); }
 static int put16(struct giulia_pcie_link *s, unsigned r, uint32_t o, uint16_t v)
 {
     uint16_t got;
@@ -103,12 +107,18 @@ static int put16(struct giulia_pcie_link *s, unsigned r, uint32_t o, uint16_t v)
     got = r16(s, r, o);
     return got != 0xffffu && got == v;
 }
-static int change32(struct giulia_pcie_link *s, unsigned r, uint32_t o,
-    uint32_t clear, uint32_t set, uint32_t mask)
+/* Observe existing accesses: no extra reads from potentially unsafe MMIO. */
+static int change32_observed(struct giulia_pcie_link *s, unsigned r, uint32_t o,
+    uint32_t clear, uint32_t set, uint32_t mask, uint32_t *before, uint32_t *after)
 {
     uint32_t old = r32(s, r, o);
-    return old != 0xffffffffu && put32(s, r, o, (old & ~clear) | set, mask);
+    if (before) *before = old;
+    return old != UINT32_MAX &&
+        put32_observed(s, r, o, (old & ~clear) | set, mask, after);
 }
+static int change32(struct giulia_pcie_link *s, unsigned r, uint32_t o,
+    uint32_t clear, uint32_t set, uint32_t mask)
+{ return change32_observed(s, r, o, clear, set, mask, 0, 0); }
 static int change16(struct giulia_pcie_link *s, unsigned r, uint32_t o,
     uint16_t clear, uint16_t set)
 {
@@ -324,10 +334,11 @@ static int configure_parf(struct giulia_pcie_link *s)
         change32(s, GIULIA_LINK_PARF, PARF_HALT, 0, BIT(31), BIT(31));
 }
 
-static int quiesce_controller(struct giulia_pcie_link *s)
+static int quiesce_controller(struct giulia_pcie_link *s, uint32_t *ltssm_before)
 {
     int okay = 1;
-    okay &= change32(s, GIULIA_LINK_PARF, PARF_LTSSM, BIT(8), 0, BIT(8));
+    okay &= change32_observed(s, GIULIA_LINK_PARF, PARF_LTSSM, BIT(8), 0,
+        BIT(8), ltssm_before, 0);
     for (unsigned n = 0; s->atu_touched && n < 2; n++) {
         uint32_t off = n * 0x200u + ATU_CTRL2;
         okay &= change32(s, GIULIA_LINK_ATU, off, ATU_ENABLE, 0, ATU_ENABLE);
@@ -349,7 +360,11 @@ static int fail(struct giulia_pcie_link *s, int error)
     /* Full core ownership has already been admitted. Early PARF-only failures
      * use reject_after_parf instead. Complete restoration waits for the board
      * owner to assert PERST# and call stop. */
-    (void)quiesce_controller(s);
+    int timeout = s->vendor_training && s->stage == GIULIA_LINK_STAGE_TRAIN &&
+        error == GIULIA_LINK_TIMEOUT;
+    (void)quiesce_controller(s, timeout ? &s->train_parf_timeout_raw : 0);
+    if (timeout && s->train_parf_timeout_raw != UINT32_MAX)
+        s->train_parf_valid |= GIULIA_LINK_TRAIN_PARF_TIMEOUT_VALID;
     return record_failure(s, error);
 }
 
@@ -647,8 +662,11 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
         s->train_lanes_after = (uint8_t)((v & DBI_WIDTH_LANES) >> 8);
         s->train_lanes_verified = 1;
     }
-    if (!change32(s, GIULIA_LINK_PARF, PARF_LTSSM, 0, BIT(8), BIT(8)))
+    if (!change32_observed(s, GIULIA_LINK_PARF, PARF_LTSSM, 0, BIT(8), BIT(8), 0,
+        s->vendor_training ? &s->train_parf_enable_raw : 0))
         return fail(s, GIULIA_LINK_READBACK);
+    if (s->vendor_training)
+        s->train_parf_valid |= GIULIA_LINK_TRAIN_PARF_ENABLE_VALID;
     for (s->polls = 0; s->polls <= 1000u; s->polls++) {
         int ready = link_ready(s);
         if (s->link_status == UINT16_MAX) return fail(s, GIULIA_LINK_READBACK);
@@ -660,7 +678,11 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
             s->train_samples++;
             s->train_ltssm_last = state;
             s->train_ltssm_seen[state / 32u] |= BIT(state % 32u);
+            if (xmlh) s->train_xmlh_samples++;
+            if (s->link_status & DLLLA) s->train_dllla_samples++;
+            if (s->link_status & LINK_TRAINING) s->train_lt_samples++;
             ready = ready && xmlh;
+            if (ready) s->train_ready_samples++;
         }
         if (ready) break;
         if (s->polls < 1000u) delay(s, 1000);
@@ -887,7 +909,7 @@ int giulia_pcie_link_quiesce(struct giulia_pcie_link *s, uint32_t flags)
      * reset endpoint before disabling LTSSM and restoring the snapshots. */
     if (!change16(s, GIULIA_LINK_DBI, PCI_COMMAND, 7u, BIT(10)))
         return record_failure(s, GIULIA_LINK_READBACK);
-    if (!quiesce_controller(s)) return record_failure(s, GIULIA_LINK_READBACK);
+    if (!quiesce_controller(s, 0)) return record_failure(s, GIULIA_LINK_READBACK);
     s->memory_enabled = 0;
     for (i = 0; i <= 100; i++) {
         int active = link_up(s);

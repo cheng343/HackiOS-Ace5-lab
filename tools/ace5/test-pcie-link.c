@@ -16,6 +16,8 @@ struct fake {
     unsigned memory_event_count;
     unsigned link_reads, link_after, crs_reads, drop_link_after;
     unsigned training_on_read, elbi_reads, elbi_sequence_count;
+    unsigned ltssm_reads, override_ltssm_read;
+    uint32_t override_ltssm_raw;
     const uint32_t *elbi_sequence;
     uint16_t negotiated_profile;
     unsigned profile_drift_after_cfg;
@@ -109,6 +111,11 @@ static uint32_t read32(void *p, unsigned r, uint32_t o)
     if (r != GIULIA_LINK_PARF) f->core_reads++;
     if (!aperture_decodes(f, r, o, 4)) return 0xffffffffu;
     v = f->regs[r][o / 4];
+    if (r == GIULIA_LINK_PARF && o == 0x1b0) {
+        f->ltssm_reads++;
+        if (f->ltssm_reads == f->override_ltssm_read)
+            v = f->override_ltssm_raw;
+    }
     if (r == GIULIA_LINK_DBI && o == 0xf28) {
         if (f->elbi_reads < f->elbi_sequence_count)
             v = f->elbi_sequence[f->elbi_reads];
@@ -797,6 +804,8 @@ static void test_training_samples(void)
     assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_TIMEOUT);
     assert(s.train_samples == 1001 && f.elbi_reads == 1001 && f.delay_total == 1000000);
     assert(s.train_ltssm_first == 0 && s.train_ltssm_last == 0);
+    assert(s.train_xmlh_samples == 1 && !s.train_dllla_samples &&
+        !s.train_lt_samples && !s.train_ready_samples);
     assert(s.train_ltssm_seen[0] == (BIT(0) | BIT(31)));
     assert(s.train_ltssm_seen[1] == (BIT(0) | BIT(31)));
     assert(!f.cfg_accesses && !s.atu_touched);
@@ -809,6 +818,8 @@ static void test_training_samples(void)
     f.elbi_sequence_count = sizeof(unreadable) / sizeof(unreadable[0]);
     assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_READBACK);
     assert(f.elbi_reads == 2 && f.delay_total == 1000 && s.elbi_status == UINT32_MAX);
+    assert(s.train_parf_valid == GIULIA_LINK_TRAIN_PARF_ENABLE_VALID);
+    assert(!s.train_xmlh_samples && !s.train_dllla_samples && !s.train_ready_samples);
     assert(s.train_samples == 1 && s.train_ltssm_first == 2 && s.train_ltssm_last == 2);
     assert(s.train_ltssm_seen[0] == BIT(2) && !s.train_ltssm_seen[1]);
     assert(!f.cfg_accesses && !s.atu_touched);
@@ -821,8 +832,57 @@ static void test_training_samples(void)
     f.negotiated_profile |= BIT(12); /* Slot Clock Configuration */
     assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_OK);
     assert(s.polls == 1000 && s.train_samples == 1001 && f.elbi_reads == 1002);
+    assert(s.train_parf_valid == GIULIA_LINK_TRAIN_PARF_ENABLE_VALID &&
+        s.train_xmlh_samples == 1001 && s.train_dllla_samples == 1 &&
+        !s.train_lt_samples && s.train_ready_samples == 1);
     assert(f.delay_total == 1000000 && f.cfg_accesses == 1);
     stop(&f, &s);
+}
+
+static void test_retained_training_evidence(void)
+{
+    struct fake f;
+    struct giulia_pcie_link s;
+    const uint32_t timeout_words[] = {BIT(8), 5, UINT32_MAX};
+
+    /* Same end-of-loop ELBI=Detect.Quiet in all three cases. Only the
+     * existing pre-clear PARF read tells us whether EN is still observed.
+     * A stale, unreadable PARF word is not a six-bit state of 63. */
+    for (unsigned i = 0; i < 3; i++) {
+        prepare_vendor_training(&f, &s, 1);
+        unsigned before = f.ltssm_reads;
+        f.override_ltssm_read = before + 3;
+        f.override_ltssm_raw = timeout_words[i];
+        /* XMLH only on poll 0, DLLLA only from poll 1, LT on poll 2.
+         * Never accept an unpaired link-up indication. */
+        const uint32_t first = BIT(10);
+        f.elbi_sequence = &first;
+        f.elbi_sequence_count = 1;
+        f.link_after = 2;
+        f.training_on_read = 3;
+        assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_TIMEOUT);
+        assert(s.train_parf_enable_raw == BIT(8) && s.train_parf_timeout_raw == timeout_words[i]);
+        unsigned valid = GIULIA_LINK_TRAIN_PARF_ENABLE_VALID |
+            (i == 2 ? 0 : GIULIA_LINK_TRAIN_PARF_TIMEOUT_VALID);
+        assert(s.train_parf_valid == valid && s.train_samples == 1001);
+        assert(s.train_xmlh_samples == 1 && s.train_dllla_samples == 1000 &&
+            s.train_lt_samples == 1 && !s.train_ready_samples && !s.train_ltssm_last);
+        /* RMW before/write/readback for enable and disable. An inaccessible
+         * pre-clear read skips the last write/readback exactly as before. */
+        assert(f.ltssm_reads == before + (i == 2 ? 3u : 4u));
+        assert(!f.cfg_accesses && !s.atu_touched);
+        stop(&f, &s);
+        assert(s.train_parf_valid == valid && s.train_parf_timeout_raw == timeout_words[i]);
+    }
+    prepare_vendor_training(&f, &s, 1);
+    assert(!s.train_parf_valid && !s.train_samples);
+    f.override_ltssm_read = f.ltssm_reads + 2;
+    f.override_ltssm_raw = UINT32_MAX; /* enable readback fails */
+    assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_READBACK);
+    assert(s.train_parf_enable_raw == UINT32_MAX && !s.train_parf_valid &&
+        !s.train_samples && !f.elbi_reads && !f.cfg_accesses);
+    stop(&f, &s);
+    puts("Wi-Fi training: retained LTSSM snapshots and paired status evidence passed");
 }
 
 static void test_retraining(void)
@@ -840,6 +900,8 @@ static void test_retraining(void)
         int rc = giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED);
         if (retrain == 1) {
             assert(rc == GIULIA_LINK_OK && s.train_samples == 2);
+            assert(s.train_xmlh_samples == 2 && s.train_dllla_samples == 2 &&
+                s.train_lt_samples == 1 && s.train_ready_samples == 1);
             assert(f.cfg_accesses == 1 && f.delay_total == 1000);
         } else {
             assert(rc == GIULIA_LINK_DOWN && s.train_samples == 1);
@@ -1039,6 +1101,7 @@ int main(void)
     test_split_prepare();
     test_vendor_training();
     test_training_samples();
+    test_retained_training_evidence();
     test_retraining();
     test_native_width();
     test_stock_train_lanes();

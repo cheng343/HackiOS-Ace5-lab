@@ -19,6 +19,11 @@
 #define GIULIA_PCIE_LINK_ROOT_ID 0x011317cbu
 #define GIULIA_PCIE_LINK_EP_ID 0x110717cbu
 
+/* Validity of observations, not link-up conditions. PARF bit 8 enables
+ * training; bits [5:0] expose the vendor LTSSM state. */
+#define GIULIA_LINK_TRAIN_PARF_ENABLE_VALID (1u << 0)
+#define GIULIA_LINK_TRAIN_PARF_TIMEOUT_VALID (1u << 1)
+
 enum giulia_pcie_link_region {
     GIULIA_LINK_PARF, GIULIA_LINK_DBI, GIULIA_LINK_ATU, GIULIA_LINK_CFG
 };
@@ -105,6 +110,12 @@ struct giulia_pcie_link {
      * First/last are meaningful when train_samples is nonzero. */
     uint32_t train_samples, train_ltssm_first, train_ltssm_last;
     uint32_t train_ltssm_seen[2];
+    /* Historical snapshots only. Unset validity means absent or invalid;
+     * consult the stage/error, not zero-filled fields, for early failures. */
+    uint32_t train_parf_enable_raw, train_parf_timeout_raw, train_parf_valid;
+    /* Counts from complete, valid, paired DBI/ELBI samples only. Ready
+     * means DLLLA and XMLH together with LT clear; later CFG checks excluded. */
+    uint32_t train_xmlh_samples, train_dllla_samples, train_lt_samples, train_ready_samples;
     uint32_t polls, bar0_mask, bar0_mask_hi;
     uint16_t root_pcie_cap, endpoint_pcie_cap, endpoint_msi_cap;
     uint16_t endpoint_msix_cap;
