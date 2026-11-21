@@ -66,6 +66,43 @@ def shorten(good, payload, out):
     out.write_bytes(img)
 
 
+def declared_double_volume(src, out):
+    # The controlled small mkapfs fixture builds both volumes and their OIDs, but
+    # calculates nx_max_file_systems from container capacity (=1 here). Keep
+    # that source byte-for-byte, and re-declare its two existing volumes in a
+    # second, well-formed fixture. Both the initial NXSB and the transaction
+    # checkpoint NXSB must agree; modifying only the initial copy is ineffective.
+    sys.path.insert(0, str(WRITER.parent))
+    import mkapfs
+    bs = 4096
+    if not bs <= src.stat().st_size <= LIMIT:
+        raise AssertionError("two-volume source outside synthetic size bounds")
+    img = bytearray(src.read_bytes())
+    nx = img[:bs]
+    if (len(img) % bs or nx[32:36] != b"NXSB" or struct.unpack_from("<I", nx, 36)[0] != bs
+            or struct.unpack_from("<Q", nx, 40)[0] != len(img) // bs
+            or struct.unpack_from("<Q", nx, 0)[0] != mkapfs.fletcher64(nx)):
+        raise AssertionError("truncated, non-4KiB or unsealed synthetic container")
+    declared = struct.unpack_from("<I", nx, 180)[0]
+    a, b = struct.unpack_from("<QQ", nx, 184)
+    if declared != 1 or not a or not b or a == b or any(nx[200:184 + 100 * 8]):
+        raise AssertionError("expected precisely two populated OIDs and one declared slot")
+    desc_base = struct.unpack_from("<Q", nx, 112)[0]
+    desc_blocks = struct.unpack_from("<I", nx, 104)[0]
+    if desc_base == 0 or desc_blocks < 2 or desc_base + desc_blocks > len(img) // bs:
+        raise AssertionError("invalid synthetic checkpoint descriptor ring")
+    # Writer: first ring block is CPMAP; the next is a byte-identical NXSB.
+    copy = (desc_base + 1) * bs
+    if img[copy:copy + bs] != nx:
+        raise AssertionError("selected checkpoint does not match block-zero NXSB")
+    struct.pack_into("<I", nx, 180, 2)
+    struct.pack_into("<Q", nx, 0, mkapfs.fletcher64(nx))
+    img[:bs] = nx
+    img[copy:copy + bs] = nx
+    with out.open("xb") as dst:
+        dst.write(img)
+
+
 def suite(tmp, cc):
     exe = tmp / "reader"
     run(cc, "-std=c11", "-D_DEFAULT_SOURCE", "-O1", "-I", APFS, "-I", DEV, "-I", SHIM,
@@ -112,7 +149,11 @@ def suite(tmp, cc):
     test(good, "@unreadable", name, LIMIT, "invalid")
     test(ABSENT, ABSENT, name, LIMIT, "absent")
     test(good, mk("wrong", [("System", old)]), name, LIMIT, "invalid")
-    test(good, mk("multi", [("redwood", old), ("other", root)]), name, LIMIT, "invalid")
+    multi = mk("multi", [("redwood", old), ("other", root)])
+    declared = tmp / "two-declared-volumes.apfs"
+    declared_double_volume(multi, declared)
+    test(good, multi, name, LIMIT, "invalid")      # extra OID past declared range
+    test(good, declared, name, LIMIT, "invalid")   # ordinary, declared two-volume container
     broken = tmp / "broken.apfs"
     broken.write_bytes(bytes(8192))
     test(good, broken, name, LIMIT, "invalid")

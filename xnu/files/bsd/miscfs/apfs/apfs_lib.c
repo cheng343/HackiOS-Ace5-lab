@@ -1115,6 +1115,7 @@ apfs_nx_open(struct apfs_nx *nx, const struct apfs_dev *dev)
 		uint32_t maxfs = le32(blk + 180);
 
 		if (maxfs > APFS_NX_MAX_FILE_SYSTEMS) {
+			nx->fs_table_inconsistent = true;
 			maxfs = APFS_NX_MAX_FILE_SYSTEMS;
 		}
 		nx->fs_count = 0;
@@ -1124,6 +1125,14 @@ apfs_nx_open(struct apfs_nx *nx, const struct apfs_dev *dev)
 			nx->fs_oid[i] = oid;
 			if (oid != 0) {
 				nx->fs_count = i + 1;
+			}
+		}
+		/* Observe ALL fixed-size slots of this selected checkpoint. Do not
+		 * mount or expose undeclared OIDs to ordinary volume enumeration. */
+		for (i = maxfs; i < APFS_NX_MAX_FILE_SYSTEMS; i++) {
+			if (le64(blk + 184 + 8 * i) != 0) {
+				nx->fs_table_inconsistent = true;
+				break;
 			}
 		}
 	}

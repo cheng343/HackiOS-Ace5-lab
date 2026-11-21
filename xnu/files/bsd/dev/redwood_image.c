@@ -103,13 +103,8 @@ apfs_file(int disk, const uint8_t *base, uint64_t length, const char *dir, const
 	if (plain_limit != 0) {
 		/* mkapfs creates a single "redwood" boot volume. Never walk an iOS
 		 * System volume, or let a second volume supply a missing private blob. */
-		for (uint32_t v = 1; v < APFS_NX_MAX_FILE_SYSTEMS; v++) {
-			if (nx->fs_oid[v] != 0) {
-				apfs_nx_close(nx);
-				goto out;
-			}
-		}
-		if (nx->fs_oid[0] == 0 || apfs_vol_open(nx, 0, vol) != 0 ||
+		if (nx->fs_table_inconsistent || nx->fs_count != 1 ||
+		    nx->fs_oid[0] == 0 || apfs_vol_open(nx, 0, vol) != 0 ||
 		    strcmp(vol->name, "redwood") != 0) {
 			apfs_nx_close(nx);
 			goto out;

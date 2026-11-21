@@ -186,6 +186,7 @@ struct apfs_nx {
 	uint64_t          omap_addr;
 	apfs_oid_t        fs_oid[APFS_NX_MAX_FILE_SYSTEMS];
 	uint32_t          fs_count;
+	bool              fs_table_inconsistent; /* extra nonzero OIDs or invalid declared capacity */
 	uint8_t           uuid[16];
 	struct apfs_omap  omap;         /* resolves volume superblocks */
 	/*
