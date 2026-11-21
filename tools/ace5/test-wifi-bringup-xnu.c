@@ -54,6 +54,10 @@ static unsigned endpoint_identifies, endpoint_releases, endpoint_reasserts, x1_i
 enum pin_fault { PIN_OK, HELD_READ_FAIL, HELD_EN_LOW, HELD_PERST_HIGH,
     RELEASE_READ_FAIL, RELEASE_PERST_LOW, RELEASE_EN_LOW, REASSERT_STUCK_HIGH };
 static enum pin_fault injected_pin_fault;
+/* Set by the fake GPIO, not by the code under test. Both sinks must stay
+ * silent between a successful release and the return of a permitted reassert. */
+static int ep_critical, identify_rc, lose_owner, release_rc;
+static unsigned ep_loader_calls, ep_console_calls;
 static char messages[16384];
 static struct { uintptr_t va; vm_size_t size; } allocation[24];
 static void wb_test_barrier(void);
@@ -122,7 +126,8 @@ static thread_t current_thread(void) { return (void *)(uintptr_t)1; }
 static void thread_deallocate(thread_t thread) { assert(thread==current_thread());deallocs++; }
 static int kernel_thread_start(void (*fn)(void *,wait_result_t),void *arg,thread_t *out)
 { creates++;*out=current_thread();fn(arg,0);return 0; }
-static int quiet_printf(const char *format,...) { (void)format;return 0; }
+static int quiet_printf(const char *format,...)
+{ (void)format; assert(!ep_critical); ep_console_calls++; return 0; }
 #define printf quiet_printf
 #include "../../xnu/files/bsd/dev/giulia_wifi_bringup_xnu.c"
 #undef printf
@@ -171,7 +176,8 @@ void ml_io_unmap(vm_offset_t va,vm_size_t size)
 }
 kern_return_t thread_terminate(thread_t thread) { assert(thread==current_thread());exits++;return 0; }
 void loader_log_line(const char *s)
-{ assert(strlen(messages)+strlen(s)<sizeof(messages));strcat(messages,s); }
+{ assert(!ep_critical); ep_loader_calls++;
+  assert(strlen(messages)+strlen(s)<sizeof(messages));strcat(messages,s); }
 void loader_return(void) { loader_returns++; }
 int giulia_pcie_power_pipe_ready(struct giulia_pcie_power *p, uint32_t *cbcr)
 { assert(p == &wb.bringup.supply.power); *cbcr = 0x10c00; return GIULIA_POWER_OK; }
@@ -219,6 +225,9 @@ int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *g, uint32_t flags)
     assert(flags == (GIULIA_WGPIO_RELEASE_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
     assert(g->state == GIULIA_WGPIO_ON && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED);
     endpoint_releases++;
+    assert(!ep_critical);
+    if (release_rc) return release_rc;
+    ep_critical = 1;
     *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u) =
         injected_pin_fault == RELEASE_PERST_LOW ? 2u : 3u;
     g->state = GIULIA_WGPIO_RELEASED;
@@ -233,13 +242,34 @@ int giulia_wifi_gpio_perst_assert(struct giulia_wifi_gpio *g, uint32_t flags)
     *(uint32_t *)(wb.tlmm.address + 94u * 0x1000u + 4u) =
         injected_pin_fault == REASSERT_STUCK_HIGH ? 1u : 0u;
     g->state = GIULIA_WGPIO_ON;
+    ep_critical = 0;
     return 0;
 }
 int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
 {
     assert(flags == GIULIA_LINK_TRAIN_REQUIRED && wb.bringup.supply.gpio.state == GIULIA_WGPIO_RELEASED);
     assert(wb.endpoint_reset_unconfirmed);
+    assert(ep_critical);
     endpoint_identifies++;
+    s->train_parf_valid = GIULIA_LINK_TRAIN_PARF_ENABLE_VALID;
+    s->failure_stage = 0;
+    if (identify_rc) {
+        s->stage = s->failure_stage = GIULIA_LINK_STAGE_TRAIN;
+        s->endpoint_id = s->id_lanes = s->train_lanes_verified = 0;
+        s->train_samples = s->polls = s->train_ltssm_seen[0] = 0;
+        s->train_ltssm_first = s->train_ltssm_last = 0;
+        s->link_status = 0;
+        if (identify_rc == GIULIA_LINK_TIMEOUT) {
+            s->train_parf_valid |= GIULIA_LINK_TRAIN_PARF_TIMEOUT_VALID;
+            s->train_samples = s->polls = 3;
+            s->train_ltssm_seen[0] = 1; /* three synthetic Detect.Quiet samples */
+        } else {
+            assert(identify_rc == GIULIA_LINK_READBACK);
+            s->train_parf_valid = 0;
+        }
+        if (lose_owner) { wb.guard_failed = 1; ep_critical = 0; }
+        return identify_rc;
+    }
     s->endpoint_id = GIULIA_PCIE_LINK_EP_ID;
     s->link_status = 0x2011;
     s->id_lanes = wb.x1_id ? 1u : 0u;
@@ -341,6 +371,8 @@ static void setup(void)
     watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
     wdt_call_count=wdt_fail_at=wdt_disables=wdt_competing=0;
     cold_reset=mock_reset_response=loader_returns=0;
+    ep_critical=identify_rc=lose_owner=release_rc=0;
+    ep_loader_calls=ep_console_calls=0;
     keep_sls_arg=suppress_sls_latch=0;
     root_id_reads=pcs_first_arg=pre_phy_clks_arg=drop_pre_phy_clock=x1_id_arg=native_width_arg=0;
     endpoint_identifies=endpoint_releases=endpoint_reasserts=0;injected_pin_fault=PIN_OK;
@@ -702,7 +734,14 @@ static void noc_after_phy(void)
     perf[0x4 / 4] = GIULIA_PCIE_BOOT_PERF;
     assert(wb_cesta_pre_dbi() == GIULIA_LINK_PREREQUISITE && !endpoint_identifies);
     perf[0x4 / 4] = GIULIA_PCIE_STOCK_STARTUP_PERF;
+    messages[0] = 0;
+    unsigned log_before = ep_loader_calls, console_before = ep_console_calls;
     assert(wb_cesta_pre_dbi() == 0 && endpoint_identifies == 1);
+    assert(ep_loader_calls > log_before && ep_console_calls > console_before && !ep_critical);
+    const char *released_log = strstr(messages,"reset release rc=0 (deferred; ltssm_enable_readback=1)");
+    const char *id_log = strstr(messages,"endpoint identify rc=0");
+    const char *reassert_log = strstr(messages,"endpoint reset reassert rc=0");
+    assert(released_log && id_log && reassert_log && released_log < id_log && id_log < reassert_log);
     assert(strstr(messages, "endpoint pins held en=0x3 sw=0 wlan_sw=0 perst=0 clkreq="));
     assert(strstr(messages, "PCIe training samples=2 first=0 last=17 seen_lo=0x20001 seen_hi=0"));
     assert(strstr(messages, "endpoint pins released en=0x3 sw=0 wlan_sw=0 perst=0x3 clkreq="));
@@ -746,6 +785,9 @@ static void noc_after_phy(void)
         assert(wb_cesta_pre_dbi() == refusals[i].error && endpoint_identifies == 3);
         assert(strstr(messages, refusals[i].released ? "pin gate refused released" : "pin gate refused held"));
         assert(!strstr(messages, "PCIe endpoint identify") && !strstr(messages, "PCIe training samples"));
+        assert(!!strstr(messages,"reset release rc=0 (deferred; ltssm_enable_readback=0)") ==
+            !!refusals[i].released);
+        assert(!strstr(messages,"ltssm_enable_readback=1"));
         assert(!strstr(messages, "stock train lanes before=") && !strstr(messages, "native endpoint width="));
         assert(endpoint_releases == releases + refusals[i].released && endpoint_reasserts == reasserts + 1);
         assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
@@ -757,6 +799,47 @@ static void noc_after_phy(void)
     wb.native_width = wb.stock_train = wb.x1_id = 0;
     /* End this synthetic stuck-pin scenario before testing unrelated leases. */
     perst[1] = 0; wb.endpoint_reset_unconfirmed = 0; injected_pin_fault = PIN_OK;
+    /* Differentiate proof of LTSSM-enable readback from training/ID success. */
+    wb.native_width = wb.stock_train = wb.x1_id = 1;
+    for (unsigned n = 0; n < 2; n++) {
+        unsigned releases = endpoint_releases, ids = endpoint_identifies, resets = endpoint_reasserts;
+        messages[0] = 0;
+        identify_rc = n ? GIULIA_LINK_TIMEOUT : GIULIA_LINK_READBACK;
+        assert(wb_cesta_pre_dbi() == identify_rc);
+        assert(!ep_critical && endpoint_releases == releases+1 && endpoint_identifies == ids+1 &&
+            endpoint_reasserts == resets+1 && !wb.endpoint_reset_unconfirmed);
+        released_log = strstr(messages, n ? "reset release rc=0 (deferred; ltssm_enable_readback=1)" :
+                                            "reset release rc=0 (deferred; ltssm_enable_readback=0)");
+        char expected[112];
+        snprintf(expected,sizeof(expected),"endpoint identify rc=%d id=0 lnk=0 stage=%u fail=%u polls=%u",
+            identify_rc,(unsigned)GIULIA_LINK_STAGE_TRAIN,(unsigned)GIULIA_LINK_STAGE_TRAIN,n ? 3u : 0u);
+        id_log = strstr(messages,expected);
+        reassert_log = strstr(messages,"endpoint reset reassert rc=0");
+        assert(released_log && id_log && reassert_log && released_log < id_log && id_log < reassert_log);
+        assert(strstr(messages, n ? "PCIe training samples=3 first=0 last=0 seen_lo=0x1" :
+                                    "PCIe training samples=0 first=0 last=0 seen_lo=0"));
+        assert(!strstr(messages,"endpoint identify rc=0") && !strstr(messages,"native endpoint width="));
+    }
+    unsigned ids = endpoint_identifies, resets = endpoint_reasserts;
+    messages[0] = 0; identify_rc = 0; release_rc = GIULIA_WGPIO_READBACK;
+    assert(wb_cesta_pre_dbi() == GIULIA_LINK_PREREQUISITE);
+    char release_error[72];
+    snprintf(release_error,sizeof(release_error),"endpoint reset release rc=%d\n",release_rc);
+    assert(strstr(messages,release_error) && !strstr(messages,"(deferred;") &&
+        !strstr(messages,"endpoint identify") && endpoint_identifies == ids &&
+        endpoint_reasserts == resets+1 && !wb.endpoint_reset_unconfirmed);
+    release_rc = 0; messages[0] = 0; resets = endpoint_reasserts;
+    identify_rc = GIULIA_LINK_TIMEOUT; lose_owner = 1;
+    assert(wb_cesta_pre_dbi() == GIULIA_LINK_PREREQUISITE);
+    assert(endpoint_identifies == ids+1 && endpoint_reasserts == resets && wb.endpoint_reset_unconfirmed);
+    assert(strstr(messages,"reset release rc=0 (deferred; ltssm_enable_readback=1)") &&
+        strstr(messages,"endpoint identify rc=-7") && !strstr(messages,"endpoint reset reassert") &&
+        !strstr(messages,"native endpoint width="));
+    /* This was a synthetic lease-loss fixture, not a performed or inferred reset. */
+    lose_owner = identify_rc = 0; wb.guard_failed = wb.endpoint_reset_unconfirmed = 0;
+    wb.bringup.supply.gpio.state = GIULIA_WGPIO_ON; perst[1] = 0;
+    wb.native_width = wb.stock_train = wb.x1_id = 0;
+    puts("PASS: guarded release-to-reassert window is silent in both sinks; failures retain their evidence");
     wb.bringup.link.state = GIULIA_LINK_PARF_READY;
     wb.bringup.pipe_checked = 0;
     wb.bringup.supply.power.state = GIULIA_POWER_READY;
