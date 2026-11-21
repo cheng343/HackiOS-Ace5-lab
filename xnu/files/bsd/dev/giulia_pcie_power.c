@@ -34,6 +34,7 @@
 #define GDSC_INIT_FIELDS 0x00fff006u
 #define GDSC_WAIT_DEFAULT 0x00282000u
 #define RCG_FIELDS 0x0010371fu
+#define RCG_HW_CLK_CTRL B(20)
 #define ROOT_FORCE B(1)
 #define ROOT_UPDATE B(0)
 #define ROOT_OFF B(31)
@@ -325,7 +326,7 @@ giulia_pcie_power_prepare_host(struct giulia_pcie_power *p,
 {
     unsigned i;
     int r;
-    uint32_t value, aux_cmd, rch_cmd;
+    uint32_t value, aux_cmd, rch_cmd, rch_cfg = 0x605u;
     if (!p || !io || !io->read32 || !io->write32 || !io->barrier || !io->delay_us)
         return GIULIA_POWER_ARGUMENT;
     uint32_t route = prerequisites & (GIULIA_POWER_DIRECT_VOTES | GIULIA_POWER_CESTA_COORDINATED);
@@ -367,6 +368,13 @@ giulia_pcie_power_prepare_host(struct giulia_pcie_power *p,
         if ((r = rchng_handoff_admit(p))) return r;
         p->inherited_rchng = 1;
     }
+    /* The giulia handoff can leave PHY_RCHNG in hardware clock control.
+     * Preserve its saved CFG bit on the board route: the downstream
+     * gcc-pineapple clock selects HW_CLK_CTRL_MODE (RCG2 CFG bit 20).
+     * Do not force it on if absent, change AUX, or adopt the vendor's
+     * broader clock policy. Direct voting keeps the original profile. */
+    if (route == GIULIA_POWER_CESTA_COORDINATED)
+        rch_cfg |= p->saved[RCH_CFG] & RCG_HW_CLK_CTRL;
     p->state = GIULIA_POWER_FAULT; /* Any attempted write now needs cleanup. */
     if ((r = gdsc_on(p, CORE_GDSC, B(0))) ||
         (r = gdsc_on(p, PHY_GDSC, B(3))) ||
@@ -375,7 +383,7 @@ giulia_pcie_power_prepare_host(struct giulia_pcie_power *p,
          * Both have N=0: integer mode, no change to AUX M/N/D registers.
          */
         (r = rcg_apply(p, AUX_CMD, AUX_CFG, 1u, p->saved[AUX_CMD])) ||
-        (r = rcg_apply(p, RCH_CMD, RCH_CFG, 0x605u, p->saved[RCH_CMD])) ||
+        (r = rcg_apply(p, RCH_CMD, RCH_CFG, rch_cfg, p->saved[RCH_CMD])) ||
         (r = pipe_off(p)))
         goto fail;
     for (i = 0; i < 8; i++)

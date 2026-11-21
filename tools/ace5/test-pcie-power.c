@@ -302,6 +302,44 @@ static void inherited_init(struct mock *m)
     r = find(m, 0, 0x6b05c); r->value = r->original = 0x100000;
     m->active_rch = 0x100000;
 }
+/* Isolate the captured RCHNG CFG mode from the separate GPLL rate and
+ * branch vote. An enabled HW_CLK_CTRL on AUX must still not be propagated. */
+static void board_rchng_hw_control(void)
+{
+    for (unsigned board = 0; board < 2; ++board)
+    for (unsigned high = 0; high < 2; ++high)
+    for (unsigned fail = 0; fail < 2; ++fail) {
+        struct giulia_pcie_power p = {0};
+        struct mock m;
+        inherited_init(&m);
+        struct reg *rch = find(&m, 0, 0x6b05c), *aux = find(&m, 0, 0x6b078);
+        rch->value = rch->original = BIT(29) | (high ? BIT(20) : 0u);
+        aux->value = aux->original |= BIT(20);
+        m.active_rch = rch->original & CFG_MASK;
+        m.active_aux = aux->original & CFG_MASK;
+        uint32_t flags = (board ? GIULIA_POWER_HOST_REQUIRED | GIULIA_POWER_CESTA_COORDINATED
+                                : GIULIA_POWER_REQUIRED) | GIULIA_POWER_RCHNG_HANDOFF;
+        struct giulia_pcie_power_io v = io(&m);
+        /* Fail after both RCGs committed, exercising the genuine early unwind. */
+        if (fail) m.branch_stuck = 0x6b03c;
+        int rc = giulia_pcie_power_prepare_host(&p, &v, flags);
+        uint32_t expected = 0x605u | ((board && high) ? BIT(20) : 0u);
+        unsigned cfg = event_at(&m, 0x6b05c, ~0u, BIT(29) | expected, 0);
+        event_at(&m, 0x6b078, ~0u, (aux->original & ~CFG_MASK) | 1u, 0);
+        if (fail) {
+            assert(rc == GIULIA_POWER_TIMEOUT && p.last_error == rc && !p.cleanup_error);
+        } else {
+            assert(rc == 0 && p.state == GIULIA_POWER_HOST_PREPARED);
+            assert(m.active_rch == expected && m.active_aux == 1u);
+            assert(!giulia_pcie_power_stop(&p, GIULIA_POWER_STOP_REQUIRED |
+                (board ? GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET : 0u)));
+        }
+        event_at(&m, 0x6b05c, ~0u, rch->original, cfg + 1);
+        restored(&m, &p); /* Includes active CFG after UPDATE, not just its shadow. */
+    }
+    puts("Ace5 PCIe0: board preserves the inherited RCHNG mode; direct, AUX and rollback unchanged");
+}
+
 static void inherited_rchng(void)
 {
     struct mock m;
@@ -640,6 +678,7 @@ int main(void)
     board_reset_timing();
     admission();
     inherited_rchng();
+    board_rchng_hw_control();
     timeouts();
     readback_and_retry();
     inaccessible_mmio();
