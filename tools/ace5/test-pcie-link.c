@@ -10,7 +10,7 @@
 struct fake {
     uint32_t regs[4][0x3000 / 4];
     uint32_t original[4][0x3000 / 4];
-    unsigned reads, writes, cfg_accesses, bar_probes, barriers, lane_writes;
+    unsigned reads, writes, cfg_accesses, bar_probes, barriers, lane_writes, lnkcap_writes;
     unsigned core_reads, core_writes, cold_aperture, allow_memory, perst_asserted, core_dark;
     char memory_events[64];
     unsigned memory_event_count;
@@ -174,6 +174,7 @@ static void write32(void *p, unsigned r, uint32_t o, uint32_t v)
         assert((raw16(f, GIULIA_LINK_CFG, 0x52) & 1u) == 0);
         if (o == 0x10 && v == 0xffffffffu) f->bar_probes++;
     }
+    if (r == GIULIA_LINK_DBI && o == 0x7cu) f->lnkcap_writes++;
     if (r == GIULIA_LINK_DBI && o == 0x80cu) {
         assert(!(v & BIT(17)));
         f->lane_writes++;
@@ -192,6 +193,7 @@ static void write16(void *p, unsigned r, uint32_t o, uint16_t v)
     f->writes++;
     assert(aperture_decodes(f, r, o, 2));
     if (r != GIULIA_LINK_PARF) f->core_writes++;
+    if (r == GIULIA_LINK_DBI && (o == 0x7cu || o == 0x7eu)) f->lnkcap_writes++;
     if ((r == GIULIA_LINK_DBI || r == GIULIA_LINK_CFG) && o == 4) {
         assert((v & 5u) == 0); /* No IO or BME, including failures. */
         if (v & BIT(1)) assert(f->allow_memory);
@@ -1002,6 +1004,54 @@ static void test_native_x1_id(void)
     puts("Wi-Fi native identify: stable x1 or x2 only, no BAR or width drift passed");
 }
 
+static void test_preserve_speed_cap(void)
+{
+    struct fake f;
+    struct giulia_pcie_link s;
+    const uint32_t base = GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID |
+        GIULIA_LINK_VENDOR_TRAINING | GIULIA_LINK_NATIVE_WIDTH;
+    const uint32_t flag = GIULIA_LINK_PRESERVE_SPEED_CAP;
+    const uint32_t cap = 0x7b4c23u; /* giulia RC0: Gen3 x2; target is separate */
+    init(&f, &s);
+    assert(giulia_pcie_link_prepare(&s, (base | flag) & ~GIULIA_LINK_NATIVE_WIDTH) == GIULIA_LINK_PREREQUISITE);
+    assert(giulia_pcie_link_prepare(&s, (base | flag) & ~GIULIA_LINK_VENDOR_TRAINING) == GIULIA_LINK_PREREQUISITE);
+    assert(!f.reads && !f.writes);
+    for (unsigned t = 0; t < 6; t++) {
+        init(&f, &s);
+        struct giulia_pcie_link_io io = io_for(&f);
+        uint32_t advertised = t == 3 ? cap - 1u : t == 4 ? cap - 0x10u : cap;
+        f.regs[GIULIA_LINK_DBI][0x7c / 4] = advertised;
+        f.regs[GIULIA_LINK_DBI][0xf28 / 4] = BIT(10);
+        f.negotiated_profile = t == 2 ? 0x22u : 0x21u;
+        assert(!giulia_pcie_link_prepare_parf(&s, GIULIA_LINK_PARF_REQUIRED, &io));
+        if (t == 5) { /* target-LNKCTL2 write fails after admission */
+            f.drop_region = GIULIA_LINK_DBI; f.drop_offset = 0xa0; f.drop_mask = 0xf; f.drop_on = 1;
+        }
+        int rc = giulia_pcie_link_prepare(&s, base | (t == 0 ? 0u : flag));
+        if (t == 3 || t == 4) {
+            assert(rc == GIULIA_LINK_PROFILE && !f.core_writes && !s.core_owned);
+        } else if (t == 5) {
+            assert(rc == GIULIA_LINK_READBACK && !f.cfg_accesses);
+            f.drop_on = 0;
+        } else {
+            assert(!rc && s.preserve_speed_cap == (t != 0));
+            assert(f.regs[GIULIA_LINK_DBI][0x7c / 4] == (t ? cap : cap - 2u));
+            assert(f.lnkcap_writes == (unsigned)(t == 0));
+            assert(raw16(&f, GIULIA_LINK_DBI, 0xa0) == 0x21u);
+            assert(giulia_pcie_link_train(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_PREREQUISITE);
+            rc = giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED);
+            assert(rc == (t == 2 ? GIULIA_LINK_PROFILE : GIULIA_LINK_OK));
+            assert(f.cfg_accesses == (unsigned)(t != 2));
+        }
+        assert(!f.bar_probes && !s.memory_enabled && !s.memory_owned);
+        assert(!quiesce_then_stop(&f, &s));
+        assert(f.regs[GIULIA_LINK_DBI][0x7c / 4] == advertised);
+        assert(f.lnkcap_writes == (t == 0 ? 2u : 0u));
+        assert(raw16(&f, GIULIA_LINK_DBI, 0xa0) == 0x23u);
+    }
+    puts("PASS: native Gen3 x2 capability preserved with Gen1-only target, identity and rollback");
+}
+
 static void test_stock_train_lanes(void)
 {
     struct fake f;
@@ -1156,6 +1206,7 @@ int main(void)
     test_native_width();
     test_native_x1_id();
     test_stock_train_lanes();
+    test_preserve_speed_cap();
     test_parf_drift_before_dbi();
     test_boot_profile();
     puts("SM8650 PCIe link: ownership, training, config, BAR and rollback mocks passed");

@@ -117,6 +117,26 @@ class PhoneTests(unittest.TestCase):
             check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True, native_width=True)
         check(True, 4, endpoint.replace('lnk=0x2011', 'lnk=0x2021'), 'yes', self.log,
               sm_diag=7, cold_reset=True, native_width=True)
+        keep = 'ace5-wifi-bringup: native speed cap=3 target=1\n'
+        common = dict(sm_diag=7, cold_reset=True, pcs_first=True, native_width=True, preserve_speed_cap=True)
+        reference = endpoint.replace('lnk=0x2011', 'lnk=0x2021') + 'ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access\n'
+        check(True, 4, reference + keep, 'yes', self.log, **common)
+        check(True, 4, reference + keep*2, 'yes', self.log, **common)
+        for change in ('', keep.rstrip()+' extra\n', keep.replace('cap=3','cap=1'), keep.replace('target=1','target=3'),
+                       keep+keep.replace('cap=3','cap=2')):
+            with self.subTest(marker=change), self.assertRaisesRegex(RuntimeError, 'Native speed capability'):
+                check(True, 4, reference + change, 'yes', self.log, **common)
+        for change in (reference.replace('0x110717cb', '0x11317cb'), reference.replace('lnk=0x2021', 'lnk=0x2011'),
+                       reference.replace('reset reassert rc=0', 'reset reassert rc=-1'), reference.replace('DBI+0 access returned','no DBI')):
+            with self.assertRaises(RuntimeError):
+                check(True, 4, change+keep, 'yes', self.log, **common)
+        x1 = reference.replace('lnk=0x2021', 'lnk=0x2011') + 'ace5-wifi-bringup: native endpoint width=1\n'
+        check(True, 4, x1+keep, 'yes', self.log, **common, native_x1_id=True)
+        for change in ({'sm_diag':5}, {'pcs_first':False}, {'cold_reset':False}, {'native_width':False}):
+            with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, 'Native speed capability'):
+                check(True, 4, reference + keep, 'yes', self.log, **(common|change))
+        with self.assertRaisesRegex(RuntimeError, 'Native speed capability'):
+            check(True, 3, reference + keep, 'yes', self.log, **common)
         hold = 'ace5-wifi-bringup: pre-PHY clock hold before=0x361c after=0x365e rc=0\n'
         armed = endpoint + 'ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access\n'
         def verify_hold(data, **override):
@@ -311,6 +331,38 @@ class PhoneTests(unittest.TestCase):
         n = 607 - len('debug=0x8 rd=md0 ')
         limit('x' * n)
         with self.assertRaisesRegex(RuntimeError, '608-byte'): limit('x' * (n+1))
+
+    def test_preserve_speed_cap_opt_in_and_guards(self):
+        fn = self.namespace['ace5_wifi_bringup_arguments']
+        limit = self.namespace['check_stock_train_cmdline']
+        table, profile = self.directory/'pdc', self.directory/'sm'
+        table.write_bytes(bytes(508))
+        profile.write_bytes(bytes(80))
+        args = dict(enabled=True, table=table, bootcpu=1, kernel='kernel', seconds=60,
+                    other_hardware=False, live_log=False, stage=4, sm_diag=7,
+                    sm_profile=profile, cold_reset=True, pcs_first=True, native_width=True)
+        with self.assertRaisesRegex(RuntimeError, 'CESTA profile'):
+            fn(**args, preserve_speed_cap=True)
+        digest = Mock()
+        digest.sha256.return_value.hexdigest.return_value = 'b3ed154a6cabba921d99cf703d70255e2239977683153992c4a8f1cc5211d90e'
+        self.namespace['hashlib'] = digest
+        for combination in ({}, {'native_x1_id':True}, {'stock_train_lanes':True}, {'native_x1_id':True,'stock_train_lanes':True}):
+            with self.subTest(combination=combination):
+                ref = fn(**args, **combination)
+                opt = fn(**args, **combination, preserve_speed_cap=True)
+                self.assertEqual(ref, fn(**args, **combination, preserve_speed_cap=False))
+                self.assertNotIn('ace5_wifi_keep_sls', ref)
+                self.assertEqual(opt.count(' ace5_wifi_keep_sls=1'), 1)
+                self.assertEqual(opt.replace(' ace5_wifi_keep_sls=1',''), ref)
+                limit(opt)
+                with self.assertRaisesRegex(RuntimeError, '608-byte'):
+                    limit(opt+'x'*608)
+        for bad in (dict(enabled=False), dict(pcs_first=False), dict(native_width=False), dict(stage=3),
+                    dict(sm_diag=6), dict(cold_reset=False), dict(sm_profile=None), dict(bootcpu=0),
+                    dict(kernel=None), dict(seconds=59), dict(seconds=121), dict(other_hardware=True),
+                    dict(live_log=True), dict(watchdog=1), dict(crm_all_states=True)):
+            with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                fn(**(args|bad), preserve_speed_cap=True)
 
     def test_native_x1_id_is_explicit_and_isolated(self):
         fn = self.namespace['ace5_wifi_bringup_arguments']

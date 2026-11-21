@@ -73,7 +73,9 @@ enum giulia_pcie_link_prerequisite {
     /* OnePlus RC0 vendor training aims NUM_OF_LANES=1 with native x2 capability. */
     GIULIA_LINK_STOCK_TRAIN_LANES = 1u << 12,
     /* Native x2 root, ID-only: pin the actually negotiated Gen1 width. */
-    GIULIA_LINK_NATIVE_X1_ID = 1u << 13
+    GIULIA_LINK_NATIVE_X1_ID = 1u << 13,
+    /* Identity-only: preserve native Gen3 x2 capability, target and require Gen1. */
+    GIULIA_LINK_PRESERVE_SPEED_CAP = 1u << 14
 };
 #define GIULIA_LINK_PARF_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
     GIULIA_LINK_RAILS_NOC_READY | GIULIA_LINK_CLOCKS_RC_RESET_READY | \
@@ -124,7 +126,7 @@ struct giulia_pcie_link {
     uint8_t saved_count, config_atu_enabled, atu_touched;
     uint8_t parf_count, parf_owned, core_owned;
     uint8_t memory_owned, memory_enabled, mask_int_owned, vendor_training;
-    uint8_t expected_lanes, stock_train, snapshot_lanes;
+    uint8_t expected_lanes, stock_train, snapshot_lanes, preserve_speed_cap;
     uint8_t x1_id, id_lanes; /* latched only after paired ready at Gen1 x1/x2 */
     uint8_t train_lanes_before, train_lanes_after, train_lanes_verified;
     struct giulia_pcie_link_saved saved[48];

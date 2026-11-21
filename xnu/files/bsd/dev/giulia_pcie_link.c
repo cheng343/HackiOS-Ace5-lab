@@ -283,7 +283,8 @@ static int snapshot_core(struct giulia_pcie_link *s)
         return 0;
     if (!save(s, GIULIA_LINK_DBI, PCI_COMMAND, 2) ||
         !save(s, GIULIA_LINK_DBI, PCI_CLASS, 2) ||
-        !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCAP, 4) ||
+        /* Never restore an untouched capability, even on a later failure. */
+        (!s->preserve_speed_cap && !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCAP, 4)) ||
         !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + SLTCAP, 4) ||
         !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCTL, 2) ||
         !save(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCTL2, 2)) return 0;
@@ -476,7 +477,8 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
         return GIULIA_LINK_PREREQUISITE;
     if ((flags & GIULIA_LINK_NATIVE_WIDTH) && !(flags & GIULIA_LINK_VENDOR_TRAINING))
         return GIULIA_LINK_PREREQUISITE;
-    if ((flags & GIULIA_LINK_NATIVE_X1_ID) && !(flags & GIULIA_LINK_NATIVE_WIDTH))
+    if ((flags & (GIULIA_LINK_NATIVE_X1_ID | GIULIA_LINK_PRESERVE_SPEED_CAP)) &&
+        !(flags & GIULIA_LINK_NATIVE_WIDTH))
         return GIULIA_LINK_PREREQUISITE;
     if ((flags & GIULIA_LINK_STOCK_TRAIN_LANES) && !(flags & GIULIA_LINK_NATIVE_WIDTH))
         return GIULIA_LINK_PREREQUISITE;
@@ -498,7 +500,9 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     if (native_width) {
         v = r32(s, GIULIA_LINK_DBI, s->root_pcie_cap + LNKCAP);
         if (v == UINT32_MAX) return record_failure(s, GIULIA_LINK_READBACK);
-        if (((v >> 4) & 0x3fu) != 2u) return record_failure(s, GIULIA_LINK_PROFILE);
+        if (((v >> 4) & 0x3fu) != 2u ||
+            ((flags & GIULIA_LINK_PRESERVE_SPEED_CAP) && (v & 0xfu) != 3u))
+            return record_failure(s, GIULIA_LINK_PROFILE);
         s->expected_lanes = 2;
     }
     if (link_up(s)) return record_failure(s, GIULIA_LINK_BUSY);
@@ -519,6 +523,7 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     }
     s->vendor_training = !!(flags & GIULIA_LINK_VENDOR_TRAINING);
     s->stock_train = !!(flags & GIULIA_LINK_STOCK_TRAIN_LANES);
+    s->preserve_speed_cap = !!(flags & GIULIA_LINK_PRESERVE_SPEED_CAP);
     s->x1_id = !!(flags & GIULIA_LINK_NATIVE_X1_ID);
     s->id_lanes = 0;
     s->train_lanes_verified = 0;
@@ -546,7 +551,8 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
      * PORT_LINK_MODE and NUM_OF_LANES at their reset values. */
     if (native_width) {
         DCHANGE(DBI_LINK, BIT(7), BIT(5), 0xffffffffu);
-        DCHANGE(s->root_pcie_cap + LNKCAP, 0xfu, GIULIA_PCIE_BOOT_SPEED, 0xffffffffu);
+        if (!s->preserve_speed_cap)
+            DCHANGE(s->root_pcie_cap + LNKCAP, 0xfu, GIULIA_PCIE_BOOT_SPEED, 0xffffffffu);
     } else {
         DCHANGE(DBI_LINK, (0x3fu << 16) | BIT(7), (1u << 16) | BIT(5), 0xffffffffu);
         DCHANGE(DBI_WIDTH, (0x1fu << 8) | BIT(17), GIULIA_PCIE_BOOT_LANES << 8, ~BIT(17));

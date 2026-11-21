@@ -69,7 +69,7 @@ static struct {
     uint32_t irq_dirty, irq_prior, guard_failed, endpoint_reset_unconfirmed, db_version, max_stage;
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
     uint32_t pcs_first, early_reset_armed, native_width, stock_perf, stock_train;
-    uint32_t noc_step, pre_phy_clks, x1_id;
+    uint32_t noc_step, pre_phy_clks, x1_id, keep_sls;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
 
@@ -724,6 +724,7 @@ static int wb_pcie_identify_endpoint(void)
     if (wb.native_width) flags |= GIULIA_LINK_NATIVE_WIDTH;
     if (wb.stock_train) flags |= GIULIA_LINK_STOCK_TRAIN_LANES;
     if (wb.x1_id) flags |= GIULIA_LINK_NATIVE_X1_ID;
+    if (wb.keep_sls) flags |= GIULIA_LINK_PRESERVE_SPEED_CAP;
     int rc = giulia_pcie_link_prepare(link, flags);
     wb_log("ace5-wifi-bringup: DBI root id rc=%d id=%#x; prepare stage=%u fail=%u last=%u/%#x/%#x\n",
         rc, link->root_id, link->stage, link->failure_stage, wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2]);
@@ -731,6 +732,12 @@ static int wb_pcie_identify_endpoint(void)
     if (wb_stage4_reset_lease() || wb.quiet->reset_ack != LOADER_QUIET_RESET_ARMED)
         return GIULIA_LINK_PREREQUISITE;
 
+    /* prepare verifies the capability and target; never report merely
+     * because the option was present, or after the reset lease was lost. */
+    if (wb.keep_sls) {
+        if (!link->preserve_speed_cap) return GIULIA_LINK_PROFILE;
+        wb_log("ace5-wifi-bringup: native speed cap=3 target=1\n");
+    }
     if (wb.native_width)
         wb_log("ace5-wifi-bringup: native train lanes snapshot=%u\n", (unsigned)link->snapshot_lanes);
     struct wb_gpio_sample before, released, trained;
@@ -1189,9 +1196,15 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("ace5_wifi_pcs_first", &wb.pcs_first, sizeof(wb.pcs_first));
     PE_parse_boot_argn("ace5_wifi_pre_phy_clks", &wb.pre_phy_clks, sizeof(wb.pre_phy_clks));
     PE_parse_boot_argn("ace5_wifi_native_width", &wb.native_width, sizeof(wb.native_width));
+    PE_parse_boot_argn("ace5_wifi_keep_sls", &wb.keep_sls, sizeof(wb.keep_sls));
     PE_parse_boot_argn("ace5_wifi_x1_id", &wb.x1_id, sizeof(wb.x1_id));
     PE_parse_boot_argn("ace5_wifi_stock_train", &wb.stock_train, sizeof(wb.stock_train));
     PE_parse_boot_argn("ace5_wifi_stock_perf", &wb.stock_perf, sizeof(wb.stock_perf));
+    if (wb.keep_sls && (wb.keep_sls != 1 || wb.pcs_first != 1 || wb.native_width != 1 ||
+        wb.cold_reset != 1 || wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.sm_diag != WB_SM_ENDPOINT)) {
+        wb_log("ace5-wifi-bringup: keep SLS requires stage 4 mode 7 PCS-first native width and cold reset\n");
+        return;
+    }
     if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 ||
         seconds < 10 || seconds > 120 || wb.max_stage > GIULIA_BRINGUP_MHI_SNAP ||
         wb.crm_all_states > 1 || wb.sm_diag > WB_SM_ENDPOINT || wb.watchdog_trial > WB_WATCHDOG_EXPIRY ||
