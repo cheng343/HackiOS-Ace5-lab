@@ -146,11 +146,14 @@ int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t prerequisites,
                 p->last_status = io->read32(io->cookie, PHY_STATUS);
                 if (p->last_status == UINT32_MAX)
                     return phy_failed(p, GIULIA_PHY_READBACK);
-                if (p->last_status & PHY_BUSY_BIT)
-                    return phy_failed(p, GIULIA_PHY_TIMEOUT);
             }
-            p->state = GIULIA_PHY_READY;
-            return GIULIA_PHY_OK;
+            if (!(p->last_status & PHY_BUSY_BIT)) {
+                p->state = GIULIA_PHY_READY;
+                return GIULIA_PHY_OK;
+            }
+            /* A busy confirmation may be transient. XNU has no downstream
+             * bus-probe retry here; let the existing poll budget absorb it.
+             * Do not restart PCS, switch PIPE again or reset the deadline. */
         }
         if (i < 50) io->delay_us(io->cookie, 200);
     }

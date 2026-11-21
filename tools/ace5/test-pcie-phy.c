@@ -15,7 +15,7 @@ struct fixture {
     unsigned reads, writes, delays, elapsed_us, status_reads;
     unsigned ready_after, pipe_on, pipe_off, pipe_live, pcs_first;
     int pipe_on_fail, pipe_off_fail, status_bad;
-    unsigned status_override_at, read_at_us[52];
+    unsigned status_override_at, read_at_us[102], flap_status, reset_writes_after_poll;
     uint32_t status_override;
 };
 static uint32_t rd(void *cookie, uint32_t off)
@@ -28,6 +28,7 @@ static uint32_t rd(void *cookie, uint32_t off)
         f->read_at_us[f->status_reads++] = f->elapsed_us;
         if (f->status_reads == f->status_override_at) return f->status_override;
         if (f->status_bad) return UINT32_MAX;
+        if (f->flap_status) return (f->status_reads & 1u) ? 0u : 0x40u;
         return f->status_reads > f->ready_after ? 0 : 0x40;
     }
     return f->regs[off / 4];
@@ -37,6 +38,7 @@ static void wr(void *cookie, uint32_t off, uint32_t value)
     struct fixture *f = cookie;
     assert(off < sizeof(f->regs) && !(off & 3));
     ++f->writes;
+    if (off == RESET && f->status_reads) ++f->reset_writes_after_poll;
     if (off != f->ignore_write) f->regs[off / 4] = value;
 }
 static void barrier(void *cookie) { (void)cookie; }
@@ -117,16 +119,49 @@ static void test_stock_ready_confirmation(void)
         assert(!giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED));
         assert(f.pipe_off == 1); restored(&f, &p);
     }
+    setup(&f, &p);
+    f.pcs_first = 1; f.ready_after = 2;
+    f.status_override_at = 4; f.status_override = 0x40u;
+    /* One failed confirmation consumes the current poll, not a new start. */
+    assert(!giulia_pcie_phy_start(&p, stock, &bus));
+    assert(p.state == GIULIA_PHY_READY && p.polls == 4 && f.status_reads == 6);
+    assert(f.read_at_us[2] == 1400 && f.read_at_us[3] == 1400);
+    assert(f.read_at_us[4] == 1600 && f.read_at_us[5] == 1600 && f.elapsed_us == 1600);
+    assert(f.pipe_on == 1 && !f.pipe_off && f.pipe_live && !f.reset_writes_after_poll);
+    assert(!giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED));
+    assert(f.pipe_off == 1); restored(&f, &p);
+
+    setup(&f, &p);
+    f.pcs_first = 1; f.flap_status = 1;
+    /* Every first sample is clear and every immediate recheck is busy. */
+    assert(giulia_pcie_phy_start(&p, stock, &bus) == GIULIA_PHY_TIMEOUT);
+    assert(p.failure == GIULIA_PHY_TIMEOUT && p.last_status == 0x40u);
+    assert(p.polls == 51 && f.status_reads == 102 && f.elapsed_us == 11000);
+    for (unsigned j = 0; j < 51; ++j) {
+        assert(f.read_at_us[2u * j] == 1000u + 200u * j);
+        assert(f.read_at_us[2u * j + 1u] == f.read_at_us[2u * j]);
+    }
+    assert(f.pipe_on == 1 && f.pipe_off == 1); restored(&f, &p);
+
+    setup(&f, &p);
+    f.pcs_first = 1; f.ready_after = 50;
+    f.status_override_at = 52; f.status_override = 0x40u;
+    /* First clear on the last poll still needs confirmation, not extra time. */
+    assert(giulia_pcie_phy_start(&p, stock, &bus) == GIULIA_PHY_TIMEOUT);
+    assert(p.failure == GIULIA_PHY_TIMEOUT && p.last_status == 0x40u);
+    assert(p.polls == 51 && f.status_reads == 52 && f.elapsed_us == 11000);
+    assert(f.read_at_us[50] == 11000 && f.read_at_us[51] == 11000);
+    assert(f.pipe_on == 1 && f.pipe_off == 1); restored(&f, &p);
+
     for (unsigned k = 0; k < 2; ++k) {
-        const int expected = k ? GIULIA_PHY_READBACK : GIULIA_PHY_TIMEOUT;
         setup(&f, &p);
         f.pcs_first = 1; f.ready_after = 2;
-        f.status_override_at = 4;
-        f.status_override = k ? UINT32_MAX : 0x40u;
-        /* A future read would be clear again; never speculate past rejection. */
-        assert(giulia_pcie_phy_start(&p, stock, &bus) == expected);
-        assert(p.failure == expected && p.last_status == f.status_override);
-        assert(f.status_reads == 4 && f.read_at_us[2] == 1400 && f.read_at_us[3] == 1400);
+        f.status_override_at = 3u + k; f.status_override = UINT32_MAX;
+        /* An unreadable first sample or confirmation must abort immediately. */
+        assert(giulia_pcie_phy_start(&p, stock, &bus) == GIULIA_PHY_READBACK);
+        assert(p.failure == GIULIA_PHY_READBACK && p.last_status == UINT32_MAX);
+        assert(p.polls == 3 && f.status_reads == 3u + k && f.elapsed_us == 1400);
+        assert(f.read_at_us[2u + k] == 1400);
         assert(f.pipe_on == 1 && f.pipe_off == 1); restored(&f, &p);
     }
     setup(&f, &p);
@@ -141,7 +176,7 @@ static void test_stock_ready_confirmation(void)
     assert(!giulia_pcie_phy_start(&p, GIULIA_PHY_START_REQUIRED, &bus));
     assert(f.status_reads == 3 && f.elapsed_us == 1400 && p.state == GIULIA_PHY_READY);
     assert(!giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED)); restored(&f, &p);
-    puts("PASS: PCS-first readiness rechecks PHYSTATUS before training and rolls back on relapse");
+    puts("PASS: PCS-first PHYSTATUS recovery after relapse stays within original deadline");
 }
 int main(void)
 {
