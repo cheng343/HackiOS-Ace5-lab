@@ -101,6 +101,13 @@ static void wb_barrier(__unused void *cookie)
 #endif
 }
 
+/* Absolute monotonic XNU ticks have a platform-dependent timebase. */
+static uint64_t wb_link_now_us(__unused void *cookie)
+{
+    uint64_t ns;
+    absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
+    return ns / 1000u;
+}
 static void wb_delay(__unused void *cookie, uint32_t us) { delay(us); }
 static void wb_delay_u(__unused void *cookie, unsigned us) { delay(us); }
 
@@ -1214,7 +1221,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     cfg.supply.allow_retained_cpu_floor = 1;
     cfg.supply.validate_external = wb_ext_supply;
 
-    cfg.link = (struct giulia_pcie_link_io){0, wb_link_r32, wb_link_w32, wb_link_r16, wb_link_w16, wb_barrier, wb_delay};
+    cfg.link = (struct giulia_pcie_link_io){0, wb_link_r32, wb_link_w32, wb_link_r16, wb_link_w16, wb_barrier, wb_delay, wb_link_now_us};
     cfg.phy = (struct giulia_pcie_phy_io){0, wb_phy_r, wb_phy_w, wb_barrier, wb_delay, 0, 0};
     cfg.bar = (struct giulia_kiwi_bar_io){0, wb_bar_r32, wb_bar_w32, GIULIA_PCIE_LINK_BAR0_SIZE};
     cfg.mhi = (struct giulia_mhi_snapshot_io){0, wb_bar_r32, GIULIA_PCIE_LINK_BAR0_SIZE};

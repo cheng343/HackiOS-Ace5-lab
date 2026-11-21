@@ -26,6 +26,12 @@ struct fake {
     uint16_t negotiated_profile;
     unsigned profile_drift_after_cfg, width_drift_on_status, drift_width;
     uint64_t delay_total;
+    /* The hardware model advances wall time independently from what now_us
+     * reports. Only the new focused fixture enables these fault injections. */
+    unsigned timed, clock_mode, oversleep, wake_late, revoked, endpoint_writes;
+    uint64_t elapsed, available_at, alternate_at, lose_at, last_id_at, first_id_at;
+    uint32_t pending_id, alternate_id;
+    unsigned timed_ids, largest_id_gap, clock_reads, atu_cost_us;
     uint32_t bar_mask;
     unsigned never_link, lost_link, stuck_link, check_decoders, old_decoder;
     unsigned drop_region;
@@ -115,6 +121,10 @@ static uint32_t read32(void *p, unsigned r, uint32_t o)
     if (r != GIULIA_LINK_PARF) f->core_reads++;
     if (!aperture_decodes(f, r, o, 4)) return 0xffffffffu;
     v = f->regs[r][o / 4];
+    if (f->timed && r==GIULIA_LINK_DBI && o==0x8f8 && f->atu_cost_us) {
+        f->elapsed+=f->atu_cost_us; /* iATU setup wall time, no requested sleep */
+        f->atu_cost_us=0;
+    }
     if (r == GIULIA_LINK_PARF && o == 0x1b0) {
         f->ltssm_reads++;
         if (f->ltssm_reads == f->override_ltssm_read)
@@ -129,6 +139,17 @@ static uint32_t read32(void *p, unsigned r, uint32_t o)
         f->crs_reads--;
         v = 0xffff0001u;
     }
+    if (f->timed && r == GIULIA_LINK_CFG && !o) {
+        assert(!f->lose_at || f->elapsed < f->lose_at);
+        if (!f->timed_ids) f->first_id_at=f->elapsed;
+        else if (f->elapsed-f->last_id_at>f->largest_id_gap)
+            f->largest_id_gap=(unsigned)(f->elapsed-f->last_id_at);
+        f->timed_ids++; f->last_id_at=f->elapsed;
+        if (f->elapsed<f->available_at)
+            v=f->alternate_at && f->elapsed>=f->alternate_at?f->alternate_id:f->pending_id;
+    }
+    if (f->timed && r==GIULIA_LINK_DBI && o==0xf28 &&
+        f->lose_at && f->elapsed>=f->lose_at && f->revoked==2) v&=~BIT(10);
     if (r == GIULIA_LINK_CFG && o == 0x10 && v == 0xffffffffu)
         v = f->bar_mask;
     if (fault_read(f, r, o)) v = 0xffffffffu;
@@ -165,6 +186,11 @@ static uint16_t read16(void *p, unsigned r, uint32_t o)
         if (f->width_drift_on_status && f->link_reads == f->width_drift_on_status)
             f->negotiated_profile = (uint16_t)((f->drift_width << 4) | 1u);
         v = up(f) ? (uint16_t)(BIT(13) | f->negotiated_profile) : 0;
+        if (f->timed && f->lose_at && f->elapsed>=f->lose_at) {
+            if (f->revoked==1) v &= (uint16_t)~BIT(13);
+            else if (f->revoked==3) v |= BIT(11);
+            else if (f->revoked==4) v = (uint16_t)((v & ~0xfu) | 2u);
+        }
         if (f->training_on_read && f->training_on_read == f->link_reads)
             v |= BIT(11);
     }
@@ -186,6 +212,7 @@ static void write32(void *p, unsigned r, uint32_t o, uint32_t v)
     access_check(f, r, o, 4);
     f->writes++;
     assert(aperture_decodes(f, r, o, 4));
+    if (f->timed && r==GIULIA_LINK_CFG) f->endpoint_writes++;
     if (r != GIULIA_LINK_PARF) f->core_writes++;
     /* A 32-bit command/status write would acknowledge W1C status bits. */
     assert(!((r == GIULIA_LINK_DBI || r == GIULIA_LINK_CFG) && o == 4));
@@ -212,6 +239,7 @@ static void write16(void *p, unsigned r, uint32_t o, uint16_t v)
     access_check(f, r, o, 2);
     f->writes++;
     assert(aperture_decodes(f, r, o, 2));
+    if (f->timed && r==GIULIA_LINK_CFG) f->endpoint_writes++;
     if (r != GIULIA_LINK_PARF) f->core_writes++;
     if (r == GIULIA_LINK_DBI && (o == 0x7cu || o == 0x7eu)) f->lnkcap_writes++;
     if ((r == GIULIA_LINK_DBI || r == GIULIA_LINK_CFG) && o == 4) {
@@ -229,12 +257,33 @@ static void write16(void *p, unsigned r, uint32_t o, uint16_t v)
 }
 static void barrier(void *p) { ((struct fake *)p)->barriers++; }
 static void delay_us(void *p, uint32_t us)
-{ assert(us <= 9000); ((struct fake *)p)->delay_total += us; }
+{
+    struct fake *f=p;
+    assert(us<=9000); f->delay_total+=us;
+    if (!f->timed) return;
+    /* An independent bound turns a broken/frozen time source into a failed
+     * test instead of a hung CI worker. Training+old CFG cap is 1100ms. */
+    assert(f->delay_total<=1100000u && us);
+    f->elapsed+=us;
+    if (f->oversleep && !f->wake_late && f->elapsed>=1000000u) {
+        f->elapsed+=147u;
+        f->wake_late=1;
+    }
+}
+static uint64_t fake_now_us(void *p)
+{
+    struct fake *f=p;
+    const uint64_t origin=7012345u;
+    assert(++f->clock_reads<=8192u); /* no spin on a broken source */
+    if (f->clock_mode==1) return origin; /* immutable broken clock */
+    if (f->clock_mode==2 && f->elapsed>=150000u) return origin+2003u;
+    return origin+f->elapsed;
+}
 
 static struct giulia_pcie_link_io io_for(struct fake *f)
 {
     return (struct giulia_pcie_link_io){f, read32, write32, read16, write16,
-        barrier, delay_us};
+        barrier, delay_us, NULL};
 }
 static void init(struct fake *f, struct giulia_pcie_link *s)
 {
@@ -821,6 +870,113 @@ static void prepare_vendor_training(struct fake *f, struct giulia_pcie_link *s,
     assert(prepare_fixture(s, flags, &io) == GIULIA_LINK_OK);
 }
 
+/* No mocked register is time-based except the endpoint's ID/CRS and the
+ * explicitly selected RC guard. Training, iATU, every admission check and
+ * final publication still run through the production implementation. */
+static void timed_setup(struct fake *f,struct giulia_pcie_link *s,int vendor,int clock)
+{
+    if (vendor) prepare_vendor_training(f,s,BIT(10) | (0x11u<<12));
+    else { init(f,s); prepare(f,s); }
+    assert(!f->delay_total);
+    f->timed=1; f->link_after=1; f->available_at=UINT64_MAX;
+    f->pending_id=0xffff0001u;
+    s->io.now_us=clock?fake_now_us:NULL;
+}
+static void timed_no_writes(const struct fake *f)
+{
+    assert(f->cfg_accesses==f->timed_ids && !f->endpoint_writes &&
+        !f->bar_probes && !f->memory_event_count);
+    assert(!(f->regs[GIULIA_LINK_ATU][0x204/4]&BIT(31)));
+}
+static void test_endpoint_ready_time(void)
+{
+    struct fake f; struct giulia_pcie_link s;
+    const uint32_t req=GIULIA_LINK_TRAIN_REQUIRED;
+    for (unsigned i=0;i<2;i++) {
+        /* Both legacy paths still have exactly the original 101 reads. */
+        timed_setup(&f,&s,i,!i);
+        f.available_at=100001;
+        assert(giulia_pcie_link_identify(&s,req)==GIULIA_LINK_ENDPOINT);
+        assert(f.timed_ids==101 && f.last_id_at==100000 && f.delay_total==100000);
+        timed_no_writes(&f); stop(&f,&s);
+    }
+    for (unsigned i=0;i<2;i++) {
+        timed_setup(&f,&s,1,1);
+        f.pending_id=i?UINT32_MAX:0xffff0001u; f.available_at=150003;
+        assert(giulia_pcie_link_identify(&s,req)==GIULIA_LINK_OK);
+        assert(s.state==GIULIA_LINK_IDENTIFIED && f.exact_id_completions==1 &&
+            f.timed_ids>101 && f.first_id_at==0 && f.last_id_at>=150003 &&
+            f.last_id_at<=155003 && f.largest_id_gap<=5000 && f.clock_reads);
+        timed_no_writes(&f); stop(&f,&s);
+    }
+    for (unsigned i=0;i<3;i++) {
+        /* A slower train spends the shared budget; the chip may become
+         * visible exactly at the deadline, never on a late wake-up. */
+        timed_setup(&f,&s,1,1);
+        f.link_after=601; f.available_at=i==1?1000001u:1000000u;
+        f.oversleep=i==2;
+        int rc=giulia_pcie_link_identify(&s,req);
+        assert(rc==(i==0?GIULIA_LINK_OK:GIULIA_LINK_ENDPOINT));
+        assert(f.first_id_at==600000 && f.delay_total==1000000 && f.clock_reads);
+        assert(f.last_id_at<=(uint64_t)1000000 && f.exact_id_completions==(i==0));
+        if (i==2) assert(f.wake_late && f.elapsed>1000000 && f.last_id_at<1000000);
+        else assert(f.last_id_at==1000000);
+        timed_no_writes(&f); stop(&f,&s);
+    }
+    /* Shared wall time must include setup, not just counted LTSSM sleeps.
+     * Unaligned 3799us forces a final short delay to the real boundary. */
+    timed_setup(&f,&s,1,1); f.link_after=601; f.atu_cost_us=3799;
+    f.available_at=1000000;
+    assert(giulia_pcie_link_identify(&s,req)==GIULIA_LINK_OK);
+    assert(!f.atu_cost_us && f.first_id_at==603799 && f.last_id_at==1000000 &&
+        f.elapsed==1000000 && f.delay_total==996201 && f.exact_id_completions==1);
+    timed_no_writes(&f); stop(&f,&s);
+    for (unsigned i=0;i<2;i++) {
+        /* A train landing at 1000ms never gets a second 1s window,
+         * but must still be granted all of the existing 100ms base. */
+        timed_setup(&f,&s,1,1); f.link_after=1001; f.available_at=1100000u+i;
+        assert(giulia_pcie_link_identify(&s,req)==(i?GIULIA_LINK_ENDPOINT:GIULIA_LINK_OK));
+        assert(f.timed_ids==101 && f.first_id_at==1000000 && f.last_id_at==1100000 &&
+            f.delay_total==1100000 && f.exact_id_completions==!i);
+        timed_no_writes(&f); stop(&f,&s);
+    }
+    const uint32_t invalid[]={0,0x12340001u,0x110817cbu};
+    for (unsigned i=0;i<3;i++) {
+        timed_setup(&f,&s,1,1); f.pending_id=invalid[i];
+        assert(giulia_pcie_link_identify(&s,req)==GIULIA_LINK_ENDPOINT);
+        assert(f.timed_ids==(i==2?1u:101u) && f.last_id_at==(i==2?0u:100000u));
+        timed_no_writes(&f); stop(&f,&s);
+        timed_setup(&f,&s,1,1); f.alternate_at=140000; f.alternate_id=invalid[i];
+        assert(giulia_pcie_link_identify(&s,req)==GIULIA_LINK_ENDPOINT);
+        assert(f.last_id_at>=140000 && f.last_id_at<=145000 && !f.exact_id_completions);
+        timed_no_writes(&f); stop(&f,&s);
+    }
+    for (unsigned i=1;i<=4;i++) {
+        /* DLLLA, XMLH, retraining and profile drift at exactly the point a
+         * new CFG would become possible. Never issue that CFG transaction. */
+        timed_setup(&f,&s,1,1);
+        f.revoked=i; f.lose_at=f.available_at=135000;
+        assert(giulia_pcie_link_identify(&s,req)!=GIULIA_LINK_OK);
+        assert(s.state==GIULIA_LINK_FAULT && s.failure_stage==GIULIA_LINK_STAGE_ENDPOINT &&
+            f.last_id_at<135000 && f.elapsed>=135000 && !f.exact_id_completions);
+        timed_no_writes(&f); f.lose_at=0; stop(&f,&s);
+    }
+    for (unsigned i=1;i<=2;i++) {
+        timed_setup(&f,&s,1,1); f.clock_mode=i;
+        assert(giulia_pcie_link_identify(&s,req)==GIULIA_LINK_ENDPOINT);
+        assert(f.clock_reads && f.delay_total>=100000 && f.delay_total<=1000000 &&
+            !f.exact_id_completions);
+        if (i==2) assert(f.last_id_at<150000);
+        timed_no_writes(&f); stop(&f,&s);
+    }
+    timed_setup(&f,&s,1,1); f.never_link=1; f.available_at=1;
+    assert(giulia_pcie_link_identify(&s,req)==GIULIA_LINK_TIMEOUT);
+    assert(!f.timed_ids && !s.atu_touched && !s.train_ready_samples &&
+        s.train_samples==1001 && f.delay_total==1000000);
+    timed_no_writes(&f); stop(&f,&s);
+    puts("PASS: shared vendor CFG-ready deadline preserves Detect and old retry/ownership gates");
+}
+
 static void test_training_samples(void)
 {
     struct fake f;
@@ -1275,6 +1431,7 @@ int main(void)
     test_split_prepare();
     test_vendor_training();
     test_training_samples();
+    test_endpoint_ready_time();
     test_retained_training_evidence();
     test_retraining();
     test_native_width();

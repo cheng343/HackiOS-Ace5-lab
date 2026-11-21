@@ -103,6 +103,8 @@ struct giulia_pcie_link_io {
     void (*write16)(void *, unsigned region, uint32_t offset, uint16_t value);
     void (*barrier)(void *);
     void (*delay_us)(void *, uint32_t);
+    /* Optional monotonic microseconds; only vendor CFG readiness uses this. */
+    uint64_t (*now_us)(void *);
 };
 struct giulia_pcie_link_saved {
     uint32_t offset, value;

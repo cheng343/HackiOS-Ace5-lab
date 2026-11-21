@@ -75,7 +75,7 @@ static struct giulia_wifi_board_io init(struct mock *m, struct giulia_wifi_board
         unused_block_write, unused_barrier, unused_delay};
     io.link = (struct giulia_pcie_link_io){m, unused_block_read,
         unused_block_write, unused_block_read16, unused_block_write16,
-        unused_barrier, unused_delay};
+        unused_barrier, unused_delay, NULL};
     io.phy = (struct giulia_wifi_board_phy_io){m, phy_read, phy_write, phy_barrier, phy_delay};
     io.external_cookie = m; io.validate_external = external;
     return io;

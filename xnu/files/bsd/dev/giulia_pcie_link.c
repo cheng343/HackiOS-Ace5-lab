@@ -579,7 +579,7 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
 }
 
 static int program_atu(struct giulia_pcie_link *s, unsigned region,
-    uint32_t cpu, uint32_t target, uint32_t size, uint32_t type)
+    uint32_t cpu, uint32_t target, uint32_t size, uint32_t type, uint32_t *wait_us)
 {
     uint32_t base = region * 0x200u;
     const uint32_t offsets[] = {ATU_CTRL2, ATU_BASE_LO, ATU_BASE_HI,
@@ -600,6 +600,7 @@ static int program_atu(struct giulia_pcie_link *s, unsigned region,
         if (got & ATU_ENABLE)
             return 1;
         delay(s, 9000);
+        if (wait_us) *wait_us += 9000u;
     }
     return 0;
 }
@@ -650,12 +651,78 @@ static int probe_bar(struct giulia_pcie_link *s)
     return GIULIA_LINK_OK;
 }
 
+/* Downstream gives training and endpoint readiness a common 1s budget.
+ * Our anchor is entry to identify (after the caller's PERST settling delay).
+ * Preserve the old 100ms CFG minimum even for a train lasting the full 1s.
+ * Count requested waits separately: a stalled or non-monotonic source must
+ * never cause an unbounded retry loop. No timeout can interrupt a bus load. */
+#define CFG_READY_BUDGET_US 1000000u
+struct cfg_ready_window {
+    uint64_t origin, last;
+    uint32_t waited;
+    int clock_ok;
+};
+
+static int cfg_elapsed(struct giulia_pcie_link *s, struct cfg_ready_window *w,
+    uint64_t *elapsed)
+{
+    if (!w->clock_ok) return 0;
+    uint64_t now = s->io.now_us(s->io.cookie);
+    if (now < w->last) {
+        w->clock_ok = 0;
+        return 0;
+    }
+    w->last = now;
+    *elapsed = now - w->origin;
+    return 1;
+}
+
+static int identify_endpoint(struct giulia_pcie_link *s, struct cfg_ready_window *w)
+{
+    uint64_t elapsed = 0;
+    unsigned legacy_waits = 0;
+    int extended = 0;
+    for (;;) {
+        if (extended && (!cfg_elapsed(s, w, &elapsed) || elapsed > CFG_READY_BUDGET_US))
+            return GIULIA_LINK_ENDPOINT;
+        if (!cfg_ok(s)) return GIULIA_LINK_DOWN;
+        /* Do not launch an extra CFG access if RC qualification ran late. */
+        if (extended && (!cfg_elapsed(s, w, &elapsed) || elapsed > CFG_READY_BUDGET_US))
+            return GIULIA_LINK_ENDPOINT;
+        uint32_t id = s->endpoint_id = r32(s, GIULIA_LINK_CFG, 0);
+        if (id == GIULIA_PCIE_LINK_EP_ID) return GIULIA_LINK_OK;
+        if (id != UINT32_MAX && id != 0 && (id & 0xffffu) != 1u)
+            return GIULIA_LINK_ENDPOINT;
+        int timed = cfg_elapsed(s, w, &elapsed);
+        uint32_t step = 1000u;
+        if (legacy_waits < 100u) {
+            legacy_waits++;
+        } else {
+            /* Only canonical CRS and all-ones qualify for extra reads. */
+            if ((id != 0xffff0001u && id != UINT32_MAX) || !timed ||
+                elapsed >= CFG_READY_BUDGET_US || w->waited >= CFG_READY_BUDGET_US)
+                return GIULIA_LINK_ENDPOINT;
+            step = CFG_READY_BUDGET_US - (uint32_t)elapsed;
+            if (step > CFG_READY_BUDGET_US - w->waited) step = CFG_READY_BUDGET_US - w->waited;
+            if (step > 5000u) step = 5000u;
+            extended = 1;
+        }
+        w->waited += step;
+        delay(s, step);
+    }
+}
+
 int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
 {
     if (!s) return GIULIA_LINK_ARGUMENT;
     if ((flags & GIULIA_LINK_TRAIN_REQUIRED) != GIULIA_LINK_TRAIN_REQUIRED ||
         (flags & GIULIA_LINK_PERST_ASSERTED)) return GIULIA_LINK_PREREQUISITE;
     if (s->state != GIULIA_LINK_PREPARED) return GIULIA_LINK_STATE;
+    struct cfg_ready_window window = {0};
+    if (s->vendor_training && s->io.now_us) {
+        window.origin = window.last = s->io.now_us(s->io.cookie);
+        window.clock_ok = 1;
+    }
     s->stage = GIULIA_LINK_STAGE_TRAIN;
     if (s->stock_train) {
         /* Vendor RC0 sets only NUM_OF_LANES before enabling LTSSM. Keep
@@ -715,20 +782,13 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     if (!profile_matches(s)) return fail(s, GIULIA_LINK_PROFILE);
     s->stage = GIULIA_LINK_STAGE_CONFIG_ATU;
     s->atu_touched = 1;
+    window.waited = s->polls * 1000u;
     if (!program_atu(s, 0, GIULIA_PCIE_LINK_CFG_PA, 0x01000000u,
-        GIULIA_PCIE_LINK_CFG0_SIZE, 4)) return fail(s, GIULIA_LINK_READBACK);
+        GIULIA_PCIE_LINK_CFG0_SIZE, 4, &window.waited)) return fail(s, GIULIA_LINK_READBACK);
     s->config_atu_enabled = 1;
     s->stage = GIULIA_LINK_STAGE_ENDPOINT;
-    /* Allow the endpoint's reset/configuration readiness interval. */
-    for (unsigned i = 0; i <= 100; i++) {
-        if (!cr32(s, 0, &s->endpoint_id)) return fail(s, GIULIA_LINK_DOWN);
-        if (s->endpoint_id == GIULIA_PCIE_LINK_EP_ID) break;
-        if (s->endpoint_id != 0xffffffffu && s->endpoint_id != 0 &&
-            (s->endpoint_id & 0xffffu) != 1u)
-            return fail(s, GIULIA_LINK_ENDPOINT);
-        if (i == 100) return fail(s, GIULIA_LINK_ENDPOINT);
-        delay(s, 1000);
-    }
+    int error = identify_endpoint(s, &window);
+    if (error) return fail(s, error);
     /* A successful completion proves that the ID was observed, not that
      * the link is still eligible at publication. Sample only the same RC
      * gates again; do not read the endpoint twice. Keep the observed ID
@@ -765,7 +825,7 @@ int giulia_pcie_link_train(struct giulia_pcie_link *s, uint32_t flags)
     if (error) return fail(s, error);
     s->stage = GIULIA_LINK_STAGE_MEMORY_ATU;
     if (!program_atu(s, 1, GIULIA_PCIE_LINK_BAR0_PA, GIULIA_PCIE_LINK_BAR0_PA,
-        GIULIA_PCIE_LINK_BAR0_SIZE, 0)) return fail(s, GIULIA_LINK_READBACK);
+        GIULIA_PCIE_LINK_BAR0_SIZE, 0, 0)) return fail(s, GIULIA_LINK_READBACK);
     /* Bridge memory window 0x60400000..0x605fffff, but both command MEM bits
      * remain zero until the explicit CPU-only MEM API is called. */
     if (!put32(s, GIULIA_LINK_DBI, PCI_MEM, 0x60506040u, 0xfff0fff0u) ||

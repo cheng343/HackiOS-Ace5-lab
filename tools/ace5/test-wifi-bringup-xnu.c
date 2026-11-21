@@ -66,6 +66,9 @@ static char messages[16384];
 static struct { uintptr_t va; vm_size_t size; } allocation[24];
 static void wb_test_barrier(void);
 static void delay(unsigned us) { time_us+=us; assert(time_us<=30000000); }
+/* Deliberately not nanosecond ticks: 10 MHz plus 700 ns below the us edge. */
+static uint64_t mach_absolute_time(void) { return (uint64_t)time_us * 10u + 7u; }
+static void absolutetime_to_nanoseconds(uint64_t absolute, uint64_t *ns) { *ns = absolute * 100u; }
 static uint64_t wb_test_watchdog_call(uint64_t id, uint64_t a1, uint64_t a2,
     uint64_t *r1, uint64_t *r2)
 {
@@ -368,6 +371,7 @@ const uint8_t *redwood_image_boot_plain_file(const char *dir,const char *name,
 int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,const struct giulia_wifi_bringup_config *cfg)
 {
     assert(cfg->fw_lookup==wb_private_fw_lookup);
+    assert(cfg->link.now_us == wb_link_now_us && cfg->link.now_us(cfg->link.cookie) == time_us);
     assert(wb_guard());b->cfg=*cfg;b->stage=cfg->max_stage?cfg->max_stage:GIULIA_BRINGUP_READY;
     if (sm_diag >= WB_SM_TABLES || watchdog) {
         assert(!wb.bar0.address);
