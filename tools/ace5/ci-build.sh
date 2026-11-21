@@ -30,6 +30,8 @@ case "${1:-}" in
     python3 tools/ace5/test-giulia-battery.py --cc clang-18
     python3 tools/ace5/test-pcie-msi.py --cc clang-18
     python3 tools/ace5/test-kiwi-dma-profile.py
+    python3 tools/ace5/test-rc0-training-config.py
+    python3 tools/ace5/test-capture-rc0-training.py
     python3 tools/ace5/test-pcie-bringup.py --cc clang-18
     python3 tools/ace5/test-inspect-adreno750-fw.py
     python3 tools/ace5/test-platform-guards.py --cc clang-18
