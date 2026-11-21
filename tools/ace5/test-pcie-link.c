@@ -858,13 +858,13 @@ static void test_training_samples(void)
     assert(!f.cfg_accesses && !s.atu_touched);
     stop(&f, &s);
 
-    /* The final poll is still eligible. The CFG guard's extra sample must
-     * not be counted as part of training. */
+    /* The final poll is still eligible. Neither the pre-ID nor the post-ID
+     * RC guard sample is counted as part of training. */
     prepare_vendor_training(&f, &s, up_status);
     f.link_after = 1001;
     f.negotiated_profile |= BIT(12); /* Slot Clock Configuration */
     assert(giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_OK);
-    assert(s.polls == 1000 && s.train_samples == 1001 && f.elbi_reads == 1002);
+    assert(s.polls == 1000 && s.train_samples == 1001 && f.elbi_reads == 1003);
     assert(s.train_parf_valid == GIULIA_LINK_TRAIN_PARF_ENABLE_VALID &&
         s.train_xmlh_samples == 1001 && s.train_dllla_samples == 1 &&
         !s.train_lt_samples && s.train_ready_samples == 1);
