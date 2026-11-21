@@ -17,6 +17,7 @@ static const uint64_t trial_order[] = {
 static unsigned trial_calls;
 static unsigned fail_call;
 static uint64_t status_bits;
+#define DIRTY_HIGH UINT64_C(0xa5a5111100000000)
 
 static uint64_t
 smc_call(uint64_t id, uint64_t a1, uint64_t a2, uint64_t *r1, uint64_t *r2)
@@ -36,12 +37,13 @@ smc_call(uint64_t id, uint64_t a1, uint64_t a2, uint64_t *r1, uint64_t *r2)
         assert(!a1 && !a2 && !r1 && !r2);
     } else {
         assert(!a1 && !a2 && r1);
-        *r1 = status_bits;
-        if (r2) *r2 = 1;
+        *r1 = DIRTY_HIGH | status_bits;
+        if (r2) *r2 = DIRTY_HIGH | 1;
     }
-    return trial_calls == fail_call;
+    return DIRTY_HIGH | (trial_calls == fail_call ? UINT32_MAX : 0);
 }
 
+#include "watchdog-smc32.inc"
 #include "watchdog-trial.inc"
 
 int main(void)
@@ -72,7 +74,7 @@ int main(void)
     for (fail_call = 1; fail_call <= 5; fail_call++) {
         trial_calls = 0;
         assert(strcmp(giulia_wdt_arm_trial(&detail), errors[fail_call - 1]) == 0);
-        assert(detail == 1 && trial_calls == fail_call);
+        assert(detail == UINT32_MAX && trial_calls == fail_call);
     }
     trial_calls = 0;
     assert(giulia_wdt_arm_trial(&detail) == NULL && trial_calls == 5);

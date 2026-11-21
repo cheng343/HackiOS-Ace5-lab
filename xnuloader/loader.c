@@ -2576,14 +2576,26 @@ wdt_arm(void)
 }
 
 #ifdef HACKIOS_GIULIA
+/* All four Giulia Gunyah WDT functions return W registers (SMC32).
+ * Do not apply this conversion to the generic SMC, PSCI or Redwood paths. */
+static uint64_t
+giulia_wdt_smc32(uint64_t id, uint64_t a1, uint64_t a2, uint64_t *r1, uint64_t *r2)
+{
+    uint64_t w1 = 0, w2 = 0;
+    uint32_t ret = (uint32_t)smc_call(id, a1, a2, r1 ? &w1 : NULL, r2 ? &w2 : NULL);
+    if (r1) *r1 = (uint32_t)w1;
+    if (r2) *r2 = (uint32_t)w2;
+    return ret;
+}
+
 static int
 quiet_watchdog_disarm(void)
 {
     uint64_t ctl = 0;
-    if (smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL)) return -1;
+    if (giulia_wdt_smc32(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL)) return -1;
     if (!(ctl & GIULIA_WDT_ENABLED)) return 0;
-    if (smc_call(GIULIA_WDT_CONTROL, 2, 0, NULL, NULL) ||
-        smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL)) return -1;
+    if (giulia_wdt_smc32(GIULIA_WDT_CONTROL, 2, 0, NULL, NULL) ||
+        giulia_wdt_smc32(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL)) return -1;
     return (ctl & GIULIA_WDT_ENABLED) ? -1 : 0;
 }
 
@@ -2604,30 +2616,36 @@ log_reboot_retime(void)
 {
     uint64_t ctl = 0;
     /* Lower bark first, while bite still has its longer startup interval. */
-    if (smc_call(GIULIA_WDT_SET_TIME, GIULIA_WDT_BARK_MS, GIULIA_WDT_NO_CHANGE, NULL, NULL) ||
-        smc_call(GIULIA_WDT_SET_TIME, GIULIA_WDT_NO_CHANGE, GIULIA_WDT_BITE_MS, NULL, NULL) ||
-        smc_call(GIULIA_WDT_PET, 0, 0, NULL, NULL) ||
-        smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
+    if (giulia_wdt_smc32(GIULIA_WDT_SET_TIME, GIULIA_WDT_BARK_MS, GIULIA_WDT_NO_CHANGE, NULL, NULL) ||
+        giulia_wdt_smc32(GIULIA_WDT_SET_TIME, GIULIA_WDT_NO_CHANGE, GIULIA_WDT_BITE_MS, NULL, NULL) ||
+        giulia_wdt_smc32(GIULIA_WDT_PET, 0, 0, NULL, NULL) ||
+        giulia_wdt_smc32(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
         (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED)) != GIULIA_WDT_ENABLED)
         log_reboot_force_reset();
 }
 
-static int
-log_reboot_arm(void)
+/* Return a phase name with a 32-bit ABI result/state, never inferred ownership. */
+static const char *
+log_reboot_arm(uint64_t *detail, int *failed_before_enable)
 {
-    uint64_t ctl = 0, detail = 0;
-    if (!READ_SYSREG(CNTFRQ_EL0) || smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
-        (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED))) return 0;
-    /* Still disabled: put the long bite in place before increasing bark. */
-    if (smc_call(GIULIA_WDT_SET_TIME, GIULIA_WDT_NO_CHANGE, 60000u, NULL, NULL) ||
-        smc_call(GIULIA_WDT_SET_TIME, 55000u, GIULIA_WDT_NO_CHANGE, NULL, NULL))
-        return 0;
-    if (giulia_wdt_enable_checked(smc_call, &detail, &log_reboot_owned)) {
-        if (log_reboot_owned) log_reboot_force_reset();
-        return 0;
+    uint64_t ctl = 0;
+    *failed_before_enable = 0;
+    *detail = 0;
+    if (!READ_SYSREG(CNTFRQ_EL0)) return "COUNTER";
+    *detail = giulia_wdt_smc32(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL);
+    if (*detail) return "IDLE_STATUS";
+    if (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED)) {
+        *detail = ctl;
+        return "IDLE_CTL";
     }
-    print("log-reboot: startup watchdog armed\n");
-    return 1;
+    /* Still disabled: put the long bite in place before increasing bark. */
+    *detail = giulia_wdt_smc32(GIULIA_WDT_SET_TIME, GIULIA_WDT_NO_CHANGE, 60000u, NULL, NULL);
+    if (*detail) { *failed_before_enable = 1; return "SET_BITE"; }
+    *detail = giulia_wdt_smc32(GIULIA_WDT_SET_TIME, 55000u, GIULIA_WDT_NO_CHANGE, NULL, NULL);
+    if (*detail) { *failed_before_enable = 1; return "SET_BARK"; }
+    const char *failure = giulia_wdt_enable_checked(giulia_wdt_smc32, detail, &log_reboot_owned);
+    if (!failure) print("log-reboot: startup watchdog armed\n");
+    return failure;
 }
 
 /* Only before loader_save_ctx/cache cleaning and CPU_ON: UEFI still owns
@@ -2635,10 +2653,19 @@ log_reboot_arm(void)
 static int
 log_reboot_preflight(const char *nonce)
 {
-    if (!log_reboot_arm()) {
-        /* Never disarm a pre-existing watchdog or spin relying on one we
-         * failed to acquire. If PSCI rejects reset, return to loader. */
-        print("log-reboot: pre-arm refused id=%s\n", nonce);
+    uint64_t detail = 0, ctl = 0;
+    int failed_before_enable = 0;
+    const char *failure = log_reboot_arm(&detail, &failed_before_enable);
+    if (failure) {
+        print("log-reboot: pre-arm refused id=%s step=%s detail=0x%x\n", nonce, failure, detail);
+        if (log_reboot_owned) log_reboot_force_reset();
+        /* Persist a rejected SET_TIME only if we have *never* tried ENABLE
+         * and a fresh STATUS still confirms an idle, unexpired watchdog.
+         * In all other refusal paths do not touch slow firmware storage. */
+        if (failed_before_enable &&
+            !giulia_wdt_smc32(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) &&
+            !(ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED)))
+            (void)write_logs(NULL, 0);
         psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
         return 0;
     }
@@ -2732,13 +2759,13 @@ quiet_reset_on_request(uint64_t base)
         log_reboot_retime();
     } else {
         if (!READ_SYSREG(CNTFRQ_EL0) ||
-            smc_call(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
+            giulia_wdt_smc32(GIULIA_WDT_STATUS, 0, 0, &ctl, NULL) ||
             (ctl & (GIULIA_WDT_ENABLED | GIULIA_WDT_EXPIRED))) {
             firmware_quiet.reset_ack = LOADER_QUIET_RESET_FAILED;
             clean_dcache(base + 128, base + sizeof(firmware_quiet));
             return;
         }
-        if (giulia_wdt_configure(smc_call, &detail)) {
+        if (giulia_wdt_configure(giulia_wdt_smc32, &detail)) {
             if (quiet_watchdog_disarm())
                 psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
             firmware_quiet.reset_ack = LOADER_QUIET_RESET_FAILED;
@@ -2754,7 +2781,7 @@ quiet_reset_on_request(uint64_t base)
         if (other_cpu_done) {
             if (log_reboot_owned) {
                 /* Give storage a fresh bounded interval. No USB is needed. */
-                if (smc_call(GIULIA_WDT_PET, 0, 0, NULL, NULL)) log_reboot_force_reset();
+                if (giulia_wdt_smc32(GIULIA_WDT_PET, 0, 0, NULL, NULL)) log_reboot_force_reset();
                 return;
             }
             if (quiet_watchdog_disarm() == 0) return;
@@ -2783,7 +2810,7 @@ giulia_wdt_status(uint64_t *ctl)
 {
 	uint64_t since_pet = 0;
 	*ctl = 0;
-	uint64_t ret = smc_call(VIRT_WDT_STATUS, 0, 0, ctl, &since_pet);
+	uint64_t ret = giulia_wdt_smc32(GIULIA_WDT_STATUS, 0, 0, ctl, &since_pet);
 	print("giulia watchdog: status=%x ctl=%x since_pet=%x\n", ret, *ctl, since_pet);
     return ret;
 }
@@ -2792,7 +2819,7 @@ giulia_wdt_status(uint64_t *ctl)
 static const char *
 giulia_wdt_arm_trial(uint64_t *detail)
 {
-	return giulia_wdt_configure(smc_call, detail);
+	return giulia_wdt_configure(giulia_wdt_smc32, detail);
 }
 #endif
 
