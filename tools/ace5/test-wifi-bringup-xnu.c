@@ -47,7 +47,7 @@ static uint64_t watchdog_ctl;
 static unsigned watchdog_reads, watchdog_writes, watchdog_cannot_cancel;
 static unsigned cold_reset, mock_reset_response, loader_returns;
 static unsigned root_id_reads, pcs_first_arg, pre_phy_clks_arg, drop_pre_phy_clock;
-static unsigned endpoint_identifies, endpoint_releases, endpoint_reasserts;
+static unsigned endpoint_identifies, endpoint_releases, endpoint_reasserts, x1_id_arg, native_width_arg;
 enum pin_fault { PIN_OK, HELD_READ_FAIL, HELD_EN_LOW, HELD_PERST_HIGH,
     RELEASE_READ_FAIL, RELEASE_PERST_LOW, RELEASE_EN_LOW, REASSERT_STUCK_HIGH };
 static enum pin_fault injected_pin_fault;
@@ -92,6 +92,8 @@ static int PE_parse_boot_argn(const char *name,void *out,unsigned size)
     if(!strcmp(name,"ace5_wifi_watchdog"))value=watchdog;
     if(!strcmp(name,"ace5_wifi_cold_reset"))value=cold_reset;
     if(!strcmp(name,"ace5_wifi_pcs_first"))value=pcs_first_arg;
+    if(!strcmp(name,"ace5_wifi_x1_id"))value=x1_id_arg;
+    if(!strcmp(name,"ace5_wifi_native_width"))value=native_width_arg;
     if(!strcmp(name,"ace5_wifi_pre_phy_clks"))value=pre_phy_clks_arg;
     if(!strcmp(name,"ace5_aop_channel_test"))value=other;
     *(unsigned *)out=value; return value!=0;
@@ -175,6 +177,7 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     assert(wb.sm_diag == WB_SM_ENDPOINT && flags ==
         (GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID | GIULIA_LINK_VENDOR_TRAINING |
          (wb.native_width ? GIULIA_LINK_NATIVE_WIDTH : 0u) |
+         (wb.x1_id ? GIULIA_LINK_NATIVE_X1_ID : 0u) |
          (wb.stock_train ? GIULIA_LINK_STOCK_TRAIN_LANES : 0u)));
     s->snapshot_lanes = 2;
     s->train_lanes_verified = 0;
@@ -226,6 +229,7 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     endpoint_identifies++;
     s->endpoint_id = GIULIA_PCIE_LINK_EP_ID;
     s->link_status = 0x2011;
+    s->id_lanes = wb.x1_id ? 1u : 0u;
     s->train_lanes_verified = !!wb.stock_train;
     s->train_lanes_before = 2;
     s->train_lanes_after = 1;
@@ -323,7 +327,7 @@ static void setup(void)
     no_ack=no_resume_ack=pending_irq=lost_guard=0;gic_enabled=WB_IRQ|1;
     watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
     cold_reset=mock_reset_response=loader_returns=0;
-    root_id_reads=pcs_first_arg=pre_phy_clks_arg=drop_pre_phy_clock=0;
+    root_id_reads=pcs_first_arg=pre_phy_clks_arg=drop_pre_phy_clock=x1_id_arg=native_width_arg=0;
     endpoint_identifies=endpoint_releases=endpoint_reasserts=0;injected_pin_fault=PIN_OK;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
     allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=cx_nominal_unavailable=0;
@@ -342,6 +346,12 @@ static void admission(void)
     setup();sm_diag=8;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=4;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();cold_reset=1;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();sm_diag=7;seconds=60;cold_reset=x1_id_arg=1;
+    giulia_wifi_bringup_init();assert(!maps && !creates && strstr(messages,"native x1 ID requires"));
+    setup();sm_diag=7;seconds=60;cold_reset=native_width_arg=1;x1_id_arg=2;
+    giulia_wifi_bringup_init();assert(!maps && !creates && strstr(messages,"native x1 ID requires"));
+    setup();sm_diag=7;seconds=60;cold_reset=native_width_arg=x1_id_arg=1;
+    giulia_wifi_bringup_init();assert(!maps && !creates && strstr(messages,"CESTA board profile missing"));
     setup();pre_phy_clks_arg=1;giulia_wifi_bringup_init();assert(!maps && !creates);
     assert(strstr(messages, "pre-PHY clock hold requires"));
     setup();sm_diag=7;seconds=60;cold_reset=1;pre_phy_clks_arg=1;
@@ -576,10 +586,12 @@ static void noc_after_phy(void)
     assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
     assert(wb.bringup.link.endpoint_id == GIULIA_PCIE_LINK_EP_ID);
     wb.stock_perf = 0;
-    wb.native_width = wb.stock_train = 1;
+    assert(!strstr(messages, "native endpoint width="));
+    wb.native_width = wb.stock_train = wb.x1_id = 1;
     perf[0xc / 4] = perf[0x4 / 4] = GIULIA_PCIE_BOOT_PERF;
     assert(wb_cesta_pre_dbi() == 0 && endpoint_identifies == 2);
     assert(strstr(messages, "stock train lanes before=2 after=1"));
+    assert(strstr(messages, "native endpoint width=1"));
     assert(strstr(messages, "native train lanes snapshot=2"));
     /* A low input with a high output latch is not a released endpoint.
      * Neither snapshot failures nor an unreliable WLAN_EN may start LTSSM. */
@@ -596,14 +608,15 @@ static void noc_after_phy(void)
         assert(wb_cesta_pre_dbi() == refusals[i].error && endpoint_identifies == 2);
         assert(strstr(messages, refusals[i].released ? "pin gate refused released" : "pin gate refused held"));
         assert(!strstr(messages, "PCIe endpoint identify") && !strstr(messages, "PCIe training samples"));
-        assert(!strstr(messages, "stock train lanes before="));
+        assert(!strstr(messages, "stock train lanes before=") && !strstr(messages, "native endpoint width="));
         assert(endpoint_releases == releases + refusals[i].released && endpoint_reasserts == reasserts + 1);
         assert(!wb.endpoint_reset_unconfirmed && !perst[1] && !wb.bar0.address);
     }
     injected_pin_fault = REASSERT_STUCK_HIGH;
     assert(wb_cesta_pre_dbi() == GIULIA_WGPIO_READBACK && endpoint_identifies == 3);
     assert(wb.endpoint_reset_unconfirmed && perst[1] == 1);
-    wb.native_width = wb.stock_train = 0;
+    assert(!strstr(messages, "native endpoint width="));
+    wb.native_width = wb.stock_train = wb.x1_id = 0;
     /* End this synthetic stuck-pin scenario before testing unrelated leases. */
     perst[1] = 0; wb.endpoint_reset_unconfirmed = 0; injected_pin_fault = PIN_OK;
     wb.bringup.link.state = GIULIA_LINK_PARF_READY;

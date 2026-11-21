@@ -69,7 +69,7 @@ static struct {
     uint32_t irq_dirty, irq_prior, guard_failed, endpoint_reset_unconfirmed, db_version, max_stage;
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
     uint32_t pcs_first, early_reset_armed, native_width, stock_perf, stock_train;
-    uint32_t noc_step, pre_phy_clks;
+    uint32_t noc_step, pre_phy_clks, x1_id;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
 
@@ -723,6 +723,7 @@ static int wb_pcie_identify_endpoint(void)
         GIULIA_LINK_EXACT_ROOT_ID | GIULIA_LINK_VENDOR_TRAINING;
     if (wb.native_width) flags |= GIULIA_LINK_NATIVE_WIDTH;
     if (wb.stock_train) flags |= GIULIA_LINK_STOCK_TRAIN_LANES;
+    if (wb.x1_id) flags |= GIULIA_LINK_NATIVE_X1_ID;
     int rc = giulia_pcie_link_prepare(link, flags);
     wb_log("ace5-wifi-bringup: DBI root id rc=%d id=%#x; prepare stage=%u fail=%u last=%u/%#x/%#x\n",
         rc, link->root_id, link->stage, link->failure_stage, wb_dbg_r32[0], wb_dbg_r32[1], wb_dbg_r32[2]);
@@ -787,6 +788,8 @@ static int wb_pcie_identify_endpoint(void)
     if (sampled_release) wb_log_gpio_sample("released", &released);
     if (attempted) wb_log_gpio_sample("after-training", &trained);
     if (!held) wb.endpoint_reset_unconfirmed = 0;
+    if (wb.x1_id && attempted && !rc && !held)
+        wb_log("ace5-wifi-bringup: native endpoint width=%u\n", (unsigned)link->id_lanes);
     return held ? held : rc;
 }
 
@@ -1178,6 +1181,7 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("ace5_wifi_pcs_first", &wb.pcs_first, sizeof(wb.pcs_first));
     PE_parse_boot_argn("ace5_wifi_pre_phy_clks", &wb.pre_phy_clks, sizeof(wb.pre_phy_clks));
     PE_parse_boot_argn("ace5_wifi_native_width", &wb.native_width, sizeof(wb.native_width));
+    PE_parse_boot_argn("ace5_wifi_x1_id", &wb.x1_id, sizeof(wb.x1_id));
     PE_parse_boot_argn("ace5_wifi_stock_train", &wb.stock_train, sizeof(wb.stock_train));
     PE_parse_boot_argn("ace5_wifi_stock_perf", &wb.stock_perf, sizeof(wb.stock_perf));
     if (cpus != 1 || cpu != 1 || ml_get_topology_info()->num_cpus != 1 ||
@@ -1187,6 +1191,11 @@ void giulia_wifi_bringup_init(void)
         wb.stock_train > 1 || (wb.stock_train && !wb.native_width) ||
         wb.stock_perf > 1 || ((wb.pcs_first || wb.native_width || wb.stock_perf) && wb.sm_diag != WB_SM_ENDPOINT)) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
+        return;
+    }
+    if (wb.x1_id && (wb.x1_id != 1 || !wb.native_width || !wb.cold_reset ||
+        wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.sm_diag != WB_SM_ENDPOINT)) {
+        wb_log("ace5-wifi-bringup: native x1 ID requires stage 4 mode 7 native width and cold reset\n");
         return;
     }
     if (wb.pre_phy_clks && (wb.pre_phy_clks != 1 || !wb.pcs_first ||

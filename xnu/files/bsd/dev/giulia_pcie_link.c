@@ -143,7 +143,8 @@ static int link_ready(struct giulia_pcie_link *s)
 static int profile_matches(struct giulia_pcie_link *s)
 {
     return (s->link_status & 0x0fu) == GIULIA_PCIE_BOOT_SPEED &&
-        ((s->link_status >> 4) & 0x3fu) == s->expected_lanes;
+        (s->x1_id ? (s->id_lanes != 0 && ((s->link_status >> 4) & 0x3fu) == s->id_lanes) :
+         ((s->link_status >> 4) & 0x3fu) == s->expected_lanes);
 }
 
 static int xmlh_link_up(struct giulia_pcie_link *s)
@@ -475,6 +476,8 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
         return GIULIA_LINK_PREREQUISITE;
     if ((flags & GIULIA_LINK_NATIVE_WIDTH) && !(flags & GIULIA_LINK_VENDOR_TRAINING))
         return GIULIA_LINK_PREREQUISITE;
+    if ((flags & GIULIA_LINK_NATIVE_X1_ID) && !(flags & GIULIA_LINK_NATIVE_WIDTH))
+        return GIULIA_LINK_PREREQUISITE;
     if ((flags & GIULIA_LINK_STOCK_TRAIN_LANES) && !(flags & GIULIA_LINK_NATIVE_WIDTH))
         return GIULIA_LINK_PREREQUISITE;
     int rc = giulia_pcie_link_read_root_id(s, flags);
@@ -516,6 +519,8 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     }
     s->vendor_training = !!(flags & GIULIA_LINK_VENDOR_TRAINING);
     s->stock_train = !!(flags & GIULIA_LINK_STOCK_TRAIN_LANES);
+    s->x1_id = !!(flags & GIULIA_LINK_NATIVE_X1_ID);
+    s->id_lanes = 0;
     s->train_lanes_verified = 0;
     if (!snapshot_core(s)) return record_failure(s, GIULIA_LINK_READBACK);
     s->core_owned = 1;
@@ -690,6 +695,17 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     s->debug0 = r32(s, GIULIA_LINK_DBI, DBI_DEBUG0);
     s->debug1 = r32(s, GIULIA_LINK_DBI, DBI_DEBUG1);
     if (s->polls > 1000u) return fail(s, GIULIA_LINK_TIMEOUT);
+    /* This is not a profile downgrade: leave the root capability and training
+     * registers unchanged. Only a paired DLLLA && !LT && XMLH sample in the
+     * bounded Gen1 identification trial may establish the width for CFG0. */
+    if (s->x1_id) {
+        unsigned lanes = (s->link_status >> 4) & 0x3fu;
+        if (s->expected_lanes != 2 || !s->vendor_training ||
+            (s->link_status & 0xfu) != GIULIA_PCIE_BOOT_SPEED ||
+            (lanes != 1u && lanes != 2u))
+            return fail(s, GIULIA_LINK_PROFILE);
+        s->id_lanes = (uint8_t)lanes;
+    }
     if (!profile_matches(s)) return fail(s, GIULIA_LINK_PROFILE);
     s->stage = GIULIA_LINK_STAGE_CONFIG_ATU;
     s->atu_touched = 1;
@@ -714,7 +730,7 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
 int giulia_pcie_link_train(struct giulia_pcie_link *s, uint32_t flags)
 {
     uint16_t header;
-    if (s && s->expected_lanes == 2)
+    if (s && (s->x1_id || s->expected_lanes == 2))
         return GIULIA_LINK_PREREQUISITE;
     int error = giulia_pcie_link_identify(s, flags);
     if (error) return error;
@@ -834,6 +850,7 @@ int giulia_pcie_link_mem_enable(struct giulia_pcie_link *s, uint32_t flags)
     if (!s) return GIULIA_LINK_ARGUMENT;
     if ((flags & GIULIA_LINK_MEMORY_REQUIRED) != GIULIA_LINK_MEMORY_REQUIRED ||
         (flags & GIULIA_LINK_PERST_ASSERTED)) return GIULIA_LINK_PREREQUISITE;
+    if (s->x1_id) return GIULIA_LINK_PREREQUISITE;
     if (s->state != GIULIA_LINK_READY || !s->core_owned)
         return GIULIA_LINK_STATE;
     s->stage = GIULIA_LINK_STAGE_MEMORY_ENABLE;

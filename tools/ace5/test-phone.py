@@ -86,6 +86,20 @@ class PhoneTests(unittest.TestCase):
         endpoint = dbi + ('PCIe endpoint identify rc=0 id=0x110717cb lnk=0x2011\n'
                           'PCIe endpoint reset reassert rc=0\n')
         check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True)
+        identity_only = dict(sm_diag=7, cold_reset=True, native_width=True, native_x1_id=True)
+        for width, word in ((1, '0x2011'), (2, '0x2021')):
+            claimed = endpoint.replace('0x2011', word) + f'ace5-wifi-bringup: native endpoint width={width}\n'
+            check(True, 4, claimed, 'yes', self.log, **identity_only)
+            for invalid in (claimed.replace(f'width={width}', 'width=4'),
+                            claimed.replace(word, '0x2811'), claimed.replace(word, '0x2012'),
+                            claimed.replace(word, '0x1011'), claimed.replace('0x110717cb', '0x11317cb'),
+                            claimed.replace(f'width={width}', f'width={3-width}'),
+                            claimed.replace('reset reassert rc=0','reset reassert rc=-1'),
+                            claimed + f'ace5-wifi-bringup: native endpoint width={3-width}\n'):
+                with self.assertRaises(RuntimeError):
+                    check(True, 4, invalid, 'yes', self.log, **identity_only)
+        with self.assertRaises(RuntimeError):
+            check(True, 4, endpoint, 'yes', self.log, **identity_only)
         stock = endpoint.replace('current=0x2 aggregate=0x2', 'current=0x4 aggregate=0x4')
         with self.assertRaisesRegex(RuntimeError, 'startup PERF 4 unconfirmed'):
             check(True, 4, stock, 'yes', self.log, sm_diag=7, cold_reset=True, stock_perf=True)
@@ -297,6 +311,26 @@ class PhoneTests(unittest.TestCase):
         n = 607 - len('debug=0x8 rd=md0 ')
         limit('x' * n)
         with self.assertRaisesRegex(RuntimeError, '608-byte'): limit('x' * (n+1))
+
+    def test_native_x1_id_is_explicit_and_isolated(self):
+        fn = self.namespace['ace5_wifi_bringup_arguments']
+        table, profile = self.directory / 'pdc', self.directory / 'sm'
+        table.write_bytes(bytes(508))
+        profile.write_bytes(bytes(80))
+        args = dict(stage=4, sm_diag=7, sm_profile=profile, cold_reset=True, native_width=True)
+        digest = Mock()
+        digest.sha256.return_value.hexdigest.return_value = 'b3ed154a6cabba921d99cf703d70255e2239977683153992c4a8f1cc5211d90e'
+        self.namespace['hashlib'] = digest
+        base = fn(True, table, 1, 'kernel', 60, False, False, **args)
+        self.assertNotIn('ace5_wifi_x1_id=', base)
+        self.assertEqual(fn(True, table, 1, 'kernel', 60, False, False, **args, native_x1_id=True),
+                         base + ' ace5_wifi_x1_id=1')
+        for bad in (dict(stage=3), dict(native_width=False), dict(sm_profile=None), dict(sm_diag=6),
+                    dict(cold_reset=False), dict(watchdog=1)):
+            with self.assertRaises(RuntimeError):
+                fn(True, table, 1, 'kernel', 60, False, False, **(args | bad), native_x1_id=True)
+        with self.assertRaises(RuntimeError):
+            fn(False, table, 1, 'kernel', 60, False, False, native_x1_id=True)
 
     def test_pre_phy_clocks_isolated_and_optional(self):
         fn = self.namespace['ace5_wifi_bringup_arguments']

@@ -20,7 +20,7 @@ struct fake {
     uint32_t override_ltssm_raw;
     const uint32_t *elbi_sequence;
     uint16_t negotiated_profile;
-    unsigned profile_drift_after_cfg;
+    unsigned profile_drift_after_cfg, width_drift_on_status, drift_width;
     uint64_t delay_total;
     uint32_t bar_mask;
     unsigned never_link, lost_link, stuck_link, check_decoders, old_decoder;
@@ -142,6 +142,8 @@ static uint16_t read16(void *p, unsigned r, uint32_t o)
     v = raw16(f, r, o);
     if (r == GIULIA_LINK_DBI && o == 0x82) {
         if (f->regs[GIULIA_LINK_PARF][0x1b0 / 4] & BIT(8)) f->link_reads++;
+        if (f->width_drift_on_status && f->link_reads == f->width_drift_on_status)
+            f->negotiated_profile = (uint16_t)((f->drift_width << 4) | 1u);
         v = up(f) ? (uint16_t)(BIT(13) | f->negotiated_profile) : 0;
         if (f->training_on_read && f->training_on_read == f->link_reads)
             v |= BIT(11);
@@ -952,6 +954,54 @@ static void test_native_width(void)
     }
 }
 
+static void test_native_x1_id(void)
+{
+    struct fake f;
+    struct giulia_pcie_link s;
+    const uint32_t flags = GIULIA_LINK_PREPARE_REQUIRED | GIULIA_LINK_EXACT_ROOT_ID |
+        GIULIA_LINK_VENDOR_TRAINING | GIULIA_LINK_NATIVE_WIDTH | GIULIA_LINK_NATIVE_X1_ID;
+    init(&f, &s);
+    assert(giulia_pcie_link_prepare(&s, flags & ~GIULIA_LINK_NATIVE_WIDTH) ==
+        GIULIA_LINK_PREREQUISITE && !f.reads && !f.writes);
+    for (unsigned i = 0; i < 10; i++) {
+        init(&f, &s);
+        struct giulia_pcie_link_io io = io_for(&f);
+        f.regs[GIULIA_LINK_DBI][0x7c / 4] = 0x22c23u;
+        f.regs[GIULIA_LINK_DBI][0x710 / 4] = 3u << 16;
+        f.regs[GIULIA_LINK_DBI][0x80c / 4] = 2u << 8;
+        f.regs[GIULIA_LINK_DBI][0xf28 / 4] = i == 9 ? 0u : BIT(10);
+        f.link_after = 1;
+        unsigned lanes = i == 1 || i == 7 ? 2u : i == 2 ? 0u : i == 3 ? 4u : 1u;
+        f.negotiated_profile = (uint16_t)((lanes << 4) | (i == 4 ? 2u : 1u));
+        if (i == 5 || i == 7) { f.width_drift_on_status = 2; f.drift_width = lanes == 1 ? 2 : 1; }
+        if (i == 6) { f.crs_reads = 1; f.width_drift_on_status = 3; f.drift_width = 2; }
+        if (i == 8) f.regs[GIULIA_LINK_CFG][0] = 0xabcd17cbu;
+        assert(giulia_pcie_link_prepare_parf(&s, GIULIA_LINK_PARF_REQUIRED, &io) == 0);
+        assert(giulia_pcie_link_prepare(&s, flags) == 0 && s.expected_lanes == 2 && !s.id_lanes);
+        assert(f.regs[GIULIA_LINK_DBI][0x7c / 4] == 0x22c21u);
+        assert(f.regs[GIULIA_LINK_DBI][0x710 / 4] == ((3u << 16) | BIT(5)));
+        assert(f.regs[GIULIA_LINK_DBI][0x80c / 4] == (2u << 8));
+        assert(giulia_pcie_link_train(&s, GIULIA_LINK_TRAIN_REQUIRED) == GIULIA_LINK_PREREQUISITE);
+        int rc = giulia_pcie_link_identify(&s, GIULIA_LINK_TRAIN_REQUIRED);
+        if (i <= 1) {
+            assert(!rc && s.id_lanes == lanes && s.endpoint_id == GIULIA_PCIE_LINK_EP_ID);
+            assert(f.cfg_accesses == 1 && s.state == GIULIA_LINK_IDENTIFIED);
+        } else if (i <= 4) {
+            assert(rc == GIULIA_LINK_PROFILE && !s.id_lanes && !s.atu_touched && !f.cfg_accesses);
+        } else if (i <= 7) {
+            assert(rc == GIULIA_LINK_DOWN && s.id_lanes == lanes && f.cfg_accesses == (i == 6));
+        } else if (i == 8) {
+            assert(rc == GIULIA_LINK_ENDPOINT && f.cfg_accesses == 1);
+        } else {
+            assert(rc == GIULIA_LINK_TIMEOUT && !s.id_lanes && !f.cfg_accesses);
+        }
+        assert(giulia_pcie_link_mem_enable(&s, GIULIA_LINK_MEMORY_REQUIRED) == GIULIA_LINK_PREREQUISITE);
+        assert(!f.bar_probes && !s.memory_enabled && !(f.regs[GIULIA_LINK_ATU][0x204 / 4] & BIT(31)));
+        assert(!quiesce_then_stop(&f, &s));
+    }
+    puts("Wi-Fi native identify: stable x1 or x2 only, no BAR or width drift passed");
+}
+
 static void test_stock_train_lanes(void)
 {
     struct fake f;
@@ -1104,6 +1154,7 @@ int main(void)
     test_retained_training_evidence();
     test_retraining();
     test_native_width();
+    test_native_x1_id();
     test_stock_train_lanes();
     test_parf_drift_before_dbi();
     test_boot_profile();
