@@ -46,7 +46,7 @@ static uint32_t gic_enabled;
 static uint64_t watchdog_ctl;
 static unsigned watchdog_reads, watchdog_writes, watchdog_cannot_cancel;
 static unsigned cold_reset, mock_reset_response, loader_returns;
-static unsigned root_id_reads;
+static unsigned root_id_reads, pcs_first_arg, pre_phy_clks_arg, drop_pre_phy_clock;
 static unsigned endpoint_identifies, endpoint_releases, endpoint_reasserts;
 enum pin_fault { PIN_OK, HELD_READ_FAIL, HELD_EN_LOW, HELD_PERST_HIGH,
     RELEASE_READ_FAIL, RELEASE_PERST_LOW, RELEASE_EN_LOW, REASSERT_STUCK_HIGH };
@@ -91,6 +91,8 @@ static int PE_parse_boot_argn(const char *name,void *out,unsigned size)
     if(!strcmp(name,"ace5_wifi_sm_diag"))value=sm_diag;
     if(!strcmp(name,"ace5_wifi_watchdog"))value=watchdog;
     if(!strcmp(name,"ace5_wifi_cold_reset"))value=cold_reset;
+    if(!strcmp(name,"ace5_wifi_pcs_first"))value=pcs_first_arg;
+    if(!strcmp(name,"ace5_wifi_pre_phy_clks"))value=pre_phy_clks_arg;
     if(!strcmp(name,"ace5_aop_channel_test"))value=other;
     *(unsigned *)out=value; return value!=0;
 }
@@ -114,6 +116,10 @@ static int quiet_printf(const char *format,...) { (void)format;return 0; }
 
 static void wb_test_barrier(void)
 {
+    if (drop_pre_phy_clock && wb.parf.address) {
+        uint32_t *sys = (uint32_t *)wb.parf.address;
+        if (*sys == 0x365e) { *sys &= ~(1u << 6); drop_pre_phy_clock = 0; }
+    }
     if(wb.quiet && !no_ack && !(no_resume_ack && !wb.quiet->request)) {
         wb.quiet->ack=wb.quiet->request;wb.quiet->active=wb.quiet->request;
         if (mock_reset_response && wb.quiet->reset_request)
@@ -317,7 +323,7 @@ static void setup(void)
     no_ack=no_resume_ack=pending_irq=lost_guard=0;gic_enabled=WB_IRQ|1;
     watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
     cold_reset=mock_reset_response=loader_returns=0;
-    root_id_reads=0;
+    root_id_reads=pcs_first_arg=pre_phy_clks_arg=drop_pre_phy_clock=0;
     endpoint_identifies=endpoint_releases=endpoint_reasserts=0;injected_pin_fault=PIN_OK;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
     allow_prepare=bcm_policy_seen=crm_patches_seen=cx_level_seen=rpmh_cx_sel_seen=cx_nominal_unavailable=0;
@@ -336,6 +342,16 @@ static void admission(void)
     setup();sm_diag=8;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();sm_diag=4;giulia_wifi_bringup_init();assert(!maps && !creates);
     setup();cold_reset=1;giulia_wifi_bringup_init();assert(!maps && !creates);
+    setup();pre_phy_clks_arg=1;giulia_wifi_bringup_init();assert(!maps && !creates);
+    assert(strstr(messages, "pre-PHY clock hold requires"));
+    setup();sm_diag=7;seconds=60;cold_reset=1;pre_phy_clks_arg=1;
+    giulia_wifi_bringup_init();assert(!maps && !creates && strstr(messages, "pre-PHY clock hold requires"));
+    setup();sm_diag=7;seconds=60;cold_reset=pcs_first_arg=1;pre_phy_clks_arg=2;
+    giulia_wifi_bringup_init();assert(!maps && !creates && strstr(messages, "pre-PHY clock hold requires"));
+    setup();sm_diag=7;seconds=60;cold_reset=pcs_first_arg=pre_phy_clks_arg=1;ceiling=5;
+    giulia_wifi_bringup_init();assert(!maps && !creates && strstr(messages, "pre-PHY clock hold requires"));
+    setup();sm_diag=7;seconds=60;cold_reset=pcs_first_arg=pre_phy_clks_arg=1;
+    giulia_wifi_bringup_init();assert(!maps && !creates && strstr(messages, "CESTA board profile missing"));
     setup();sm_diag=3;giulia_wifi_bringup_init();assert(!maps && !creates);
     assert(strstr(messages, "CESTA board profile missing or mismatched"));
     setup();sm_diag=2;giulia_wifi_bringup_init();
@@ -600,6 +616,43 @@ static void noc_after_phy(void)
     wb.quiet->reset_capability = 1;
     assert(wb_arm_pcs_first() == 0 && wb.early_reset_armed && wb.quiet->reset_request == 1);
     assert(strstr(messages, "PCS-before-PIPE reset armed before PHY access"));
+    /* No new write in the old profile, even with a confirmed reset lease. */
+    parf[0] = 0x361c;
+    assert(!wb.pre_phy_clks && !wb_arm_pcs_first() && parf[0] == 0x361c);
+    wb.max_stage = GIULIA_BRINGUP_PHY_START;
+    wb.pre_phy_clks = 1;
+    messages[0] = 0;
+    assert(wb_arm_pcs_first() != 0 && parf[0] == 0x361c); /* missing rollback slot */
+    wb.bringup.link.parf_count = wb.bringup.link.saved_count = 1;
+    wb.bringup.link.saved[0] = (struct giulia_pcie_link_saved){
+        .region = GIULIA_LINK_PARF, .width = 4, .offset = 0, .value = 0x361c
+    };
+    wb.quiet->reset_ack = mock_reset_response = LOADER_QUIET_RESET_FAILED;
+    assert(wb_arm_pcs_first() != 0 && parf[0] == 0x361c);
+    wb.quiet->reset_ack = mock_reset_response = LOADER_QUIET_RESET_ARMED;
+    perst[1] = 2;
+    assert(wb_arm_pcs_first() != 0 && parf[0] == 0x361c);
+    perst[1] = wb.guard_failed = 0;
+    parf[0x1b0u / 4] = 1u << 8;
+    assert(wb_arm_pcs_first() != 0 && parf[0] == 0x361c);
+    parf[0x1b0u / 4] = wb.guard_failed = 0;
+    parf[0] = UINT32_MAX;
+    assert(wb_arm_pcs_first() != 0 && parf[0] == UINT32_MAX);
+    parf[0] = 0x371c;
+    assert(wb_arm_pcs_first() != 0 && parf[0] == 0x371c);
+    parf[0] = 0x361c;
+    drop_pre_phy_clock = 1;
+    assert(wb_arm_pcs_first() != 0 && !drop_pre_phy_clock && parf[0] == 0x361e);
+    assert(strstr(messages, "pre-PHY clock hold refused readback") &&
+        !strstr(messages, "pre-PHY clock hold before="));
+    parf[0] = 0x361c;
+    assert(!wb_arm_pcs_first() && parf[0] == 0x365e &&
+        wb.bringup.link.saved[0].value == 0x361c);
+    assert(strstr(messages, "pre-PHY clock hold before=0x361c after=0x365e rc=0"));
+    assert(!wb_arm_pcs_first() && parf[0] == 0x365e &&
+        strstr(messages, "pre-PHY clock hold before=0x365e after=0x365e rc=0"));
+    puts("Wi-Fi XNU pre-PHY clock hold: guarded ordering, readback and default-off passed");
+    wb.pre_phy_clks = 0;
     assert(wb_arm_cold_reset(0) != 0);
     wb.bringup.pipe_checked = 1;
     assert(wb_arm_cold_reset(0) == 0);

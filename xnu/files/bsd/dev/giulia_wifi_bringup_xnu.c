@@ -69,7 +69,7 @@ static struct {
     uint32_t irq_dirty, irq_prior, guard_failed, endpoint_reset_unconfirmed, db_version, max_stage;
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
     uint32_t pcs_first, early_reset_armed, native_width, stock_perf, stock_train;
-    uint32_t noc_step;
+    uint32_t noc_step, pre_phy_clks;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
 
@@ -580,6 +580,64 @@ static int wb_arm_cold_reset(__unused void *cookie)
     return wb_request_cold_reset();
 }
 
+/* The core snapshots PARF_SYS before prepare_parf changes bit 29. Its normal
+ * link-stop path restores that snapshot. Do not touch a window merely because
+ * the caller set parf_owned: require the actual rollback entry. */
+static int wb_has_parf_sys_snapshot(void)
+{
+    const struct giulia_pcie_link *l = &wb.bringup.link;
+    if (!l->parf_owned || l->parf_count > l->saved_count ||
+        l->saved_count > sizeof(l->saved) / sizeof(l->saved[0])) return 0;
+    for (unsigned i = 0; i < l->parf_count; i++) {
+        const struct giulia_pcie_link_saved *v = &l->saved[i];
+        if (v->region == GIULIA_LINK_PARF && v->width == 4 && v->offset == 0)
+            return v->value != UINT32_MAX;
+    }
+    return 0;
+}
+
+static int wb_pre_phy_clocks_lease(void)
+{
+    return wb.pre_phy_clks == 1 && wb.max_stage == GIULIA_BRINGUP_PHY_START &&
+        wb.sm_diag == WB_SM_ENDPOINT && wb.cold_reset == 1 && wb.pcs_first == 1 &&
+        wb.early_reset_armed && wb.quiet && wb.quiet->reset_request == 1 &&
+        wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED && wb_guard() &&
+        wb.bringup.stage == GIULIA_BRINGUP_PHY_START &&
+        wb.bringup.phy.state == GIULIA_PHY_IDLE && !wb.bringup.pipe_checked &&
+        wb.bringup.supply.power.state == GIULIA_POWER_READY &&
+        wb.bringup.supply.gpio.state == GIULIA_WGPIO_ON &&
+        wb.bringup.link.state == GIULIA_LINK_PARF_READY && wb.parf.address &&
+        wb_has_parf_sys_snapshot() && !wb_perst_held();
+}
+
+static int wb_pre_phy_clock_hold(void)
+{
+    /* The only experimental change is when we set L1_CLK_RMV_DIS and
+     * CORE_CLK_CGC_DIS. The post-PHY DBI and PERF gates are independent. */
+    const uint32_t mask = (1u << 1) | (1u << 6);
+    if (!wb_pre_phy_clocks_lease()) goto refused;
+    uint32_t before = wb_mmio(&wb.parf, 0);
+    if (before == UINT32_MAX || (before & ~mask) != (0x365eu & ~mask)) {
+        wb_log("ace5-wifi-bringup: pre-PHY clock hold refused unexpected SYS=0x%x\n", before);
+        return -1;
+    }
+    if (!wb_pre_phy_clocks_lease()) goto refused;
+    if ((before & mask) != mask)
+        wb_store(&wb.parf, 0, before | mask);
+    if (!wb_pre_phy_clocks_lease()) goto refused;
+    uint32_t after = wb_mmio(&wb.parf, 0);
+    if (after != (before | mask)) {
+        wb_log("ace5-wifi-bringup: pre-PHY clock hold refused readback before=0x%x after=0x%x\n", before, after);
+        return -1;
+    }
+    if (!wb_pre_phy_clocks_lease()) goto refused;
+    wb_log("ace5-wifi-bringup: pre-PHY clock hold before=0x%x after=0x%x rc=0\n", before, after);
+    return 0;
+refused:
+    wb_log("ace5-wifi-bringup: pre-PHY clock hold refused lease or snapshot\n");
+    return -1;
+}
+
 static int wb_arm_pcs_first(void)
 {
     if (wb.sm_diag != WB_SM_ENDPOINT || !wb.pcs_first || !wb_guard() ||
@@ -591,7 +649,7 @@ static int wb_arm_pcs_first(void)
         wb_arm_early_reset())
         return -1;
     wb_log("ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access\n");
-    return 0;
+    return wb.pre_phy_clks ? wb_pre_phy_clock_hold() : 0;
 }
 
 static const struct giulia_cesta_io wb_cesta_table_io = {
@@ -1113,6 +1171,7 @@ void giulia_wifi_bringup_init(void)
     PE_parse_boot_argn("ace5_wifi_watchdog", &wb.watchdog_trial, sizeof(wb.watchdog_trial));
     PE_parse_boot_argn("ace5_wifi_cold_reset", &wb.cold_reset, sizeof(wb.cold_reset));
     PE_parse_boot_argn("ace5_wifi_pcs_first", &wb.pcs_first, sizeof(wb.pcs_first));
+    PE_parse_boot_argn("ace5_wifi_pre_phy_clks", &wb.pre_phy_clks, sizeof(wb.pre_phy_clks));
     PE_parse_boot_argn("ace5_wifi_native_width", &wb.native_width, sizeof(wb.native_width));
     PE_parse_boot_argn("ace5_wifi_stock_train", &wb.stock_train, sizeof(wb.stock_train));
     PE_parse_boot_argn("ace5_wifi_stock_perf", &wb.stock_perf, sizeof(wb.stock_perf));
@@ -1123,6 +1182,11 @@ void giulia_wifi_bringup_init(void)
         wb.stock_train > 1 || (wb.stock_train && !wb.native_width) ||
         wb.stock_perf > 1 || ((wb.pcs_first || wb.native_width || wb.stock_perf) && wb.sm_diag != WB_SM_ENDPOINT)) {
         wb_log("ace5-wifi-bringup: requires cpus=1 bootcpu=1 and finite 10..120s run\n");
+        return;
+    }
+    if (wb.pre_phy_clks && (wb.pre_phy_clks != 1 || !wb.pcs_first ||
+        !wb.cold_reset || wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.sm_diag != WB_SM_ENDPOINT)) {
+        wb_log("ace5-wifi-bringup: pre-PHY clock hold requires stage 4 mode 7 PCS-first cold reset\n");
         return;
     }
     if (wb.sm_diag && (wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.crm_all_states)) {
