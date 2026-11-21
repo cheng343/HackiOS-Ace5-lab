@@ -391,6 +391,61 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
                            stock_train_lanes=False, pre_phy_clocks=False):
     if not enabled:
         return
+    def mode7_timeout_detail():
+        # Also used in isolation (AST-loaded from the persisted-log collector).
+        # These are failure diagnostics, never a replacement for endpoint admission.
+        prefix = 'ace5-wifi-bringup: '
+        def values(label, pattern):
+            marker = prefix + label
+            rows = [re.fullmatch(pattern, line.split(marker, 1)[1]) for line in text.splitlines() if marker in line]
+            if not rows:
+                return None
+            if not all(rows):
+                raise ValueError
+            parsed = {tuple(int(v, 0) for v in row.groups()) for row in rows}
+            if len(parsed) != 1:  # duplicated serial/klog copies must agree
+                raise ValueError
+            return parsed.pop()
+
+        x = r'(0x[0-9a-f]{1,8}|0)'
+        u = r'(0|[1-9][0-9]{0,9})'
+        try:
+            ep = values('PCIe endpoint identify ', rf'rc=(-?\d{{1,3}}) id={x} lnk={x} stage={u} fail={u} polls={u} debug={x}/{x} elbi={x} ltssm={x}')
+            hist = values('PCIe training samples=', rf'{u} first={u} last={u} seen_lo={x} seen_hi={x}')
+            reset = values('PCIe endpoint reset reassert rc=', r'(-?\d{1,3})')
+            data = values('train evidence ', rf'parf_valid={x} parf_enable={x} parf_timeout={x} dllla={u} lt={u} xmlh={u} ready={u}')
+            if values('CESTA follow-up rc=', r'(-?\d{1,3})') != (-7,):
+                raise ValueError
+            if ep is None or hist is None:
+                raise ValueError
+            rc, ident, lnk, stage_id, failed, polls, _, _, elbi, ls = ep
+            n, first, last, lo, hi = hist
+            seen = hi << 32 | lo
+            if (rc != -7 or ident != 0 or (stage_id, failed) != (4, 4) or polls != n or n != 1001 or
+                    not 0 <= lnk < 0xffff or elbi == 0xffffffff or not 0 <= first < 64 or
+                    not 0 <= last < 64 or ls != last or ((elbi >> 12) & 63) != last or
+                    not (seen & 1 << first) or not (seen & 1 << last) or seen.bit_count() > n or
+                    ((lnk & 0x2000) and not (lnk & 0x800) and (elbi & 0x400))):
+                raise ValueError
+            summary = ('LTSSM=Detect.Quiet at all sampled polls' if seen == 1 else
+                       f'LTSSM sampled states={seen:#x} (bitmap); first={first} last={last}')
+            parts = [f'PCIe training timed out: {n} polls; {summary}']
+            if data is not None:
+                valid, initial, final, dll, lt, xmlh, ready = data
+                if (valid & ~3 or any(v > n for v in (dll, lt, xmlh)) or ready != 0 or
+                        (valid & 1 and (initial == 0xffffffff or not initial & 0x100)) or
+                        (valid & 2 and final == 0xffffffff) or dll + (n - lt) + xmlh > 2 * n or
+                        any((bit and count == 0) or (not bit and count == n)
+                            for bit, count in ((lnk & 0x2000, dll), (lnk & 0x800, lt), (elbi & 0x400, xmlh)))):
+                    raise ValueError
+                before = str((initial >> 8) & 1) if valid & 1 else 'unknown'
+                timeout = str((final >> 8) & 1) if valid & 2 else 'unknown'
+                parts.append(f'PARF LTSSM_EN at enable/timeout={before}/{timeout}; DLLLA/LT/XMLH/ready counts={dll}/{lt}/{xmlh}/{ready}')
+            parts.append('PERST# reassert readback confirmed' if reset == (0,) else 'PERST# reassert unconfirmed')
+            return '; '.join(parts)
+        except ValueError:
+            return 'PCIe endpoint training or identification incomplete (missing or conflicting timeout evidence)'
+
     if pre_phy_clocks:
         prefix = 'ace5-wifi-bringup: pre-PHY clock hold'
         records = [line.split(prefix, 1)[1] for line in text.splitlines() if prefix in line]
@@ -456,6 +511,8 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
             followed = re.findall(r'ace5-wifi-bringup: CESTA follow-up rc=(-?\d+)', text)
             if (not followed or any(rc != '0' for rc in followed) or
                     'ace5-wifi-bringup: CESTA perf current=' not in text):
+                if sm_diag == 7 and followed and set(followed) == {'-7'}:
+                    raise RuntimeError(f'{mode7_timeout_detail()}; preserve {log} and cold reboot')
                 check = 'PCIe endpoint training or identification' if sm_diag == 7 else 'CESTA performance or DBI check'
                 raise RuntimeError(f'{check} incomplete; preserve {log} and cold reboot')
         if sm_diag >= 6:

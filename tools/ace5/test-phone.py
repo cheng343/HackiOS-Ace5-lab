@@ -165,6 +165,47 @@ class PhoneTests(unittest.TestCase):
             with self.subTest(text=text, reset=reset), self.assertRaises(RuntimeError):
                 check(True, 4, text, reset, self.log)
 
+    def test_mode7_timeout_explains_only_consistent_sampled_evidence(self):
+        check = self.namespace['check_wifi_bringup_log']
+        prefix = 'ace5-wifi-bringup: '
+        head = '\n'.join(prefix + s for s in (
+            'start rc=0 stage=4 max=4 failed=0 err=0 sub=0 cleanup=0',
+            'post-phy cesta start=0 branch0=0 override=0 clkreq=0', 'loader cold reset armed',
+            'cesta START write returned', 'cesta execution sample=0 start=0x1',
+            'cesta execution sample=1 start=0x1', 'cesta START result=1 observe=0',
+            'CESTA perf current=0x2 aggregate=0x2', 'DBI+0 access returned 0x11317cb',
+            'DBI root id rc=0 id=0x11317cb')) + '\n'
+        endpoint = prefix + 'PCIe endpoint identify rc=-7 id=0 lnk=0x1011 stage=4 fail=4 polls=1001 debug=0x8ac400/0x8200000 elbi=0x1 ltssm=0\n'
+        history = prefix + 'PCIe training samples=1001 first=0 last=0 seen_lo=0x1 seen_hi=0\n'
+        reset = prefix + 'PCIe endpoint reset reassert rc=0\n'
+        followup = prefix + 'CESTA follow-up rc=-7\n'
+        extra = prefix + 'train evidence parf_valid=0x3 parf_enable=0x100 parf_timeout=0x100 dllla=0 lt=0 xmlh=0 ready=0\n'
+        def failure(report):
+            with self.assertRaises(RuntimeError) as caught:
+                check(True, 4, head + report, 'yes', self.log, sm_diag=7, cold_reset=True)
+            return str(caught.exception)
+        legacy = endpoint + reset + history + followup
+        self.assertIn('Detect.Quiet at all sampled polls; PERST# reassert readback confirmed', failure(legacy + legacy))
+        self.assertNotIn('PARF LTSSM_EN', failure(legacy))
+        self.assertIn('sampled states=0x3', failure(legacy.replace('seen_lo=0x1', 'seen_lo=0x3')))
+        self.assertIn('PERST# reassert unconfirmed', failure(legacy.replace(reset, '')))
+        self.assertIn('PARF LTSSM_EN at enable/timeout=1/1', failure(legacy + extra))
+        self.assertIn('1/0; DLLLA/LT/XMLH/ready counts=1/2/3/0',
+                      failure(legacy + extra.replace('parf_timeout=0x100 dllla=0 lt=0 xmlh=0', 'parf_timeout=0 dllla=1 lt=2 xmlh=3')))
+        self.assertIn('1/unknown', failure(legacy + extra.replace('parf_valid=0x3', 'parf_valid=0x1')))
+        for invalid in (legacy.replace(history, ''), legacy + history.replace('first=0', 'first=1'),
+                        legacy.replace('polls=1001', 'polls=1000'), legacy.replace('last=0', 'last=1'),
+                        legacy.replace('lnk=0x1011', 'lnk=0xffff'), legacy.replace('stage=4', 'stage=3'),
+                        legacy.replace('id=0 ', 'id=0x110717cb '), legacy.replace('seen_lo=0x1', 'seen_lo=0'),
+                        legacy + reset.replace('rc=0', 'rc=-1'), legacy + extra.replace('ready=0', 'ready=1'),
+                        legacy + extra.replace('parf_enable=0x100', 'parf_enable=0xffffffff'),
+                        legacy + extra.replace('lt=0', 'lt=1002'), legacy + extra + extra.replace('lt=0', 'lt=1'),
+                        legacy + extra.replace('xmlh=0', 'xmlh=oops'), legacy.replace('rc=-7\n', 'rc=-7junk\n')):
+            with self.subTest(invalid=invalid):
+                message = failure(invalid)
+                self.assertIn('missing or conflicting', message)
+                self.assertNotIn('all sampled polls', message)
+
     def test_log_reboot_requires_a_supported_profile_and_fresh_hex_identifier(self):
         fn = self.namespace['ace5_wifi_bringup_arguments']
         table = self.directory / 'pdc.bin'
