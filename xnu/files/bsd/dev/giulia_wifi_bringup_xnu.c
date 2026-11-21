@@ -254,8 +254,54 @@ static void wb_link_w16(void *c, unsigned r, uint32_t off, uint16_t v)
 
 static uint32_t wb_phy_r(void *c, uint32_t off) { (void)c; return wb_mmio(&wb.phy, off); }
 static void wb_phy_w(void *c, uint32_t off, uint32_t v) { (void)c; wb_store(&wb.phy, off, v); }
-static int wb_bar_r32(void *c, uint32_t off, uint32_t *val) { (void)c; *val = wb_mmio(&wb.bar0, off); return 0; }
-static int wb_bar_w32(void *c, uint32_t off, uint32_t val) { (void)c; wb_store(&wb.bar0, off, val); return 0; }
+/* wb_map.size covers the whole page-aligned allocation, not the usable tail
+ * starting at address. Never let an absent or short mapping reach wb_mmio. */
+static int wb_map_covers(const struct wb_map *m, vm_size_t bytes)
+{
+    if (!bytes || !m->allocation || m->address < m->allocation || (m->address & 3u) ||
+        bytes - 1 > UINTPTR_MAX - m->address) return 0;
+    uintptr_t bias = m->address - m->allocation;
+    return bias <= m->size && bytes <= m->size - bias;
+}
+
+static int wb_bar_admit(uint32_t off)
+{
+    if ((off & 3u) || off > GIULIA_PCIE_LINK_BAR0_SIZE - sizeof(uint32_t)) return 0;
+    uint32_t stage = wb.bringup.stage;
+    if (stage != GIULIA_BRINGUP_SOC_INFO && stage != GIULIA_BRINGUP_MHI_SNAP &&
+        stage != GIULIA_BRINGUP_READY) return 0;
+
+    const struct giulia_pcie_link *link = &wb.bringup.link;
+    if (!wb.guard_failed && wb.irq_dirty && wb.sm_diag < WB_SM_TABLES &&
+        !wb.watchdog_trial && !wb.cold_reset &&
+        link->state == GIULIA_LINK_READY && link->core_owned && link->memory_owned &&
+        link->memory_enabled && wb_map_covers(&wb.bar0, GIULIA_PCIE_LINK_BAR0_SIZE) &&
+        wb_map_covers(&wb.shared, sizeof(*wb.quiet)) &&
+        (uintptr_t)wb.quiet == wb.shared.address && wb_map_covers(&wb.gic, 0x308u) &&
+        wb_quiet_ok() && wb_guard())
+        return 1;
+
+    /* This is a running session, not an invalid API request. Refuse the
+     * operation and the ensuing stop() hardware cleanup under a lost lease.
+     * No DBI, CFG or BAR probing can safely establish a missing lease. */
+    wb.guard_failed = 1;
+    giulia_wifi_bringup_hold_bar(&wb.bringup);
+    return 0;
+}
+
+static int wb_bar_r32(__unused void *c, uint32_t off, uint32_t *val)
+{
+    if (!val || !wb_bar_admit(off)) return -1;
+    *val = wb_mmio(&wb.bar0, off);
+    return 0;
+}
+
+static int wb_bar_w32(__unused void *c, uint32_t off, uint32_t val)
+{
+    if (!wb_bar_admit(off)) return -1;
+    wb_store(&wb.bar0, off, val);
+    return 0;
+}
 
 static int wb_lease_ok(__unused void *c) { return wb_guard() ? 0 : -1; }
 static int wb_crm_r(__unused void *c, uint32_t off, uint32_t *val)

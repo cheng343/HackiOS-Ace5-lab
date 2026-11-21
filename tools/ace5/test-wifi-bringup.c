@@ -10,7 +10,7 @@
 static char trace[256];
 static unsigned tlen;
 static int fail_at = -1;
-static char stop_fail;
+static char stop_fail, lose_bar;
 static int noc_release_rc;
 static unsigned host_on, noc_owned;
 static int ev(char c, int rc) { assert(tlen < sizeof(trace)-1); trace[tlen++]=c; return (int)tlen==fail_at || c==stop_fail ? rc : 0; }
@@ -66,10 +66,14 @@ int giulia_pcie_link_quiesce(struct giulia_pcie_link *l, uint32_t f)
 int giulia_pcie_link_stop(struct giulia_pcie_link *l, uint32_t f)
 { (void)f; int rc=ev('l',GIULIA_LINK_READBACK); if(!rc)l->state = GIULIA_LINK_STOPPED; return rc; }
 int giulia_kiwi_read_soc_info(const struct giulia_kiwi_bar_io *io, struct giulia_kiwi_soc_info *out)
-{ (void)io; int rc = ev('I', GIULIA_KIWI_READBACK); if (!rc) { out->family=4; out->device=0x110; out->major=2; out->minor=1; } return rc; }
+{ int rc = ev('I', GIULIA_KIWI_READBACK);
+  if (lose_bar == 'I') { uint32_t v; assert(io->read32(io->cookie, 0x224, &v) != 0); return GIULIA_KIWI_IO; }
+  if (!rc) { out->family=4; out->device=0x110; out->major=2; out->minor=1; } return rc; }
 const char *giulia_kiwi_fw_name(const struct giulia_kiwi_soc_info *info) { return info->major == 2 ? "amss20.bin" : "amss.bin"; }
 int giulia_mhi_snapshot(const struct giulia_mhi_snapshot_io *io, uint32_t f, struct giulia_mhi_snapshot *s)
-{ (void)io; (void)f; int rc = ev('H', GIULIA_MHI_SNAPSHOT_READ_ERROR); if (!rc) s->valid = GIULIA_MHI_SNAPSHOT_HAVE_HEADER; return rc; }
+{ (void)f; int rc = ev('H', GIULIA_MHI_SNAPSHOT_READ_ERROR);
+  if (lose_bar == 'H') { uint32_t v; assert(io->read32(io->cookie, 0, &v) != 0); return GIULIA_MHI_SNAPSHOT_READ_ERROR; }
+  if (!rc) s->valid = GIULIA_MHI_SNAPSHOT_HAVE_HEADER; return rc; }
 
 static int noc_prep(void *cookie, struct giulia_wifi_supply *s) { (void)cookie; (void)s; assert(host_on); noc_owned=1; return ev('N', -1); }
 static int noc_rel(void *cookie) { (void)cookie; assert(host_on && noc_owned); int rc=ev('n',-1); if(!rc)rc=noc_release_rc; if(!rc)noc_owned=0; return rc; }
@@ -84,6 +88,16 @@ static void p_w32(void *c, uint32_t o, uint32_t v) { (void)c; (void)o; (void)v; 
 static void d_bar(void *c) { (void)c; }
 static void d_del(void *c, uint32_t u) { (void)c; (void)u; }
 static int b_r32(void *c, uint32_t o, uint32_t *v) { (void)c; (void)o; *v = 0; return 0; }
+
+static int lost_bar_lease(void *cookie, uint32_t off, uint32_t *v)
+{
+    struct giulia_wifi_bringup *b = cookie;
+    (void)v;
+    assert((b->stage == GIULIA_BRINGUP_SOC_INFO && off == 0x224) ||
+        (b->stage == GIULIA_BRINGUP_MHI_SNAP && off == 0));
+    giulia_wifi_bringup_hold_bar(b);
+    return -1;
+}
 
 int main(void)
 {
@@ -109,6 +123,29 @@ int main(void)
     struct giulia_wifi_bringup saved=b;
     assert(giulia_wifi_bringup_start(&b,&cfg)==GIULIA_BRINGUP_STATE);
     assert(!memcmp(&b,&saved,sizeof(b)) && tlen==before);
+
+    /* Exercise the real fail_stop/stop path and ensure it issues no I/O. */
+    cfg.bar.read32 = cfg.mhi.read32 = lost_bar_lease;
+    cfg.bar.cookie = cfg.mhi.cookie = &b;
+    for (unsigned pass = 0; pass < 2; pass++) {
+        memset(&b, 0, sizeof(b)); memset(trace, 0, sizeof(trace)); tlen = 0;
+        giulia_wifi_bringup_hold_bar(&b); assert(b.stage == GIULIA_BRINGUP_IDLE);
+        lose_bar = pass ? 'H' : 'I';
+        int err = pass ? GIULIA_BRINGUP_MHI : GIULIA_BRINGUP_BAR;
+        assert(giulia_wifi_bringup_start(&b, &cfg) == err && b.error == err);
+        assert(b.failed_stage == (pass ? GIULIA_BRINGUP_MHI_SNAP : GIULIA_BRINGUP_SOC_INFO));
+        assert(b.sub_error == (pass ? GIULIA_MHI_SNAPSHOT_READ_ERROR : GIULIA_KIWI_IO));
+        assert(b.stage == GIULIA_BRINGUP_HELD && b.link.memory_enabled && host_on && noc_owned);
+        assert(!strcmp(trace, pass ? "SNPAYECLRTMIH" : "SNPAYECLRTMI"));
+        before = tlen;
+        assert(giulia_wifi_bringup_stop(&b) == GIULIA_BRINGUP_RETAINED && tlen == before);
+        assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_STATE && tlen == before);
+        host_on = noc_owned = 0; /* simulate a separate cold fixture */
+    }
+    lose_bar = 0;
+    cfg.bar.cookie = cfg.mhi.cookie = NULL;
+    cfg.bar.read32 = cfg.mhi.read32 = b_r32;
+    puts("PASS: lost KIWI/MHI BAR lease retains the bus without cleanup transactions");
 
     /* Failure at link train triggers clean reverse unwind. */
     tlen = 0; memset(trace, 0, sizeof(trace)); memset(&b,0,sizeof(b)); fail_at = 10;

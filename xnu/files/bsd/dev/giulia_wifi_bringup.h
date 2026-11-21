@@ -80,6 +80,15 @@ struct giulia_wifi_bringup {
     int error, sub_error, cleanup_error;
 };
 
+/* The serial BAR consumer lost exclusive access. Even rollback must
+ * not issue more PCIe transactions. fail_stop records its original error. */
+static inline void giulia_wifi_bringup_hold_bar(struct giulia_wifi_bringup *b)
+{
+    if (b && (b->stage == GIULIA_BRINGUP_SOC_INFO ||
+        b->stage == GIULIA_BRINGUP_MHI_SNAP || b->stage == GIULIA_BRINGUP_READY))
+        b->stage = GIULIA_BRINGUP_HELD;
+}
+
 int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     const struct giulia_wifi_bringup_config *cfg);
 int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b);

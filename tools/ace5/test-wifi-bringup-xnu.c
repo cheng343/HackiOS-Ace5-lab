@@ -435,6 +435,71 @@ static void single_access(void)
     id=UINT32_MAX;assert(wb_link_r32(0,GIULIA_LINK_DBI,0)==UINT32_MAX);
     assert(!wb.cfg.address && !wb.atu.address && !wb.parf.address);
 }
+static void bar_callbacks(void)
+{
+    setup();
+    wb_map(&wb.shared,shared_pa,sizeof(*wb.quiet),VM_WIMG_WCOMB);
+    wb.quiet=(void *)wb.shared.address;
+    wb_map(&wb.gic,0x17100000u,0x10000u,VM_WIMG_IO);
+    wb_map(&wb.bar0,GIULIA_PCIE_LINK_BAR0_PA,GIULIA_PCIE_LINK_BAR0_SIZE,VM_WIMG_IO);
+    wb.quiet->request=1; wb_test_barrier(); assert(wb_irq_acquire());
+    struct wb_map bar=wb.bar0, shared=wb.shared, gic=wb.gic;
+    uint32_t *cell=(void *)bar.address, *irq=(void *)gic.address;
+    uint32_t val=0xdeadbeefu;
+    static const uint32_t stages[]={GIULIA_BRINGUP_SOC_INFO,GIULIA_BRINGUP_MHI_SNAP,GIULIA_BRINGUP_READY};
+    wb.bringup.link.state=GIULIA_LINK_READY;
+    wb.bringup.link.core_owned=wb.bringup.link.memory_owned=wb.bringup.link.memory_enabled=1;
+    for (unsigned i=0;i<sizeof(stages)/sizeof(stages[0]);i++) {
+        wb.bringup.stage=stages[i];
+        assert(!wb_bar_w32(0,0,0x11220000u+i) && !wb_bar_r32(0,0,&val) && val==0x11220000u+i);
+    }
+    assert(!wb_bar_w32(0,GIULIA_PCIE_LINK_BAR0_SIZE-4,9));
+    assert(!wb_bar_r32(0,GIULIA_PCIE_LINK_BAR0_SIZE-4,&val) && val==9);
+    /* Bad call and inactive/identity-only mode never acquire or poison an owner. */
+    const uint32_t bad[]={1,GIULIA_PCIE_LINK_BAR0_SIZE,UINT32_MAX-3u};
+    for (unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);i++) {
+        assert(wb_bar_r32(0,bad[i],&val)<0 && val==9 && wb_bar_w32(0,bad[i],7)<0);
+    }
+    assert(wb_bar_r32(0,0,0)<0 && !wb.guard_failed && wb.bringup.stage==GIULIA_BRINGUP_READY);
+    wb.sm_diag=WB_SM_ENDPOINT; wb.bringup.stage=GIULIA_BRINGUP_PHY_START; wb.bar0=(struct wb_map){0};
+    assert(wb_bar_r32(0,0,&val)<0 && wb_bar_w32(0,0,99)<0 && !wb.guard_failed &&
+        wb.bringup.stage==GIULIA_BRINGUP_PHY_START);
+    wb.sm_diag=0;
+    /* Alternate first access: neither read nor write may be the one that
+     * reaches MMIO with an unsafe mapping, ownership or quiet/IRQ session. */
+    for (unsigned fault=0;fault<16;fault++) for (unsigned wr=0;wr<2;wr++) {
+        wb.bar0=bar; wb.shared=shared; wb.gic=gic; wb.quiet=(void *)shared.address;
+        wb.guard_failed=0; wb.irq_dirty=1; wb.bringup.stage=stages[fault%3];
+        wb.bringup.link.state=GIULIA_LINK_READY;
+        wb.bringup.link.core_owned=wb.bringup.link.memory_owned=wb.bringup.link.memory_enabled=1;
+        wb.quiet->ack=wb.quiet->active=wb.quiet->request=1;
+        irq[0x304/4]=0; wb.sm_diag=0; no_ack=1;
+        switch(fault) {
+        case 0: wb.bar0=(struct wb_map){0}; break;
+        case 1: wb.bar0.address+=4; break; /* last dword falls outside allocation */
+        case 2: wb.bar0.allocation=0; break;
+        case 3: wb.quiet=0; break;
+        case 4: wb.shared.size=wb.shared.address-wb.shared.allocation+sizeof(*wb.quiet)-1; break;
+        case 5: wb.gic.size=0x304; break;
+        case 6: wb.gic.address=0; break;
+        case 7: wb.quiet->active=0; break;
+        case 8: wb.irq_dirty=0; break;
+        case 9: irq[0x304/4]=WB_IRQ; break;
+        case 10: wb.bringup.link.state=GIULIA_LINK_IDENTIFIED; break;
+        case 11: wb.bringup.link.core_owned=0; break;
+        case 12: wb.bringup.link.memory_owned=0; break;
+        case 13: wb.bringup.link.memory_enabled=0; break;
+        case 14: wb.sm_diag=WB_SM_ENDPOINT; break;
+        case 15: wb.guard_failed=1; break;
+        }
+        *cell=0x11223344; val=0xdeadbeef;
+        if(wr) assert(wb_bar_w32(0,0,77)<0); else assert(wb_bar_r32(0,0,&val)<0);
+        assert(wb.guard_failed && wb.bringup.stage==GIULIA_BRINGUP_HELD);
+        assert(wb_bar_w32(0,0,77)<0 && wb_bar_r32(0,0,&val)<0);
+        assert(*cell==0x11223344 && val==0xdeadbeef);
+    }
+    puts("PASS: XNU BAR0 validates aperture, CPU decode and quiet/IRQ lease; lost sessions held without BAR access");
+}
 static void noc_cleanup(void)
 {
     for(unsigned failure=0;failure<4;failure++) {
@@ -761,7 +826,7 @@ static void noc_after_phy(void)
 }
 int main(void)
 {
-    admission();cleanup();single_access();noc_cleanup();noc_prepare();stock_startup_perf();noc_after_phy();setup();
+    admission();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();noc_after_phy();setup();
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");
     puts("Wi-Fi XNU adapter: quiet watchdog read-only status, bounded expiry and disarm passed");
