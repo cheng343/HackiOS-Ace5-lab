@@ -138,6 +138,17 @@ int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t prerequisites,
         p->polls = i + 1;
         if (p->last_status == UINT32_MAX) return phy_failed(p, GIULIA_PHY_READBACK);
         if (!(p->last_status & PHY_BUSY_BIT)) {
+            /* The giulia downstream PCS-first sequence re-reads PHYSTATUS
+             * after the first ready sample and before admitting the host.
+             * A transient clear is not permission to start the link. Keep
+             * polls as wait-loop iterations and the original timeout budget. */
+            if (pcs_first) {
+                p->last_status = io->read32(io->cookie, PHY_STATUS);
+                if (p->last_status == UINT32_MAX)
+                    return phy_failed(p, GIULIA_PHY_READBACK);
+                if (p->last_status & PHY_BUSY_BIT)
+                    return phy_failed(p, GIULIA_PHY_TIMEOUT);
+            }
             p->state = GIULIA_PHY_READY;
             return GIULIA_PHY_OK;
         }

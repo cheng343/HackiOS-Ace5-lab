@@ -15,6 +15,8 @@ struct fixture {
     unsigned reads, writes, delays, elapsed_us, status_reads;
     unsigned ready_after, pipe_on, pipe_off, pipe_live, pcs_first;
     int pipe_on_fail, pipe_off_fail, status_bad;
+    unsigned status_override_at, read_at_us[52];
+    uint32_t status_override;
 };
 static uint32_t rd(void *cookie, uint32_t off)
 {
@@ -22,7 +24,9 @@ static uint32_t rd(void *cookie, uint32_t off)
     assert(off < sizeof(f->regs) && !(off & 3));
     ++f->reads;
     if (off == STATUS) {
-        ++f->status_reads;
+        assert(f->status_reads < sizeof(f->read_at_us) / sizeof(f->read_at_us[0]));
+        f->read_at_us[f->status_reads++] = f->elapsed_us;
+        if (f->status_reads == f->status_override_at) return f->status_override;
         if (f->status_bad) return UINT32_MAX;
         return f->status_reads > f->ready_after ? 0 : 0x40;
     }
@@ -87,6 +91,57 @@ static void restored(struct fixture *f, struct giulia_pcie_phy *p)
     assert(p->state == GIULIA_PHY_STOPPED && !p->saved_count && !p->pipe_owned);
     assert(!f->pipe_live);
     assert(!memcmp(f->regs, f->original, sizeof(f->regs)));
+}
+/* A clear PHYSTATUS is a candidate, not a successful PCS-first start,
+ * until a second read also has bit 6 clear. Inject at the actual hardware
+ * access, not in the caller or in the recorded outcome. */
+static void test_stock_ready_confirmation(void)
+{
+    struct fixture f;
+    struct giulia_pcie_phy p;
+    struct giulia_pcie_phy_io bus = io(&f);
+    const uint32_t stock = GIULIA_PHY_START_REQUIRED | GIULIA_PHY_PCS_BEFORE_PIPE;
+
+    for (unsigned k = 0; k < 2; ++k) {
+        const unsigned busy = k ? 50u : 0u;
+        setup(&f, &p);
+        f.pcs_first = 1; f.ready_after = busy;
+        f.status_override_at = busy + 2u;
+        f.status_override = 4u; /* bit 6 clear despite unrelated status bits */
+        assert(!giulia_pcie_phy_start(&p, stock, &bus));
+        assert(p.state == GIULIA_PHY_READY && f.status_reads == busy + 2u);
+        assert(f.elapsed_us == 1000u + 200u * busy);
+        for (unsigned j = 0; j <= busy; ++j)
+            assert(f.read_at_us[j] == 1000u + 200u * j);
+        assert(f.read_at_us[busy + 1u] == f.read_at_us[busy]);
+        assert(!giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED));
+        assert(f.pipe_off == 1); restored(&f, &p);
+    }
+    for (unsigned k = 0; k < 2; ++k) {
+        const int expected = k ? GIULIA_PHY_READBACK : GIULIA_PHY_TIMEOUT;
+        setup(&f, &p);
+        f.pcs_first = 1; f.ready_after = 2;
+        f.status_override_at = 4;
+        f.status_override = k ? UINT32_MAX : 0x40u;
+        /* A future read would be clear again; never speculate past rejection. */
+        assert(giulia_pcie_phy_start(&p, stock, &bus) == expected);
+        assert(p.failure == expected && p.last_status == f.status_override);
+        assert(f.status_reads == 4 && f.read_at_us[2] == 1400 && f.read_at_us[3] == 1400);
+        assert(f.pipe_on == 1 && f.pipe_off == 1); restored(&f, &p);
+    }
+    setup(&f, &p);
+    f.pcs_first = 1; f.ready_after = 51;
+    /* No candidate saw clear: no 52nd access at or after the deadline. */
+    assert(giulia_pcie_phy_start(&p, stock, &bus) == GIULIA_PHY_TIMEOUT);
+    assert(f.status_reads == 51 && f.elapsed_us == 11000 && f.pipe_off == 1);
+    restored(&f, &p);
+    setup(&f, &p);
+    f.status_override_at = 4; f.status_override = UINT32_MAX;
+    /* Upstream PIPE-first still ends on its first clear third sample. */
+    assert(!giulia_pcie_phy_start(&p, GIULIA_PHY_START_REQUIRED, &bus));
+    assert(f.status_reads == 3 && f.elapsed_us == 1400 && p.state == GIULIA_PHY_READY);
+    assert(!giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED)); restored(&f, &p);
+    puts("PASS: PCS-first readiness rechecks PHYSTATUS before training and rolls back on relapse");
 }
 int main(void)
 {
@@ -168,6 +223,7 @@ int main(void)
     assert(p.state == GIULIA_PHY_FAULT && p.saved_count == 112 && !p.pipe_owned);
     f.ignore_write = UINT32_MAX;
     assert(!giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED)); restored(&f, &p);
+    test_stock_ready_confirmation();
     puts("SM8650 QMP PHY: tuning, PIPE ordering, timeout and restore tests passed");
     return 0;
 }
