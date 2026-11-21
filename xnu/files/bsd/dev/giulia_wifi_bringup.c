@@ -135,6 +135,9 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
     b->stage = GIULIA_BRINGUP_MHI_SNAP;
     rc = giulia_mhi_snapshot(&b->cfg.mhi, GIULIA_MHI_SNAPSHOT_REQUIRED, &b->mhi);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_MHI_SNAP, GIULIA_BRINGUP_MHI, rc);
+    /* Optional local file only; never turn a missing/ineligible firmware
+     * into a failed hardware snapshot, or a sampled READY into a booted EE. */
+    giulia_kiwi_image_resolve(&b->fw_image,b->link.endpoint_id,&b->soc,&b->mhi,b->cfg.fw_lookup);
     if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
 
     b->stage = GIULIA_BRINGUP_READY;
@@ -147,6 +150,7 @@ int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b)
     uint32_t link_base = GIULIA_LINK_EXCLUSIVE | GIULIA_LINK_RAILS_NOC_READY |
         GIULIA_LINK_CLOCKS_RC_RESET_READY;
     if (!b) return GIULIA_BRINGUP_ARGUMENT;
+    b->fw_image=(struct giulia_kiwi_image){0}; /* retire the borrowed view even on retained stop */
     if (b->stage == GIULIA_BRINGUP_IDLE || b->stage == GIULIA_BRINGUP_STOPPED)
         return GIULIA_BRINGUP_OK;
     if (b->stage == GIULIA_BRINGUP_HELD) return GIULIA_BRINGUP_RETAINED;

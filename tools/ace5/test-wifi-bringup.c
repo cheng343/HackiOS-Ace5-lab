@@ -12,7 +12,16 @@ static unsigned tlen;
 static int fail_at = -1;
 static char stop_fail, lose_bar;
 static int noc_release_rc;
-static unsigned host_on, noc_owned;
+static unsigned host_on, noc_owned, stable_pbl, file_calls, file_present;
+static const uint8_t cpu_fixture[]={0x5c,0x72,0x4a};
+static const uint8_t *cpu_lookup(const char *dir,const char *name,uint64_t *bytes)
+{
+    assert(!strcmp(dir,"kiwifw") && !strcmp(name,"amss20.bin"));
+    assert(strchr(trace,'H')!=NULL);
+    file_calls++;
+    *bytes=file_present?sizeof(cpu_fixture):0;
+    return file_present?cpu_fixture:NULL;
+}
 static int ev(char c, int rc) { assert(tlen < sizeof(trace)-1); trace[tlen++]=c; return (int)tlen==fail_at || c==stop_fail ? rc : 0; }
 
 int giulia_wifi_supply_prepare(struct giulia_wifi_supply *p, const struct giulia_wifi_supply_config *c)
@@ -56,7 +65,9 @@ int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *g, uint32_t f)
 int giulia_wifi_gpio_perst_assert(struct giulia_wifi_gpio *g, uint32_t f)
 { (void)f; int rc=ev('r',GIULIA_WGPIO_BUSY); if(!rc)g->state = GIULIA_WGPIO_HELD; return rc; }
 int giulia_pcie_link_train(struct giulia_pcie_link *l, uint32_t f)
-{ (void)f; int rc = ev('T', GIULIA_LINK_TIMEOUT); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_READY; return rc; }
+{ (void)f; int rc = ev('T', GIULIA_LINK_TIMEOUT); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_READY;
+  if (!rc) l->endpoint_id=GIULIA_PCIE_LINK_EP_ID;
+  return rc; }
 int giulia_pcie_link_mem_enable(struct giulia_pcie_link *l, uint32_t f)
 { (void)f; int rc = ev('M', GIULIA_LINK_BAR); if (!rc) l->memory_enabled = 1; return rc; }
 int giulia_pcie_link_mem_disable(struct giulia_pcie_link *l, uint32_t f)
@@ -68,12 +79,14 @@ int giulia_pcie_link_stop(struct giulia_pcie_link *l, uint32_t f)
 int giulia_kiwi_read_soc_info(const struct giulia_kiwi_bar_io *io, struct giulia_kiwi_soc_info *out)
 { int rc = ev('I', GIULIA_KIWI_READBACK);
   if (lose_bar == 'I') { uint32_t v; assert(io->read32(io->cookie, 0x224, &v) != 0); return GIULIA_KIWI_IO; }
-  if (!rc) { out->family=4; out->device=0x110; out->major=2; out->minor=1; } return rc; }
+  if (!rc) { out->raw=0x41100201; out->family=4; out->device=0x110; out->major=2; out->minor=1; } return rc; }
 const char *giulia_kiwi_fw_name(const struct giulia_kiwi_soc_info *info) { return info->major == 2 ? "amss20.bin" : "amss.bin"; }
 int giulia_mhi_snapshot(const struct giulia_mhi_snapshot_io *io, uint32_t f, struct giulia_mhi_snapshot *s)
 { (void)f; int rc = ev('H', GIULIA_MHI_SNAPSHOT_READ_ERROR);
   if (lose_bar == 'H') { uint32_t v; assert(io->read32(io->cookie, 0, &v) != 0); return GIULIA_MHI_SNAPSHOT_READ_ERROR; }
-  if (!rc) s->valid = GIULIA_MHI_SNAPSHOT_HAVE_HEADER; return rc; }
+  if (!rc) s->valid = stable_pbl ? GIULIA_MHI_SNAPSHOT_HAVE_HEADER | GIULIA_MHI_SNAPSHOT_HAVE_BHI |
+      GIULIA_MHI_SNAPSHOT_HAVE_BHIE | GIULIA_MHI_SNAPSHOT_HAVE_AFTER : GIULIA_MHI_SNAPSHOT_HAVE_HEADER;
+  return rc; }
 
 static int noc_prep(void *cookie, struct giulia_wifi_supply *s) { (void)cookie; (void)s; assert(host_on); noc_owned=1; return ev('N', -1); }
 static int noc_rel(void *cookie) { (void)cookie; assert(host_on && noc_owned); int rc=ev('n',-1); if(!rc)rc=noc_release_rc; if(!rc)noc_owned=0; return rc; }
@@ -123,6 +136,31 @@ int main(void)
     struct giulia_wifi_bringup saved=b;
     assert(giulia_wifi_bringup_start(&b,&cfg)==GIULIA_BRINGUP_STATE);
     assert(!memcmp(&b,&saved,sizeof(b)) && tlen==before);
+
+    /* A filename is not a file. Only the successful MHI stage can resolve a
+     * CPU view; lack of the optional payload leaves ordinary bringup intact. */
+    stable_pbl=1; cfg.fw_lookup=cpu_lookup;
+    for (unsigned trial=0;trial<3;trial++) {
+        memset(&b,0,sizeof(b)); memset(trace,0,sizeof(trace)); tlen=0;
+        cfg.max_stage=trial==0?GIULIA_BRINGUP_SOC_INFO:trial==1?GIULIA_BRINGUP_MHI_SNAP:0;
+        file_present=trial==1;
+        unsigned calls=file_calls;
+        assert(giulia_wifi_bringup_start(&b,&cfg)==GIULIA_BRINGUP_OK);
+        assert(b.stage==(trial==0?GIULIA_BRINGUP_SOC_INFO:trial==1?
+            GIULIA_BRINGUP_MHI_SNAP:GIULIA_BRINGUP_READY));
+        assert(file_calls==calls+(trial!=0));
+        if (trial==1) {
+            assert(b.fw_image.status==GIULIA_IMAGE_READY && b.fw_image.cpu==cpu_fixture &&
+                b.fw_image.plan.image_bytes==sizeof(cpu_fixture) && b.fw_image.cpu[2]==0x4a);
+        } else {
+            assert(!b.fw_image.cpu && !b.fw_image.plan.image_bytes);
+            assert(b.fw_image.status==(trial?GIULIA_IMAGE_ABSENT:GIULIA_IMAGE_NOT_CHECKED));
+        }
+        assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_RETAINED);
+        assert(!b.fw_image.cpu && !b.fw_image.name && !b.fw_image.plan.image_bytes &&
+            b.fw_image.status==GIULIA_IMAGE_NOT_CHECKED && !host_on && !noc_owned);
+    }
+    stable_pbl=0; cfg.fw_lookup=NULL; cfg.max_stage=0;
 
     /* Exercise the real fail_stop/stop path and ensure it issues no I/O. */
     cfg.bar.read32 = cfg.mhi.read32 = lost_bar_lease;

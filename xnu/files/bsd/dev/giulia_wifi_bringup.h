@@ -7,6 +7,7 @@
 #include "giulia_pcie_phy.h"
 #include "giulia_kiwi_reg.h"
 #include "giulia_mhi_snapshot.h"
+#include "giulia_kiwi_image.h"
 
 /* End-to-end serial bring-up coordinator from WLAN supply/AOP/PDC/NoC
  * through PCIe0 PHY/link/BAR0 to WCN7850 SoC identity and MHI snapshot. */
@@ -66,6 +67,7 @@ struct giulia_wifi_bringup_config {
     int (*arm_pcs_first)(void);
     /* Optional diagnostic stop ceiling (enum giulia_wifi_bringup_stage, 0 = full). */
     unsigned max_stage;
+    giulia_kiwi_lookup_fn fw_lookup; /* optional private CPU image provider */
 };
 
 struct giulia_wifi_bringup {
@@ -75,6 +77,7 @@ struct giulia_wifi_bringup {
     struct giulia_pcie_phy phy;
     struct giulia_kiwi_soc_info soc;
     struct giulia_mhi_snapshot mhi;
+    struct giulia_kiwi_image fw_image; /* invalidated by stop; no DMA */
     uint32_t stage, failed_stage, noc_started;
     uint32_t pipe_checked, pipe_cbcr;
     int error, sub_error, cleanup_error;

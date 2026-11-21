@@ -11,6 +11,7 @@
  * mounted, compressed or not -- into memory of its own, and kept: firmware is asked for once
  * or twice a session and its driver keeps it while the phone runs, so nothing gives it back.
  */
+#ifndef REDWOOD_IMAGE_HOST_TEST
 #include <kern/kalloc.h>
 #include <kern/locks.h>
 #include <libkern/libkern.h>
@@ -19,11 +20,16 @@
 #include <sys/stat.h>
 #include <sys/systm.h>
 #include <miscfs/apfs/apfs_lib.h>
+#endif
 
 extern dev_t mdevlookup(int devid);
 extern int mdevgetkernelrange(dev_t dev, vm_offset_t *base, uint64_t *size);
 
 const uint8_t *redwood_image_file(const char *dir, const char *name, uint64_t *size, int *disk_out);
+/* Private KIWI boot image lookup. NULL+0 is absent; NULL+UINT64_MAX is
+ * invalid/unavailable. The pointer is borrowed CPU memory, not a DMA address. */
+const uint8_t *redwood_image_boot_plain_file(const char *dir, const char *name,
+    uint64_t max_bytes, uint64_t *size, int *disk_out);
 
 /* ---- APFS ---- */
 
@@ -54,7 +60,8 @@ static struct {
 } kept[64];
 
 static const uint8_t *
-apfs_file(int disk, const uint8_t *base, uint64_t length, const char *dir, const char *name, uint64_t *size)
+apfs_file(int disk, const uint8_t *base, uint64_t length, const char *dir, const char *name, uint64_t *size,
+    uint64_t plain_limit)
 {
 	struct mem_dev m = { .base = base, .length = length };
 	struct apfs_dev dev = { .ctx = &m, .size = length, .read = mem_read, .read_data = mem_read };
@@ -68,13 +75,16 @@ apfs_file(int disk, const uint8_t *base, uint64_t length, const char *dir, const
 	uint32_t i;
 	int error;
 
+	if (plain_limit != 0) {
+		*size = UINT64_MAX; /* fail closed, except a clean negative lookup */
+	}
 	if (length < 4096 || memcmp(base + 32, "NXSB", 4) != 0) {
 		return NULL;
 	}
 	snprintf(path, sizeof(path), "/%s/%s", dir, name);
 	lck_mtx_lock(&image_lock);
 	for (i = 0; i < sizeof(kept) / sizeof(kept[0]) && kept[i].data != NULL; i++) {
-		if (kept[i].disk == disk && strcmp(kept[i].path, path) == 0) {
+		if (plain_limit == 0 && kept[i].disk == disk && strcmp(kept[i].path, path) == 0) {
 			*size = kept[i].size;
 			lck_mtx_unlock(&image_lock);
 			return kept[i].data;
@@ -86,14 +96,34 @@ apfs_file(int disk, const uint8_t *base, uint64_t length, const char *dir, const
 		goto out;
 	}
 	if (apfs_nx_open(nx, &dev) != 0) {
-		kfree_type(struct apfs_nx, nx);
-		nx = NULL;
+		/* apfs_nx_open can allocate caches before reporting an error. */
+		apfs_nx_close(nx);
 		goto out;
 	}
-	error = ENOENT;
-	for (uint32_t v = 0; v < APFS_NX_MAX_FILE_SYSTEMS && error != 0; v++) {
-		if (nx->fs_oid[v] != 0 && apfs_vol_open(nx, v, vol) == 0) {
-			error = apfs_path_lookup(vol, path, &id, &dt);
+	if (plain_limit != 0) {
+		/* mkapfs creates a single "redwood" boot volume. Never walk an iOS
+		 * System volume, or let a second volume supply a missing private blob. */
+		for (uint32_t v = 1; v < APFS_NX_MAX_FILE_SYSTEMS; v++) {
+			if (nx->fs_oid[v] != 0) {
+				apfs_nx_close(nx);
+				goto out;
+			}
+		}
+		if (nx->fs_oid[0] == 0 || apfs_vol_open(nx, 0, vol) != 0 ||
+		    strcmp(vol->name, "redwood") != 0) {
+			apfs_nx_close(nx);
+			goto out;
+		}
+		error = apfs_path_lookup(vol, path, &id, &dt);
+		if (error == ENOENT) {
+			*size = 0;
+		}
+	} else {
+		error = ENOENT;
+		for (uint32_t v = 0; v < APFS_NX_MAX_FILE_SYSTEMS && error != 0; v++) {
+			if (nx->fs_oid[v] != 0 && apfs_vol_open(nx, v, vol) == 0) {
+				error = apfs_path_lookup(vol, path, &id, &dt);
+			}
 		}
 	}
 	if (error == 0) {
@@ -105,7 +135,8 @@ apfs_file(int disk, const uint8_t *base, uint64_t length, const char *dir, const
 	if (error == 0) {
 		error = apfs_inode_size(vol, &ino, &fsize);
 	}
-	if (error == 0 && (fsize == 0 || fsize > 256 * 1024 * 1024)) {
+	if (error == 0 && (fsize == 0 || fsize > 256 * 1024 * 1024 ||
+	    (plain_limit != 0 && fsize > plain_limit))) {
 		error = EFBIG;
 	}
 	if (error == 0) {
@@ -117,6 +148,12 @@ apfs_file(int disk, const uint8_t *base, uint64_t length, const char *dir, const
 			apfs_nx_close(nx);
 			*size = fsize;
 			data = __DECONST(uint8_t *, base) + addr * nx->block_size;
+			goto out;
+		}
+		if (plain_limit != 0) {
+			/* A fragmented, compressed, sparse or out-of-range blob is not an
+			 * in-place CPU view. Do not allocate or populate the generic cache. */
+			apfs_nx_close(nx);
 			goto out;
 		}
 		if (i == sizeof(kept) / sizeof(kept[0])) {
@@ -175,7 +212,7 @@ redwood_image_file(const char *dir, const char *name, uint64_t *size, int *disk_
 		if (dev == (dev_t)-1 || mdevgetkernelrange(dev, &base, &length) != 0) {
 			continue;
 		}
-		data = apfs_file(disk, (const uint8_t *)base, length, dir, name, size);
+		data = apfs_file(disk, (const uint8_t *)base, length, dir, name, size, 0);
 		if (data != NULL) {
 			if (disk_out != NULL) {
 				*disk_out = disk;
@@ -184,4 +221,34 @@ redwood_image_file(const char *dir, const char *name, uint64_t *size, int *disk_
 		}
 	}
 	return NULL;
+}
+
+const uint8_t *
+redwood_image_boot_plain_file(const char *dir, const char *name,
+    uint64_t max_bytes, uint64_t *size, int *disk_out)
+{
+	vm_offset_t base = 0;
+	uint64_t length = 0;
+	const uint8_t *data;
+	dev_t dev;
+	int disk = 1;
+
+	if (disk_out != NULL) *disk_out = -1;
+	if (size == NULL) return NULL;
+	*size = UINT64_MAX;
+	if (dir == NULL || strcmp(dir, "kiwifw") != 0 || name == NULL ||
+	    (strcmp(name, "amss20.bin") != 0 && strcmp(name, "amss.bin") != 0) ||
+	    max_bytes == 0) return NULL;
+	dev = mdevlookup(disk);
+	if (dev == (dev_t)-1) {
+		/* Single RAM disk boot. A PRESENT md1 is authoritative even when it
+		 * is unreadable or has no blob: md0 can be an unrelated System image. */
+		disk = 0;
+		dev = mdevlookup(disk);
+	}
+	if (dev == (dev_t)-1) { *size = 0; return NULL; }
+	if (mdevgetkernelrange(dev, &base, &length) != 0 || !base) return NULL;
+	data = apfs_file(disk, (const uint8_t *)base, length, dir, name, size, max_bytes);
+	if (data != NULL && disk_out != NULL) *disk_out = disk;
+	return data;
 }

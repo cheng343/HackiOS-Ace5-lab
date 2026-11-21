@@ -33,6 +33,11 @@
 extern vm_offset_t ml_io_map_unmappable(vm_offset_t, vm_size_t, unsigned int);
 extern void ml_io_unmap(vm_offset_t, vm_size_t);
 extern kern_return_t thread_terminate(thread_t);
+extern const uint8_t *redwood_image_boot_plain_file(const char *, const char *, uint64_t, uint64_t *, int *);
+static const uint8_t *wb_private_fw_lookup(const char *dir, const char *name, uint64_t *bytes)
+{
+    return redwood_image_boot_plain_file(dir,name,GIULIA_MHI_FW_MAX_BYTES,bytes,NULL);
+}
 extern void loader_log_line(const char *);
 extern void loader_return(void);
 
@@ -1213,6 +1218,7 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     cfg.phy = (struct giulia_pcie_phy_io){0, wb_phy_r, wb_phy_w, wb_barrier, wb_delay, 0, 0};
     cfg.bar = (struct giulia_kiwi_bar_io){0, wb_bar_r32, wb_bar_w32, GIULIA_PCIE_LINK_BAR0_SIZE};
     cfg.mhi = (struct giulia_mhi_snapshot_io){0, wb_bar_r32, GIULIA_PCIE_LINK_BAR0_SIZE};
+    cfg.fw_lookup = wb_private_fw_lookup;
     cfg.prepare_noc = wb_prepare_noc;
     cfg.release_noc = wb_release_noc;
     cfg.verify_noc = wb_verify_noc;
@@ -1267,6 +1273,12 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
         }
         wb_log("ace5-wifi-bringup: requested stage complete; stage=%u max=%u\n",
             wb.bringup.stage, wb.max_stage);
+        if (wb.bringup.stage==GIULIA_BRINGUP_MHI_SNAP || wb.bringup.stage==GIULIA_BRINGUP_READY) {
+            const struct giulia_kiwi_image *im=&wb.bringup.fw_image;
+            wb_log("ace5-wifi-bringup: KIWI private CPU image status=%s name=%s bytes=%llu segments=%u; no firmware submitted\n",
+                giulia_kiwi_image_status_name(im->status), im->name ? im->name : "-",
+                (unsigned long long)im->plan.image_bytes, im->plan.data_segments);
+        }
         if (wb.bringup.stage == GIULIA_BRINGUP_READY) {
             wb_log("ace5-wifi-bringup: soc raw=%#x fam=%u dev=%#x maj=%u min=%u fw=%s mhi_valid=%#x\n",
                 wb.bringup.soc.raw, wb.bringup.soc.family, wb.bringup.soc.device,

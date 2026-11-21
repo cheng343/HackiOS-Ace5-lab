@@ -53,6 +53,11 @@
 #                                   kernel's adsp_step=N, bsd/dev/redwood_adsp.c, which runs before the root is
 #                                   mounted). Not beside GL=1: the two do not fit the 64 MB the loader takes with
 #                                   the kernel. adsp=1 needs none of it: the system image has the firmware in /fw.
+#   Optional private Giulia small RAM image: DEVICE=giulia, ACE5_KIWI_FIRMWARE_DIR
+#   and ACE5_KIWI_RAMDISK_OUT (fresh external .apfs); ordinary root.apfs stays
+#   public. To reuse a prepared root tree without any userland compilation, run
+#   tools/ace5/private-kiwi-ramdisk.py directly with --root-tree. The private
+#   image is for phone.py --root-image, NOT the --image/system.apfs upload.
 #   system.apfs      the system image, the root filesystem (the resident RAM disk, /dev/md0), an
 #                    APFS container: the part of iOS 16.5 chosen by ../ios165/select-system.py at
 #                    its real paths, the dyld shared cache, and src/stage0.c as /sbin/launchd (the
@@ -78,6 +83,12 @@
 #                    stop before copying system files or producing a boot image.
 set -e
 cd "$(dirname "$(readlink -f "$0")")"
+if [ -n "${ACE5_KIWI_FIRMWARE_DIR:-}${ACE5_KIWI_RAMDISK_OUT:-}" ]; then
+	if [ "${DEVICE:-}" != giulia ] || [ -z "${ACE5_KIWI_FIRMWARE_DIR:-}" ] || [ -z "${ACE5_KIWI_RAMDISK_OUT:-}" ] || [ -n "${SHARE:-}${FLASHBOOT:-}" ] || [ "${COMPONENTS_ONLY:-}" = 1 ]; then
+		echo "build.sh: KIWI requires DEVICE=giulia, an explicit private directory and fresh external output; not SHARE, FLASHBOOT or COMPONENTS_ONLY" >&2
+		exit 1
+	fi
+fi
 source ../xnu-env.sh
 
 CC="xnu-clang -arch arm64 -Os -static -nostdlib -ffreestanding -fno-stack-protector -fno-builtin -Wall -Wextra"
@@ -639,8 +650,16 @@ done
 [ -d root/lib/RedwoodAudio.driver ] && ln -s /redwood/lib/RedwoodAudio.driver root/hal/RedwoodAudio.driver
 # the image: zlib where it saves room (a small file whole in its attribute, as Apple keeps them); fw/
 # as it is, which the kernel's drivers use where it lies in memory (bsd/dev/redwood_image.c)
+if [ -e root/kiwifw ] || [ -L root/kiwifw ]; then
+	echo "build.sh: refusing public root.apfs containing reserved kiwifw" >&2
+	exit 1
+fi
 python3 ../tools/apfs/mkapfs.py -z --plain fw -o root.apfs redwood=root | tail -1
 [ -z "$CHECK" ] || ../tools/apfs/check-image.sh root.apfs redwood=root
+if [ -n "${ACE5_KIWI_FIRMWARE_DIR:-}" ]; then
+	python3 ../tools/ace5/private-kiwi-ramdisk.py --device "$DEVICE" --root-tree root \
+		--firmware-dir "$ACE5_KIWI_FIRMWARE_DIR" --output "$ACE5_KIWI_RAMDISK_OUT"
+fi
 
 # --- the RAM part of a boot off the flash: FLASHBOOT=1 -> flashboot.apfs --------------------------------
 # With the iOS volume on the phone's flash as the root, all that has to come from RAM is what is not

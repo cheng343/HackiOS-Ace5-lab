@@ -30,6 +30,8 @@ case "${1:-}" in
     python3 tools/ace5/test-giulia-battery.py --cc clang-18
     python3 tools/ace5/test-pcie-msi.py --cc clang-18
     python3 tools/ace5/test-kiwi-dma-profile.py
+    python3 tools/ace5/test-private-kiwi-ramdisk.py
+    python3 tools/ace5/test-kiwi-ramdisk-reader.py --cc clang-18
     python3 tools/ace5/test-rc0-training-config.py
     python3 tools/ace5/test-capture-rc0-training.py
     python3 tools/ace5/test-pcie-bringup.py --cc clang-18
@@ -37,7 +39,7 @@ case "${1:-}" in
     python3 tools/ace5/test-platform-guards.py --cc clang-18
     python3 tools/ace5/test-gpu-lifecycle.py --cc clang-18
     python3 tools/ace5/test-loader-state.py --cc clang-18
-    for name in loader-images s3910-report gmu-fw gmu-hfi gpu-direct gpu-live gpu-submit battery-state giulia-cpufreq kiwi-reg wifi-bringup; do
+    for name in loader-images s3910-report gmu-fw gmu-hfi gpu-direct gpu-live gpu-submit battery-state giulia-cpufreq kiwi-reg; do
       clang-18 -std=gnu11 -O1 -UNDEBUG -g -fsanitize=address,undefined \
         "tools/ace5/test-$name.c" -o "local/ci/tests/$name"
       "local/ci/tests/$name"

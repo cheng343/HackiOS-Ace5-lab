@@ -350,10 +350,24 @@ int giulia_pcie_link_identify(struct giulia_pcie_link *s, uint32_t flags)
     return 0;
 }
 
+/* The XNU provider must forward the cap before lookup: this borrowed source
+ * is not interchangeable with the ordinary cross-disk image helper. */
+static unsigned private_file_calls;
+static const uint8_t fw_fixture[]={0x82,0x91};
+const uint8_t *redwood_image_boot_plain_file(const char *dir,const char *name,
+    uint64_t max_bytes,uint64_t *size,int *disk_out)
+{
+    assert(!strcmp(dir,"kiwifw") && !strcmp(name,"amss20.bin"));
+    assert(max_bytes==GIULIA_MHI_FW_MAX_BYTES && size && !disk_out);
+    private_file_calls++;
+    *size=sizeof(fw_fixture); return fw_fixture;
+}
+
 /* The adapter must propagate retained/failed core cleanup, independently of
  * whether its own IRQ and quiet handshakes would have succeeded. */
 int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,const struct giulia_wifi_bringup_config *cfg)
 {
+    assert(cfg->fw_lookup==wb_private_fw_lookup);
     assert(wb_guard());b->cfg=*cfg;b->stage=cfg->max_stage?cfg->max_stage:GIULIA_BRINGUP_READY;
     if (sm_diag >= WB_SM_TABLES || watchdog) {
         assert(!wb.bar0.address);
@@ -1032,7 +1046,11 @@ static void noc_after_phy(void)
 }
 int main(void)
 {
+    uint64_t bytes=0;
+    assert(wb_private_fw_lookup("kiwifw","amss20.bin",&bytes)==fw_fixture);
+    assert(bytes==sizeof(fw_fixture) && private_file_calls==1);
     admission();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();noc_after_phy();setup();
+    assert(private_file_calls==1); /* No private file read during an earlier diagnostic. */
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");
     puts("Wi-Fi XNU adapter: quiet watchdog read-only status, bounded expiry and disarm passed");
