@@ -86,6 +86,13 @@ class PhoneTests(unittest.TestCase):
         endpoint = dbi + ('PCIe endpoint identify rc=0 id=0x110717cb lnk=0x2011\n'
                           'PCIe endpoint reset reassert rc=0\n')
         check(True, 4, endpoint, 'yes', self.log, sm_diag=7, cold_reset=True)
+        # A retained sample is not an endpoint, even when a logger has retained
+        # a complete positive prefix and not the final CESTA failure line.
+        revoked = 'ace5-wifi-bringup: endpoint lease lost; retained until reset, prior ID is a sample only\n'
+        for mixed in (revoked + endpoint, endpoint + revoked, endpoint + '[uart] ' + revoked + revoked,
+                      endpoint + 'ace5-wifi-bringup: endpoint lease lost'):
+            with self.subTest(mixed=mixed[-90:]), self.assertRaisesRegex(RuntimeError, 'endpoint lease lost'):
+                check(True, 4, mixed, 'yes', self.log, sm_diag=7, cold_reset=True)
         identity_only = dict(sm_diag=7, cold_reset=True, native_width=True, native_x1_id=True)
         for width, word in ((1, '0x2011'), (2, '0x2021')):
             claimed = endpoint.replace('0x2011', word) + f'ace5-wifi-bringup: native endpoint width={width}\n'
@@ -220,6 +227,10 @@ class PhoneTests(unittest.TestCase):
             return str(caught.exception)
         legacy = endpoint + reset + history + followup
         self.assertIn('Detect.Quiet at all sampled polls; PERST# reassert readback confirmed', failure(legacy + legacy))
+        revoked = prefix + 'endpoint lease lost; retained until reset, prior ID is a sample only\n'
+        for mixed in (legacy + revoked, revoked + legacy):
+            self.assertIn('endpoint lease lost', failure(mixed))
+            self.assertNotIn('reassert readback confirmed', failure(mixed))
         self.assertNotIn('PARF LTSSM_EN', failure(legacy))
         self.assertIn('sampled states=0x3', failure(legacy.replace('seen_lo=0x1', 'seen_lo=0x3')))
         self.assertIn('PERST# reassert unconfirmed', failure(legacy.replace(reset, '')))

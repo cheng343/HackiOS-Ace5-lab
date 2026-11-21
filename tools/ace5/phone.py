@@ -399,6 +399,10 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
                            stock_train_lanes=False, pre_phy_clocks=False, native_x1_id=False, preserve_speed_cap=False):
     if not enabled:
         return
+    # The endpoint ID, PERST readback, and even an older follow-up may all
+    # precede final lease validation in merged/persisted console logs.
+    if sm_diag == 7 and 'ace5-wifi-bringup: endpoint lease lost' in text:
+        raise RuntimeError(f'PCIe endpoint lease lost; prior ID is a sample only; preserve {log} and cold reboot')
     def mode7_timeout_detail():
         # Also used in isolation (AST-loaded from the persisted-log collector).
         # These are failure diagnostics, never a replacement for endpoint admission.

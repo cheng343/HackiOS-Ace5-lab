@@ -800,6 +800,11 @@ static void noc_after_phy(void)
     perf[0xc / 4] = GIULIA_PCIE_BOOT_PERF;
     assert(wb_cesta_pre_dbi() == 0 && root_id_reads == 1 && parf[0] == 0x365e);
     assert(wb.bringup.link.root_id == 0x011317cbu);
+    /* A real stage-4 fixture snapshot, before the first endpoint transaction.
+     * Never restore this while testing revocation within the same session. */
+    assert(wb.bringup.link.state==GIULIA_LINK_PARF_READY && wb.bringup.link.parf_owned &&
+        !wb.bringup.link.endpoint_id);
+    const struct giulia_pcie_link initial_endpoint_link = wb.bringup.link;
     wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
     wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
     wb.sm_diag = WB_SM_ENDPOINT;
@@ -918,6 +923,7 @@ static void noc_after_phy(void)
     puts("PASS: guarded release-to-reassert window is silent in both sinks; failures retain their evidence");
     /* Each iteration represents an independent synthetic boot/session. */
     wb.native_width=wb.x1_id=wb.stock_train=1;
+    wb.bringup.link=initial_endpoint_link;
     lease_event=LEASE_CONTROL; messages[0]=0;
     assert(!wb_cesta_pre_dbi() && !wb.guard_failed && !wb.endpoint_reset_unconfirmed &&
         strstr(messages,"endpoint identify rc=0") && strstr(messages,"native endpoint width=1"));
@@ -928,6 +934,9 @@ static void noc_after_phy(void)
     };
     for (unsigned i=0; i<sizeof(losses)/sizeof(losses[0]); i++) {
         unsigned previous_ids=endpoint_identifies, previous_resets=endpoint_reasserts;
+        /* The preceding independent case ended IDENTIFIED or FAULT; neither
+         * may seed this case, or pre-DBI admission would skip fault injection. */
+        wb.bringup.link=initial_endpoint_link;
         lease_event=losses[i].event; first_lease_op=losses[i].first; messages[0]=0;
         assert(wb_cesta_pre_dbi()==GIULIA_LINK_PREREQUISITE && wb.guard_failed);
         assert(endpoint_identifies==previous_ids+1 && endpoint_reasserts==previous_resets &&
@@ -954,7 +963,7 @@ static void noc_after_phy(void)
     }
     wb.native_width=wb.x1_id=wb.stock_train=0; lease_event=LEASE_IDLE;
     puts("PASS: mode7 lease loss blocks the current and subsequent callbacks even after apparent recovery");
-    wb.bringup.link.state = GIULIA_LINK_PARF_READY;
+    wb.bringup.link=initial_endpoint_link; /* unrelated PHY/reset cases below */
     wb.bringup.pipe_checked = 0;
     wb.bringup.supply.power.state = GIULIA_POWER_READY;
     wb.pcs_first = 1;
