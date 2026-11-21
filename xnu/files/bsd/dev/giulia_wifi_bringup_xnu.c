@@ -906,7 +906,7 @@ static int wb_load_cesta_profile(void)
     return __builtin_memcmp(digest, expected, sizeof(expected)) == 0 ? 0 : -1;
 }
 
-static uint64_t wb_watchdog_call(uint64_t id, uint64_t a1, uint64_t a2,
+static uint64_t wb_watchdog_raw(uint64_t id, uint64_t a1, uint64_t a2,
     uint64_t *r1, uint64_t *r2)
 {
 #ifdef GIULIA_WIFI_BRINGUP_XNU_HOST_TEST
@@ -923,6 +923,12 @@ static uint64_t wb_watchdog_call(uint64_t id, uint64_t a1, uint64_t a2,
     if (r2) *r2 = x2;
     return x0;
 #endif
+}
+
+static uint64_t wb_watchdog_call(uint64_t id, uint64_t a1, uint64_t a2,
+    uint64_t *r1, uint64_t *r2)
+{
+    return giulia_wdt_call32(wb_watchdog_raw, id, a1, a2, r1, r2);
 }
 
 static int wb_watchdog_cancel(void)
@@ -953,7 +959,8 @@ static int wb_watchdog_quiet_test(void)
         return 0;
 
     uint64_t detail;
-    const char *failure = giulia_wdt_configure(wb_watchdog_call, &detail);
+    int owned = 0;
+    const char *failure = giulia_wdt_configure_owned(wb_watchdog_call, &detail, &owned);
     if (failure) {
         wb_log("ace5-wifi-bringup: quiet watchdog arm failed %s=%#llx\n",
             failure, (unsigned long long)detail);
@@ -965,7 +972,8 @@ static int wb_watchdog_quiet_test(void)
         }
         wb_log("ace5-wifi-bringup: quiet watchdog expiry not observed\n");
     }
-    if (wb_watchdog_cancel()) {
+    /* A rejected timing or ENABLE call does not grant the right to disable. */
+    if (owned && wb_watchdog_cancel()) {
         wb.guard_failed = 1;
         wb_log("ace5-wifi-bringup: quiet watchdog disarm unconfirmed\n");
     }

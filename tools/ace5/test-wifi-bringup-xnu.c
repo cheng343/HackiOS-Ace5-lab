@@ -45,6 +45,8 @@ static uint8_t pdc_table[508];
 static uint32_t gic_enabled;
 static uint64_t watchdog_ctl;
 static unsigned watchdog_reads, watchdog_writes, watchdog_cannot_cancel;
+static unsigned wdt_call_count, wdt_fail_at, wdt_disables, wdt_competing;
+#define WDT_RAW_HIGH UINT64_C(0xa5a5beef00000000)
 static unsigned cold_reset, mock_reset_response, loader_returns;
 static unsigned root_id_reads, pcs_first_arg, pre_phy_clks_arg, drop_pre_phy_clock;
 static unsigned endpoint_identifies, endpoint_releases, endpoint_reasserts, x1_id_arg, native_width_arg;
@@ -58,23 +60,30 @@ static void delay(unsigned us) { time_us+=us; assert(time_us<=30000000); }
 static uint64_t wb_test_watchdog_call(uint64_t id, uint64_t a1, uint64_t a2,
     uint64_t *r1, uint64_t *r2)
 {
+    if (++wdt_call_count == wdt_fail_at) {
+        if (wdt_competing) watchdog_ctl = GIULIA_WDT_ENABLED;
+        return WDT_RAW_HIGH | UINT32_MAX;
+    }
     if (id == GIULIA_WDT_STATUS) {
         watchdog_reads++;
         assert(!a1 && !a2 && r1);
-        *r1 = watchdog_ctl;
-        if (r2) *r2 = 7;
+        *r1 = WDT_RAW_HIGH | watchdog_ctl;
+        if (r2) *r2 = WDT_RAW_HIGH | 7;
     } else {
         watchdog_writes++;
         assert(!r1 && !r2);
         if (id == GIULIA_WDT_CONTROL) {
             assert((a1 == 3 || a1 == 2) && !a2);
-            if (a1 == 2 && watchdog_cannot_cancel) return 1;
+            if (a1 == 2) {
+                wdt_disables++;
+                if (watchdog_cannot_cancel) return WDT_RAW_HIGH | 1;
+            }
             watchdog_ctl = a1 == 3 ? GIULIA_WDT_ENABLED : 0;
         } else {
             assert(id == GIULIA_WDT_SET_TIME || (id == GIULIA_WDT_PET && watchdog_ctl));
         }
     }
-    return 0;
+    return WDT_RAW_HIGH;
 }
 static int hackios_platform(void) { return (int)board; }
 static int PE_parse_boot_argn(const char *name,void *out,unsigned size)
@@ -326,6 +335,7 @@ static void setup(void)
     creates=exits=deallocs=maps=unmaps=fail_map=time_us=0;
     no_ack=no_resume_ack=pending_irq=lost_guard=0;gic_enabled=WB_IRQ|1;
     watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
+    wdt_call_count=wdt_fail_at=wdt_disables=wdt_competing=0;
     cold_reset=mock_reset_response=loader_returns=0;
     root_id_reads=pcs_first_arg=pre_phy_clks_arg=drop_pre_phy_clock=x1_id_arg=native_width_arg=0;
     endpoint_identifies=endpoint_releases=endpoint_reasserts=0;injected_pin_fault=PIN_OK;
@@ -542,6 +552,32 @@ static void noc_after_phy(void)
     assert(time_us - test_begin == WB_WATCHDOG_WAIT_SECONDS * 1000000u && !watchdog_ctl);
     assert(!wb.guard_failed && strstr(messages,"quiet watchdog expiry not observed"));
     watchdog_ctl = GIULIA_WDT_ENABLED;
+    /* Exercise the production SMC32 boundary directly with polluted upper
+     * halves, including genuine low-word errors and both status payloads. */
+    uint64_t wdt_ctl32 = 0, wdt_elapsed32 = 0;
+    assert(!wb_watchdog_call(GIULIA_WDT_STATUS,0,0,&wdt_ctl32,&wdt_elapsed32));
+    assert(wdt_ctl32==GIULIA_WDT_ENABLED && wdt_elapsed32==7);
+    wdt_fail_at=wdt_call_count+1;
+    assert(wb_watchdog_call(GIULIA_WDT_STATUS,0,0,&wdt_ctl32,&wdt_elapsed32)==UINT32_MAX);
+    size_t saved_messages=strlen(messages);
+    static const char *phases[]={"","","SET_BARK","SET_BITE","ENABLE","PET","STATUS"};
+    for (unsigned n=2;n<=6;n++) {
+        wdt_call_count=0; wdt_fail_at=n; wdt_competing=n<=4; watchdog_ctl=0;
+        unsigned before=wdt_disables;
+        assert(wb_watchdog_quiet_test()!=0 && !wb.guard_failed);
+        char expected[64];
+        snprintf(expected,sizeof(expected),"arm failed %s=0xffffffff",phases[n]);
+        assert(strstr(messages+saved_messages,expected));
+        messages[saved_messages]=0;
+        if (wdt_competing) {
+            assert(wdt_call_count==n && watchdog_ctl==GIULIA_WDT_ENABLED && wdt_disables==before);
+        } else {
+            /* PET or final STATUS failed after our successful ENABLE. */
+            assert(wdt_call_count==n+3 && !watchdog_ctl && wdt_disables==before+1);
+        }
+    }
+    wdt_fail_at=0; wdt_competing=0; watchdog_ctl=GIULIA_WDT_ENABLED;
+    puts("PASS: XNU Giulia watchdog W0-W2 width and own-ENABLE-only cancellation");
     watchdog_cannot_cancel = 1;
     assert(wb_watchdog_cancel() != 0 && watchdog_ctl == GIULIA_WDT_ENABLED);
     wb.sm_diag = WB_SM_START;

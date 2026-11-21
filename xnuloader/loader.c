@@ -2581,11 +2581,7 @@ wdt_arm(void)
 static uint64_t
 giulia_wdt_smc32(uint64_t id, uint64_t a1, uint64_t a2, uint64_t *r1, uint64_t *r2)
 {
-    uint64_t w1 = 0, w2 = 0;
-    uint32_t ret = (uint32_t)smc_call(id, a1, a2, r1 ? &w1 : NULL, r2 ? &w2 : NULL);
-    if (r1) *r1 = (uint32_t)w1;
-    if (r2) *r2 = (uint32_t)w2;
-    return ret;
+    return giulia_wdt_call32(smc_call, id, a1, a2, r1, r2);
 }
 
 static int
