@@ -24,6 +24,7 @@ struct mock {
     unsigned cold_down, preserve_rchng;
     uint32_t block_off, block_mask;
     uint32_t active_aux, active_rch;
+    unsigned direct_pipe_reads, managed_pipe_reads, bad_mux_when;
 };
 
 static struct reg *find(struct mock *m, unsigned block, uint32_t off)
@@ -71,7 +72,8 @@ static void init(struct mock *m)
     seed(m, 0, 0x10064, BIT(31)); /* HALT_SKIP aggregate */
     seed(m, 0, 0x10058, 0);
     seed(m, 0, 0x6b054, 0);
-    seed(m, 0, 0x6b040, 0x10c00u); /* PIPE CBCR: CLK_OFF=0 once PHY runs */
+    seed(m, 0, 0x6b040, 0x10c00u); /* Legacy activity sample only. */
+    seed(m, 0, 0x6b048, BIT(31)); /* Vendor PIPE CBCR; initially CLK_OFF. */
     m->active_aux = raw(m, 0, 0x6b078) & CFG_MASK;
     m->active_rch = raw(m, 0, 0x6b05c) & CFG_MASK;
 }
@@ -82,6 +84,13 @@ static uint32_t read32(void *cookie, unsigned block, uint32_t off)
     struct reg *r;
     m->reads++;
     assert(m->reads < 30000); /* Every failure path must be bounded. */
+    if (block == 0) {
+        if (off == 0x6b040u) m->direct_pipe_reads++;
+        if (off == 0x6b048u) m->managed_pipe_reads++;
+        if (off == 0x6b070u && m->bad_mux_when &&
+            m->managed_pipe_reads == m->bad_mux_when)
+            return raw(m, block, off) | 2u;
+    }
     if (block == 0 && m->all_ones_off == off &&
         m->writes >= m->all_ones_after)
         return 0xffffffffu;
@@ -604,6 +613,110 @@ static void staged_cesta(void)
     puts("SM8650 PCIe staged power: host clocks precede managed resources/reset; failure retains foundation");
 }
 
+static void passive_cesta_pipe(void)
+{
+    struct mock m;
+    struct giulia_pcie_power p = {0};
+    struct giulia_pcie_power_io v;
+    const uint32_t observe = GIULIA_POWER_CESTA_PIPE_OBSERVE;
+    const uint32_t coordinated = GIULIA_POWER_HOST_REQUIRED |
+        GIULIA_POWER_CESTA_COORDINATED;
+    const uint32_t flags = coordinated | observe;
+    const uint32_t finish = flags | GIULIA_POWER_NOC_READY;
+    const uint32_t stop = GIULIA_POWER_STOP_REQUIRED |
+        GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET;
+    uint32_t cbcr = 0;
+    unsigned before_reads, before_writes, before_samples, before_us;
+
+    init(&m); v = io(&m);
+    assert(giulia_pcie_power_prepare_host(&p, &v, GIULIA_POWER_REQUIRED | observe)
+        == GIULIA_POWER_PREREQUISITE);
+    assert(!m.reads && !m.writes);
+    assert(!giulia_pcie_power_prepare_host(&p, &v, coordinated));
+    assert(giulia_pcie_power_finish_reset(&p, finish) == GIULIA_POWER_PREREQUISITE);
+    assert(!giulia_pcie_power_stop(&p, stop)); restored(&m, &p);
+
+    init(&m); memset(&p, 0, sizeof(p)); v = io(&m);
+    find(&m, 0, 0x6b070)->value = 0x102u; /* Inherited XO before START. */
+    assert(!giulia_pcie_power_prepare_host(&p, &v, flags));
+    assert(raw(&m, 0, 0x6b070) == 0x102u && !p.reset_attempted);
+    assert(giulia_pcie_power_finish_reset(&p, finish & ~observe) ==
+        GIULIA_POWER_PREREQUISITE);
+    assert(!p.reset_attempted);
+    assert(!giulia_pcie_power_finish_reset(&p, finish));
+    assert(p.reset_attempted && p.state == GIULIA_POWER_READY);
+    before_reads = m.reads; before_writes = m.writes;
+    assert(!giulia_pcie_power_pipe_enable(&p));
+    assert(p.state == GIULIA_POWER_PIPE_ON);
+    assert(m.reads == before_reads && m.writes == before_writes);
+    /* The device, not this driver, supplies an active vendor CBCR. Legacy
+     * 0x6b040 is also positive, but neither permits accepting the XO mux. */
+    find(&m, 0, 0x6b048)->value = 0x10c00u;
+    before_us = m.us;
+    assert(giulia_pcie_power_pipe_ready(&p, &cbcr) == GIULIA_POWER_TIMEOUT);
+    assert(cbcr == 0x10c00u && m.managed_pipe_reads == 1000 &&
+        !m.direct_pipe_reads && m.us - before_us == 10000);
+
+    find(&m, 0, 0x6b070)->value = 0x100u; /* Managed source now selected. */
+    find(&m, 0, 0x6b048)->value = BIT(31);
+    before_samples = m.managed_pipe_reads;
+    assert(giulia_pcie_power_pipe_ready(&p, &cbcr) == GIULIA_POWER_TIMEOUT);
+    assert(cbcr == BIT(31) && m.managed_pipe_reads - before_samples == 1000 &&
+        !m.direct_pipe_reads);
+    find(&m, 0, 0x6b048)->value = 0x10c00u;
+    before_samples = m.managed_pipe_reads; before_us = m.us;
+    m.bad_mux_when = before_samples + 2; /* A one-sample XO excursion. */
+    assert(!giulia_pcie_power_pipe_ready(&p, &cbcr));
+    assert(cbcr == 0x10c00u && m.managed_pipe_reads - before_samples == 4 &&
+        m.us - before_us == 30 && !m.direct_pipe_reads);
+    m.bad_mux_when = 0;
+
+    m.all_ones_off = 0x6b048u;
+    before_samples = m.managed_pipe_reads;
+    assert(giulia_pcie_power_pipe_ready(&p, &cbcr) == GIULIA_POWER_READBACK);
+    assert(cbcr == UINT32_MAX && m.managed_pipe_reads - before_samples == 1);
+    m.all_ones_off = 0x6b070u;
+    before_samples = m.managed_pipe_reads;
+    assert(giulia_pcie_power_pipe_ready(&p, &cbcr) == GIULIA_POWER_READBACK);
+    assert(m.managed_pipe_reads - before_samples == 1);
+    before_reads = m.reads;
+    assert(giulia_pcie_power_pipe_disable(&p) == GIULIA_POWER_PREREQUISITE);
+    assert(giulia_pcie_power_stop(&p, stop) == GIULIA_POWER_PREREQUISITE);
+    assert(m.reads == before_reads && m.writes == before_writes &&
+        p.state == GIULIA_POWER_PIPE_ON);
+    for (unsigned i = 0; i < m.writes; i++) {
+        assert(m.events[i].off != 0x6b070u);
+        if (m.events[i].off == 0x52008u)
+            assert(!(m.events[i].value & BIT(4)));
+    }
+
+    /* Explicit rollback before START/reset only restores owned vote bits;
+     * model an unrelated vote changing between the initial save and rollback. */
+    init(&m); memset(&p, 0, sizeof(p)); v = io(&m);
+    assert(!giulia_pcie_power_prepare_host(&p, &v, flags));
+    struct reg *votes = find(&m, 0, 0x52008u);
+    votes->value |= BIT(4);
+    before_writes = m.writes;
+    assert(!giulia_pcie_power_stop(&p, stop));
+    for (unsigned i = before_writes; i < m.writes; i++) {
+        assert(m.events[i].off != 0x6b070u &&
+            m.events[i].off != 0x6b000u && m.events[i].off != 0x6c01cu);
+        if (m.events[i].off == 0x52008u)
+            assert(m.events[i].value & BIT(4));
+    }
+    votes->original |= BIT(4);
+    restored(&m, &p);
+
+    /* The same preservation rules apply to automatic pre-START unwind. */
+    init(&m); memset(&p, 0, sizeof(p)); v = io(&m);
+    m.branch_stuck = 0x6b03cu; /* AUX after the first host clock vote. */
+    assert(giulia_pcie_power_prepare_host(&p, &v, flags) == GIULIA_POWER_TIMEOUT);
+    restored(&m, &p);
+    for (unsigned i = 0; i < m.writes; i++)
+        assert(m.events[i].off != 0x6b070u);
+    puts("SM8650 PCIe passive PIPE: stable managed observations, no direct PIPE writes");
+}
+
 struct qos_fixture {
     struct mock *gcc;
     struct giulia_pcie_power *power;
@@ -683,6 +796,7 @@ int main(void)
     readback_and_retry();
     inaccessible_mmio();
     staged_cesta();
+    passive_cesta_pipe();
     host_qos_composition();
     puts("SM8650 PCIe0 power/clock/reset tests passed");
     return 0;

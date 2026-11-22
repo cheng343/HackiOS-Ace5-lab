@@ -24,7 +24,8 @@ FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect
              'ace5_crm_test_arguments', 'ace5_pdc_test_arguments', 'ace5_cx_vote_arguments',
              'ace5_rpmh_read_arguments', 'check_rpmh_read_log', 'check_rpmh_read_profile',
              'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf', 'check_stock_train_cmdline',
-             'check_early_cesta_kernel', 'finish_log_reboot_launch'}
+             'check_early_cesta_kernel', 'check_cesta_pipe_observe_kernel', 'check_cesta_pipe_observe_profile',
+             'finish_log_reboot_launch'}
 
 
 class Clock:
@@ -476,6 +477,56 @@ class PhoneTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'three-row'):
                 fn(**args, early_cesta_start=True)
 
+    def test_cesta_pipe_observe_requires_early_start_and_exact_current_rc0_clock_names(self):
+        fn = self.namespace['ace5_wifi_bringup_arguments']
+        table, profile, dtb = (self.directory / n for n in ('pdc', 'sm', 'current.dtb'))
+        table.write_bytes(bytes(508))
+        profile.write_bytes(bytes(80))
+        dtb.write_bytes(b'test-only DTB contents')
+        args = dict(enabled=True, table=table, bootcpu=1, kernel='kernel', seconds=60,
+                    other_hardware=False, live_log=False, stage=4, sm_diag=7, sm_profile=profile, cold_reset=True,
+                    pcs_first=True, native_width=True, stock_perf_dtb=dtb, early_cesta_start=True)
+        canonical = b'gcc_cnoc_pcie_sf_axi_clk\0'
+        pcie = {'compatible': b'qcom,pci-msm\0', 'reg-names': b'dm_core\0pcie_sm\0', 'clock-names': canonical,
+                'qcom,bw-scale': struct.pack('>9I', 64, 64, 19200000, 64, 64, 19200000, 256, 256, 100000000)}
+        fake_share = SimpleNamespace(fdt_properties=Mock(return_value={'/soc/qcom,pcie@1c00000': pcie}))
+        digest = Mock()
+        digest.sha256.return_value.hexdigest.return_value = 'b3ed154a6cabba921d99cf703d70255e2239977683153992c4a8f1cc5211d90e'
+        self.namespace['hashlib'] = digest
+        with patch.dict(sys.modules, {'share': fake_share}):
+            e = fn(**args)
+            j = fn(**args, cesta_pipe_observe=True)
+            self.assertEqual(j, e + ' ace5_wifi_cesta_pipe_observe=1')
+            fake_share.fdt_properties.assert_called_with(dtb.read_bytes())
+            self.namespace['check_stock_train_cmdline'](j)
+            for bad in (dict(early_cesta_start=False), dict(enabled=False), dict(stage=3), dict(sm_diag=5),
+                        dict(cold_reset=False), dict(pcs_first=False), dict(native_width=False),
+                        dict(stock_perf_dtb=None), dict(log_reboot_nonce='0123456789abcde0')):
+                with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                    fn(**(args | bad), cesta_pipe_observe=True)
+            for names in (None, b'', canonical[:-1], canonical + b'\0', canonical + b'pipe\0',
+                          b'pipe\0' + canonical, b'gcc_cnoc_pcie_sf_axi_clk_extra\0'):
+                with self.subTest(names=names):
+                    if names is None:
+                        pcie.pop('clock-names', None)
+                    else:
+                        pcie['clock-names'] = names
+                    self.assertEqual(fn(**args), e)  # Existing E validation is not narrowed.
+                    with self.assertRaisesRegex(RuntimeError, 'clock-names'):
+                        fn(**args, cesta_pipe_observe=True)
+            pcie['clock-names'] = canonical
+            fake_share.fdt_properties.return_value = {'/soc/qcom,pcie@1c08000': pcie}
+            with self.assertRaisesRegex(RuntimeError, 'three-row'):
+                fn(**args, cesta_pipe_observe=True)
+
+    def test_cesta_pipe_observe_rejects_stale_kernel(self):
+        check = self.namespace['check_cesta_pipe_observe_kernel']
+        check(b'MachO\x00ace5_wifi_cesta_pipe_observe\0')
+        for stale in (b'', b'ace5_wifi_cesta_early_start\0', b'ace5_wifi_cesta_pipe_observe',
+                      b'ace5_wifi_cesta_pipe_observed\0'):
+            with self.subTest(stale=stale), self.assertRaisesRegex(RuntimeError, 'no payload staged'):
+                check(stale)
+
     def test_early_cesta_rejects_baseline_kernel_and_incomplete_results(self):
         image_check = self.namespace['check_early_cesta_kernel']
         image_check(b'MachO\x00ace5_wifi_cesta_early_start\x00'
@@ -509,6 +560,19 @@ class PhoneTests(unittest.TestCase):
         full = mark + phy + snapshot + verified + report
         check(True, 4, full, 'yes', self.log, **opts)
         check(True, 4, full * 2, 'yes', self.log, **opts)
+        observation = 'ace5-wifi-bringup: CESTA PIPE observed without direct clock control\n'
+        with_pipe = mark + phy + observation + snapshot + verified + report
+        check(True, 4, with_pipe, 'yes', self.log, **opts, cesta_pipe_observe=True)
+        check(True, 4, with_pipe * 2, 'yes', self.log, **opts, cesta_pipe_observe=True)
+        for bad in (full, with_pipe.replace(observation, observation.rstrip() + ' unexpectedly\n'),
+                    with_pipe + observation.replace('without', 'with')):
+            with self.subTest(bad=bad[:140]), self.assertRaisesRegex(RuntimeError, 'PIPE observation unconfirmed'):
+                check(True, 4, bad, 'yes', self.log, **opts, cesta_pipe_observe=True)
+        with self.assertRaisesRegex(RuntimeError, 'mode 7'):
+            check(True, 4, with_pipe, 'yes', self.log, **(opts | {'sm_diag': 5}), cesta_pipe_observe=True)
+        with self.assertRaisesRegex(RuntimeError, 'WCN7850 identity'):
+            check(True, 4, with_pipe.replace('0x110717cb', '0x011317cb'), 'yes', self.log, **opts,
+                  cesta_pipe_observe=True)
         check(True, 4, phy + snapshot.replace('start=0x1', 'start=0') + report, 'yes', self.log,
               **(opts | dict(early_cesta_start=False)))
         for bad in (phy + snapshot + verified + report, phy + mark + snapshot + verified + report,

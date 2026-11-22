@@ -317,6 +317,19 @@ def check_stock_startup_perf(nodes):
         raise RuntimeError('Stock PCIe0 startup PERF requires the verified three-row Ace 5 RC0 device-tree profile')
 
 
+def check_cesta_pipe_observe_profile(nodes):
+    check_stock_startup_perf(nodes)
+    rc = nodes['/soc/qcom,pcie@1c00000']
+    if rc.get('clock-names') != b'gcc_cnoc_pcie_sf_axi_clk\0':
+        raise RuntimeError('CESTA PIPE observation requires the exact RC0 DT clock-names list: gcc_cnoc_pcie_sf_axi_clk')
+
+
+def check_cesta_pipe_observe_kernel(image):
+    # An E build can admit early START while silently ignoring the new bit.
+    if b'ace5_wifi_cesta_pipe_observe\0' not in image:
+        raise RuntimeError('Kernel does not advertise CESTA PIPE observation; no payload staged')
+
+
 def check_early_cesta_kernel(image):
     # Prevent the old baseline image from silently ignoring the opt-in token.
     # The pinned cloud artifact/manifest still supplies image integrity.
@@ -329,11 +342,11 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
                                stage=0, crm_all_states=False, sm_diag=0, sm_profile=None,
                                watchdog=0, cold_reset=False, pcs_first=False, native_width=False, stock_perf_dtb=None,
                                log_reboot_nonce=None, stock_train_lanes=False, pre_phy_clocks=False, native_x1_id=False,
-                               preserve_speed_cap=False, early_cesta_start=False):
+                               preserve_speed_cap=False, early_cesta_start=False, cesta_pipe_observe=False):
     if not enabled:
         if (stage or crm_all_states or sm_diag or sm_profile or watchdog or cold_reset or pcs_first or native_width or
                 stock_perf_dtb or log_reboot_nonce is not None or stock_train_lanes or pre_phy_clocks or
-                native_x1_id or preserve_speed_cap or early_cesta_start):
+                native_x1_id or preserve_speed_cap or early_cesta_start or cesta_pipe_observe):
             raise RuntimeError('Wi-Fi stage, CRM and CESTA options require --wifi-bringup-test')
         return ''
     if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
@@ -359,6 +372,8 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         raise RuntimeError('--wifi-pre-phy-clocks requires PCS-first and a guarded current-DT endpoint trial')
     if stock_train_lanes and (not native_width or sm_diag != 7 or not cold_reset or not sm_profile):
         raise RuntimeError('--wifi-stock-train-lanes requires native width and a guarded current-DT endpoint trial')
+    if cesta_pipe_observe and not early_cesta_start:
+        raise RuntimeError('--wifi-cesta-pipe-observe requires --wifi-cesta-early-start')
     if early_cesta_start and (stage != 4 or sm_diag != 7 or not cold_reset or not sm_profile or not native_width or
             not pcs_first or not stock_perf_dtb or not 60 <= seconds <= 120 or log_reboot_nonce is not None or
             stock_train_lanes or pre_phy_clocks or native_x1_id or preserve_speed_cap):
@@ -373,7 +388,11 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         if sm_diag != 7 or not cold_reset or not sm_profile:
             raise RuntimeError('Stock startup PERF requires --wifi-cesta-endpoint')
         from share import fdt_properties
-        check_stock_startup_perf(fdt_properties(stock_perf_dtb.read_bytes()))
+        nodes = fdt_properties(stock_perf_dtb.read_bytes())
+        if cesta_pipe_observe:
+            check_cesta_pipe_observe_profile(nodes)
+        else:
+            check_stock_startup_perf(nodes)
     out = ' ace5_wifi_bringup=1'
     if stage:
         out += f' ace5_wifi_bringup_stage={stage}'
@@ -409,13 +428,17 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         out += f' ace5_wifi_log_reboot=1 ace5_run_nonce={log_reboot_nonce}'
     if early_cesta_start:
         out += ' ace5_wifi_cesta_early_start=1'
+    if cesta_pipe_observe:
+        out += ' ace5_wifi_cesta_pipe_observe=1'
     return out
 
 
 def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=False,
                            watchdog=0, cold_reset=False, pcs_first=False, native_width=False, stock_perf=False,
                            stock_train_lanes=False, pre_phy_clocks=False, native_x1_id=False, preserve_speed_cap=False,
-                           early_cesta_start=False):
+                           early_cesta_start=False, cesta_pipe_observe=False):
+    if cesta_pipe_observe and (not enabled or not early_cesta_start or sm_diag != 7):
+        raise RuntimeError(f'CESTA PIPE observation requires the guarded early START mode 7 trial; preserve {log}')
     if not enabled:
         return
     if 'ace5-wifi-bringup: PERST# unconfirmed' in text:
@@ -441,6 +464,11 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
                 not after_phy or any(value != '0x1' for value in after_phy) or
                 profile_failed or profile_ok <= first_snapshot or (0 <= first_dbi <= profile_ok)):
             raise RuntimeError(f'Early CESTA START order or full post-PHY profile unconfirmed; preserve {log} and cold reboot')
+    if cesta_pipe_observe:
+        prefix = 'ace5-wifi-bringup: CESTA PIPE observed'
+        reports = [line.split(prefix, 1)[1] for line in text.splitlines() if prefix in line]
+        if not reports or any(report != ' without direct clock control' for report in reports):
+            raise RuntimeError(f'CESTA PIPE observation unconfirmed; preserve {log} and cold reboot')
     def mode7_timeout_detail():
         # Also used in isolation (AST-loaded from the persisted-log collector).
         # These are failure diagnostics, never a replacement for endpoint admission.
@@ -681,6 +709,8 @@ run.add_argument('--wifi-stock-startup-perf', metavar='CURRENT_DTB', type=Path,
                  help='Use the stock RC0 startup resource level during --wifi-cesta-endpoint, with the current Android DTB')
 run.add_argument('--wifi-cesta-early-start', action='store_true',
                  help='Test CESTA START after stock PERF but before PCIe resets with guarded Stage 4, PCS-first, native width and USB results')
+run.add_argument('--wifi-cesta-pipe-observe', action='store_true',
+                 help='Observe CESTA-owned PIPE without direct clock control in the guarded early START RC0 trial')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -860,7 +890,7 @@ try:
                 sm_mode, cesta_profile, args.wifi_watchdog, cold_reset, args.wifi_pcs_first,
                 args.wifi_native_width, args.wifi_stock_startup_perf, args.wifi_log_reboot, args.wifi_stock_train_lanes,
                 args.wifi_pre_phy_clocks, args.wifi_native_x1_id, args.wifi_preserve_speed_cap,
-                early_cesta_start=args.wifi_cesta_early_start)
+                early_cesta_start=args.wifi_cesta_early_start, cesta_pipe_observe=args.wifi_cesta_pipe_observe)
             if args.wifi_log_reboot is not None and getvar('wifi-log-reboot') != '1':
                 raise RuntimeError('Loader does not advertise wifi-log-reboot support; no payload staged')
         if args.command == 'run' and args.touch:
@@ -925,6 +955,8 @@ try:
         kernel_image = kernel.read_bytes()
         if args.command == 'run' and args.wifi_cesta_early_start:
             check_early_cesta_kernel(kernel_image)
+        if args.command == 'run' and args.wifi_cesta_pipe_observe:
+            check_cesta_pipe_observe_kernel(kernel_image)
         print('Kernel SHA-256:', hashlib.sha256(kernel_image).hexdigest(), flush=True)
         del kernel_image
         command = [sys.executable, str(ROOT / 'xnuloader/mkpayload.py'), '-o', str(payload),
@@ -966,7 +998,8 @@ try:
                 getvar('power-reset-required') if args.wifi_bringup_test else None, log,
                 sm_mode, args.wifi_watchdog, cold_reset, args.wifi_pcs_first, args.wifi_native_width,
                 bool(args.wifi_stock_startup_perf), args.wifi_stock_train_lanes, args.wifi_pre_phy_clocks,
-                args.wifi_native_x1_id, args.wifi_preserve_speed_cap, early_cesta_start=args.wifi_cesta_early_start)
+                args.wifi_native_x1_id, args.wifi_preserve_speed_cap, early_cesta_start=args.wifi_cesta_early_start,
+                cesta_pipe_observe=args.wifi_cesta_pipe_observe)
             check_rpmh_read_log(args.rpmh_read_test,saved_log,
                 getvar('power-reset-required') if args.rpmh_read_test else None,log)
             if (args.aop_channel_test or args.aop_cx_vote_test) and 'ace5-aop: channel handshake complete; inherited link preserved; firmware resumed' not in saved_log:

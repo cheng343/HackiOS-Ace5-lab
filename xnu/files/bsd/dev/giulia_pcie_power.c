@@ -206,6 +206,12 @@ reset_pulse(struct giulia_pcie_power *p, unsigned i, unsigned hold_us,
 }
 
 static int
+pipe_observe(const struct giulia_pcie_power *p)
+{
+    return (p->prerequisites & GIULIA_POWER_CESTA_PIPE_OBSERVE) != 0;
+}
+
+static int
 pipe_off(struct giulia_pcie_power *p)
 {
     int r = change(p, VOTES1, B(4), 0);
@@ -221,7 +227,10 @@ restore_field(struct giulia_pcie_power *p, unsigned i)
     int r;
     if (!(p->dirty & B(i)))
         return GIULIA_POWER_OK;
-    r = change(p, i, regs[i].mask, p->saved[i]);
+    if (i == PIPE_MUX && pipe_observe(p)) return GIULIA_POWER_STATE;
+    uint32_t mask = regs[i].mask;
+    if (i == VOTES1 && pipe_observe(p)) mask &= ~B(4);
+    r = change(p, i, mask, p->saved[i]);
     if (!r)
         p->dirty &= ~B(i);
     return r;
@@ -235,7 +244,7 @@ restore(struct giulia_pcie_power *p)
 {
     unsigned i;
     int r;
-    if ((p->dirty & (B(VOTES1) | B(PIPE_MUX))) && (r = pipe_off(p)))
+    if (!pipe_observe(p) && (p->dirty & (B(VOTES1) | B(PIPE_MUX))) && (r = pipe_off(p)))
         return r;
     /* Hold blocks isolated during clock restoration. BCR snapshots remain
      * dirty until their original values have been restored below.
@@ -332,6 +341,7 @@ giulia_pcie_power_prepare_host(struct giulia_pcie_power *p,
     uint32_t route = prerequisites & (GIULIA_POWER_DIRECT_VOTES | GIULIA_POWER_CESTA_COORDINATED);
     if ((prerequisites & GIULIA_POWER_HOST_REQUIRED) != GIULIA_POWER_HOST_REQUIRED ||
         (route != GIULIA_POWER_DIRECT_VOTES && route != GIULIA_POWER_CESTA_COORDINATED) ||
+        ((prerequisites & GIULIA_POWER_CESTA_PIPE_OBSERVE) && route != GIULIA_POWER_CESTA_COORDINATED) ||
         (route == GIULIA_POWER_DIRECT_VOTES && !(prerequisites & GIULIA_POWER_NOC_READY)))
         return GIULIA_POWER_PREREQUISITE;
     if (p->state != GIULIA_POWER_IDLE && p->state != GIULIA_POWER_STOPPED)
@@ -341,7 +351,7 @@ giulia_pcie_power_prepare_host(struct giulia_pcie_power *p,
     p->inherited_rchng = 0;
     p->reset_attempted = 0;
     p->prerequisites = GIULIA_POWER_HOST_REQUIRED | route |
-        (prerequisites & GIULIA_POWER_RCHNG_HANDOFF);
+        (prerequisites & (GIULIA_POWER_RCHNG_HANDOFF | GIULIA_POWER_CESTA_PIPE_OBSERVE));
     p->last_error = p->cleanup_error = 0;
     for (i = 0; i < GIULIA_POWER_SAVED_REGS; i++) {
         value = read_reg(p, i);
@@ -384,7 +394,7 @@ giulia_pcie_power_prepare_host(struct giulia_pcie_power *p,
          */
         (r = rcg_apply(p, AUX_CMD, AUX_CFG, 1u, p->saved[AUX_CMD])) ||
         (r = rcg_apply(p, RCH_CMD, RCH_CFG, rch_cfg, p->saved[RCH_CMD])) ||
-        (r = pipe_off(p)))
+        (!pipe_observe(p) && (r = pipe_off(p))))
         goto fail;
     for (i = 0; i < 8; i++)
         if ((r = branch_on(p, &branches[i])))
@@ -405,7 +415,8 @@ giulia_pcie_power_finish_reset(struct giulia_pcie_power *p, uint32_t prerequisit
     uint32_t route = prerequisites & (GIULIA_POWER_DIRECT_VOTES | GIULIA_POWER_CESTA_COORDINATED);
     uint32_t required = p->prerequisites | GIULIA_POWER_NOC_READY;
     if ((prerequisites & required) != required ||
-        route != (p->prerequisites & (GIULIA_POWER_DIRECT_VOTES | GIULIA_POWER_CESTA_COORDINATED)))
+        route != (p->prerequisites & (GIULIA_POWER_DIRECT_VOTES | GIULIA_POWER_CESTA_COORDINATED)) ||
+        ((prerequisites ^ p->prerequisites) & GIULIA_POWER_CESTA_PIPE_OBSERVE))
         return GIULIA_POWER_PREREQUISITE;
     p->reset_attempted = 1;
     p->state = GIULIA_POWER_FAULT;
@@ -449,6 +460,12 @@ giulia_pcie_power_pipe_enable(struct giulia_pcie_power *p)
         return GIULIA_POWER_ARGUMENT;
     if (p->state != GIULIA_POWER_READY)
         return GIULIA_POWER_STATE;
+    if (pipe_observe(p)) {
+        /* Logical phase only. The next explicit check samples the managed
+         * branch, and never enables it if the hardware has not done so. */
+        p->state = GIULIA_POWER_PIPE_ON;
+        return GIULIA_POWER_OK;
+    }
     if ((r = change(p, PIPE_MUX, 3u, 0)) ||
         (r = change(p, VOTES1, B(4), B(4)))) {
         p->last_error = r;
@@ -467,13 +484,27 @@ giulia_pcie_power_pipe_ready(struct giulia_pcie_power *p, uint32_t *observed_cbc
         return GIULIA_POWER_ARGUMENT;
     if (p->state != GIULIA_POWER_PIPE_ON)
         return GIULIA_POWER_STATE;
+    const int observe = pipe_observe(p);
+    unsigned consecutive = 0;
     for (unsigned n = 0; n < 1000; n++) {
-        v = p->io.read32(p->io.cookie, GIULIA_POWER_GCC, 0x6b040u);
+        v = p->io.read32(p->io.cookie, GIULIA_POWER_GCC, observe ? 0x6b048u : 0x6b040u);
         if (observed_cbcr) *observed_cbcr = v;
-        if (v == 0xffffffffu)
+        if (v == UINT32_MAX)
             return GIULIA_POWER_READBACK;
-        if (!(v & B(31)) || ((v >> 28) & 7u) == 2u)
+        int running = !(v & B(31)) || ((v >> 28) & 7u) == 2u;
+        if (observe) {
+            uint32_t mux = read_reg(p, PIPE_MUX);
+            if (mux == UINT32_MAX) return GIULIA_POWER_READBACK;
+            /* The Linux branch uses HALT_SKIP. Use two matching positive
+             * samples in this experiment only, not a generic readiness rule. */
+            if (running && !(mux & 3u)) {
+                if (++consecutive == 2u) return GIULIA_POWER_OK;
+            } else {
+                consecutive = 0;
+            }
+        } else if (running) {
             return GIULIA_POWER_OK;
+        }
         delay(p, 10);
     }
     return GIULIA_POWER_TIMEOUT;
@@ -485,6 +516,7 @@ giulia_pcie_power_pipe_disable(struct giulia_pcie_power *p)
     int r;
     if (!p)
         return GIULIA_POWER_ARGUMENT;
+    if (pipe_observe(p)) return GIULIA_POWER_PREREQUISITE;
     if (p->state != GIULIA_POWER_READY && p->state != GIULIA_POWER_PIPE_ON &&
         p->state != GIULIA_POWER_FAULT)
         return GIULIA_POWER_STATE;
@@ -506,6 +538,7 @@ giulia_pcie_power_stop(struct giulia_pcie_power *p, uint32_t conditions)
         return GIULIA_POWER_ARGUMENT;
     if (p->state == GIULIA_POWER_IDLE || p->state == GIULIA_POWER_STOPPED)
         return GIULIA_POWER_OK;
+    if (pipe_observe(p) && p->reset_attempted) return GIULIA_POWER_PREREQUISITE;
     if ((conditions & GIULIA_POWER_STOP_REQUIRED) != GIULIA_POWER_STOP_REQUIRED)
         return GIULIA_POWER_PREREQUISITE;
     if ((p->prerequisites & GIULIA_POWER_CESTA_COORDINATED) &&

@@ -41,7 +41,10 @@ enum giulia_pcie_power_prerequisite {
      * CESTA. This is not implied by START=0 or a CRM channel ACK. Mutually
      * exclusive with DIRECT_VOTES. Giulia's opt-in XNU Wi-Fi supply and
      * bringup path uses this managed route. */
-    GIULIA_POWER_CESTA_COORDINATED = 1u << 9
+    GIULIA_POWER_CESTA_COORDINATED = 1u << 9,
+    /* Independently reset-protected probe: keep the PIPE mux and software
+     * vote unowned. The platform must actually start CESTA before PHY/PIPE. */
+    GIULIA_POWER_CESTA_PIPE_OBSERVE = 1u << 10
 };
 #define GIULIA_POWER_REQUIRED 0xffu
 #define GIULIA_POWER_HOST_REQUIRED (GIULIA_POWER_MMIO_OWNED | \
@@ -124,8 +127,10 @@ int giulia_pcie_power_finish_reset(struct giulia_pcie_power *, uint32_t prerequi
  * The caller, not this API, supplies and verifies those external conditions.
  */
 int giulia_pcie_power_pipe_enable(struct giulia_pcie_power *);
-/* Poll GCC_PCIE_0_PIPE_CBCR (0x6b040) after QMP PHY_START until CLK_OFF clears
- * (or FSM reports ON). Read-only: does not mutate power state on timeout. */
+/* Read-only after QMP PHY_START. The legacy path preserves its historical
+ * 0x6b040 check; only the opt-in CESTA observation checks the actual PIPE
+ * branch's published halt register (0x6b048) and the PHY-selected mux.
+ * A status sample is not proof of endpoint REFCLK or a functioning link. */
 int giulia_pcie_power_pipe_ready(struct giulia_pcie_power *, uint32_t *observed_cbcr);
 int giulia_pcie_power_pipe_disable(struct giulia_pcie_power *);
 /* PHY_QUIET means PHY stop completed while aux/cfg/ref/rchng were still on.

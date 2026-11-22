@@ -76,7 +76,7 @@ static struct {
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
     uint32_t pcs_first, early_reset_armed, native_width, stock_perf, stock_train;
     uint32_t noc_step, pre_phy_clks, x1_id, keep_sls, endpoint_io_window;
-    uint32_t cesta_early_start, cesta_early_verified;
+    uint32_t cesta_early_start, cesta_early_verified, cesta_pipe_observe;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
 
@@ -272,6 +272,12 @@ static uint32_t wb_pwr_r(void *c, unsigned blk, uint32_t off)
 static void wb_pwr_w(void *c, unsigned blk, uint32_t off, uint32_t v)
 {
     (void)c;
+    /* In the experiment only, retain the hardware-managed fields. The
+     * shared vote word is writable for pre-START host clock setup; after
+     * START never perform a software RMW on that shared word. */
+    if (wb.cesta_pipe_observe && blk == GIULIA_POWER_GCC &&
+        (off == 0x6b070u || (off == 0x52008u && wb.bringup.cesta_reset_required)))
+        return;
     if (!wb.bringup.cesta_reset_required || wb_endpoint_io_ok()) wb_store(pwr_blk(blk), off, v);
 }
 
@@ -556,7 +562,9 @@ static int wb_prepare_noc(__unused void *cookie, struct giulia_wifi_supply *supp
 static int wb_verify_noc(__unused void *cookie)
 {
     const uint32_t required0 = (1u << 12) | (1u << 19) | (1u << 22);
-    const uint32_t required1 = 0x7fu;
+    /* PIPE itself is separately checked; do not require the ordinary
+     * software vote in a trial that is forbidden to set it. */
+    const uint32_t required1 = wb.cesta_pipe_observe ? (0x7fu & ~(1u << 4)) : 0x7fu;
     uint32_t before_busy, before_update, after_busy, after_update, pwr_idx;
     uint32_t votes0, votes1, cnoc, aggregate, ddr;
 
@@ -786,8 +794,9 @@ refused:
 
 static int wb_arm_pcs_first(void)
 {
-    if (wb.sm_diag != WB_SM_ENDPOINT || !wb.pcs_first || !wb_guard() ||
-        wb.bringup.stage != GIULIA_BRINGUP_PHY_START ||
+    if (wb.sm_diag != WB_SM_ENDPOINT || !wb.pcs_first ||
+        (wb.cesta_pipe_observe && (!wb.cesta_early_verified || !wb.bringup.cesta_reset_required)) ||
+        !wb_guard() || wb.bringup.stage != GIULIA_BRINGUP_PHY_START ||
         wb.bringup.phy.state != GIULIA_PHY_IDLE || wb.bringup.pipe_checked ||
         wb.bringup.supply.power.state != GIULIA_POWER_READY ||
         wb.bringup.link.state != GIULIA_LINK_PARF_READY || !wb.bringup.link.parf_owned ||
@@ -1099,6 +1108,11 @@ static int wb_cesta_pre_dbi(void)
         !wb.crm_c.address || wb_verify_noc(0) ||
         giulia_pcie_power_pipe_ready(&wb.bringup.supply.power, &pipe))
         return GIULIA_LINK_PREREQUISITE;
+    if (wb.cesta_pipe_observe) {
+        if (!wb.bringup.cesta_reset_required || !wb.cesta_early_verified ||
+            !wb_guard() || wb_perst_held()) return GIULIA_LINK_PREREQUISITE;
+        wb_log("ace5-wifi-bringup: CESTA PIPE observed without direct clock control\n");
+    }
 
     /* crm.c's PCIe VCD0 crm_c window, distinct from the CRM HW DRV's PWR_IDX_STATUS. */
     wb_log("ace5-wifi-bringup: CESTA perf read begin\n");
@@ -1397,7 +1411,8 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     uint32_t phy_gdsc = wb_pwr_r(0, GIULIA_POWER_GCC, 0x6c000);
     cfg.supply.rail_baseline = unk_rails;
     cfg.supply.conditions = GIULIA_SUPPLY_REQUIRED |
-        ((votes0 & (1u << 22)) ? GIULIA_SUPPLY_RCHNG_HANDOFF : 0);
+        ((votes0 & (1u << 22)) ? GIULIA_SUPPLY_RCHNG_HANDOFF : 0) |
+        (wb.cesta_pipe_observe ? GIULIA_SUPPLY_CESTA_PIPE_OBSERVE : 0);
     cfg.supply.aop_policy = GIULIA_AOP_OPEN_ON_INHERITED_LINK;
     cfg.supply.pdc_policy = GIULIA_WLAN_PDC_KEEP_TABLE;
     cfg.supply.rail_policy = GIULIA_WLAN_KEEP_VOTES;
@@ -1589,6 +1604,12 @@ void giulia_wifi_bringup_init(void)
             wb_log("ace5-wifi-bringup: early CESTA requires the isolated stock PERF stage 4 endpoint profile\n");
             return;
         }
+    }
+    if (PE_parse_boot_argn("ace5_wifi_cesta_pipe_observe", &wb.cesta_pipe_observe,
+        sizeof(wb.cesta_pipe_observe)) &&
+        (wb.cesta_pipe_observe != 1 || wb.cesta_early_start != 1)) {
+        wb_log("ace5-wifi-bringup: CESTA PIPE observation requires verified early CESTA profile\n");
+        return;
     }
     if (wb.pre_phy_clks && (wb.pre_phy_clks != 1 || !wb.pcs_first ||
         !wb.cold_reset || wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.sm_diag != WB_SM_ENDPOINT)) {

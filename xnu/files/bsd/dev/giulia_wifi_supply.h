@@ -41,7 +41,8 @@ enum giulia_wifi_supply_condition {
     GIULIA_SUPPLY_RCHNG_HANDOFF = 1u << 11,
     /* Cold, stopped PCIe0 PHY/link; no inherited active PHY/config/BAR user.
      * Required before assuming PHY_STOPPED during pre-host GPIO rollback. */
-    GIULIA_SUPPLY_COLD_PCIE_PHY_QUIET = 1u << 12
+    GIULIA_SUPPLY_COLD_PCIE_PHY_QUIET = 1u << 12,
+    GIULIA_SUPPLY_CESTA_PIPE_OBSERVE = 1u << 13
 };
 #define GIULIA_SUPPLY_REQUIRED 0x13ffu
 enum giulia_wifi_supply_retained {

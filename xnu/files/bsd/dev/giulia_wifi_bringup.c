@@ -19,6 +19,8 @@ static uint32_t power_finish_flags(const struct giulia_wifi_bringup *b)
         GIULIA_POWER_CESTA_COORDINATED;
     if (b->cfg.supply.conditions & GIULIA_SUPPLY_RCHNG_HANDOFF)
         f |= GIULIA_POWER_RCHNG_HANDOFF;
+    if (b->cfg.supply.conditions & GIULIA_SUPPLY_CESTA_PIPE_OBSERVE)
+        f |= GIULIA_POWER_CESTA_PIPE_OBSERVE;
     return f;
 }
 
@@ -52,6 +54,9 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
         return GIULIA_BRINGUP_STATE;
     if (!!cfg->prepare_noc != !!cfg->release_noc || cfg->max_stage > GIULIA_BRINGUP_MHI_SNAP)
         return GIULIA_BRINGUP_ARGUMENT;
+    if ((cfg->supply.conditions & GIULIA_SUPPLY_CESTA_PIPE_OBSERVE) &&
+        (!cfg->arm_pcs_first || !cfg->prepare_noc || !cfg->verify_noc))
+        return GIULIA_BRINGUP_PREREQUISITE;
     if (cfg->arm_pcs_first && cfg->max_stage != GIULIA_BRINGUP_PHY_START)
         return GIULIA_BRINGUP_PREREQUISITE;
     struct giulia_wifi_bringup_config copy = *cfg;
@@ -75,6 +80,10 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
             return fail_stop(b, GIULIA_BRINGUP_NOC_STAGE, GIULIA_BRINGUP_PREREQUISITE, 0);
         if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
     }
+
+    if ((b->cfg.supply.conditions & GIULIA_SUPPLY_CESTA_PIPE_OBSERVE) &&
+        !b->cesta_reset_required)
+        return fail_stop(b, GIULIA_BRINGUP_NOC_STAGE, GIULIA_BRINGUP_PREREQUISITE, 0);
 
     b->stage = GIULIA_BRINGUP_POWER_RESET;
     rc = giulia_pcie_power_finish_reset(&b->supply.power, power_finish_flags(b));

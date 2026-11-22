@@ -198,7 +198,8 @@ int giulia_wifi_supply_prepare(struct giulia_wifi_supply *p, const struct giulia
     STEP(GIULIA_SUPPLY_HOST);
     CALL(giulia_pcie_power_prepare_host(&p->power,&c->power,
         GIULIA_POWER_HOST_REQUIRED | GIULIA_POWER_CESTA_COORDINATED |
-        ((c->conditions & GIULIA_SUPPLY_RCHNG_HANDOFF) ? GIULIA_POWER_RCHNG_HANDOFF : 0)));
+        ((c->conditions & GIULIA_SUPPLY_RCHNG_HANDOFF) ? GIULIA_POWER_RCHNG_HANDOFF : 0) |
+        ((c->conditions & GIULIA_SUPPLY_CESTA_PIPE_OBSERVE) ? GIULIA_POWER_CESTA_PIPE_OBSERVE : 0)));
     EXPECT(p->power.state == GIULIA_POWER_HOST_PREPARED);
     p->state = GIULIA_SUPPLY_HOST_PREPARED;
     return 0;
