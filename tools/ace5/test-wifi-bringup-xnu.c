@@ -787,6 +787,77 @@ static void early_cesta_adapter(void)
     puts("Wi-Fi XNU early CESTA: ready-before-START, cold ownership, ambiguous START retention and lease revocation");
 }
 
+static void cesta_pipe_clock_only(void)
+{
+    for (unsigned phase = 0; phase < 5; phase++) {
+        setup();
+        wb_map(&wb.shared, shared_pa, sizeof(struct loader_firmware_quiet), VM_WIMG_WCOMB);
+        wb.quiet = (void *)wb.shared.address;
+        wb_map(&wb.gic, 0x17100000u, 0x10000u, VM_WIMG_IO);
+        wb_map(&wb.crm, GIULIA_NOC_CRM_PHYS, GIULIA_NOC_CRM_SIZE, VM_WIMG_IO);
+        wb_map(&wb.crm_c, WB_CRM_C_PHYS, WB_CRM_C_SIZE, VM_WIMG_IO);
+        wb_map(&wb.gcc, GIULIA_QOS_GCC_PHYS, GIULIA_QOS_GCC_SIZE, VM_WIMG_IO);
+        wb_map(&wb.pcie_sm, GIULIA_NOC_SM_PHYS, GIULIA_NOC_SM_SIZE, VM_WIMG_IO);
+        wb_map(&wb.tlmm, GIULIA_WIFI_GPIO_PA, GIULIA_WIFI_GPIO_SIZE, VM_WIMG_IO);
+        wb_map(&wb.parf, 0x01c00000u, 0x3000u, VM_WIMG_IO);
+        /* No DBI/iATU/config window is necessary for this successful result. */
+        uint32_t *crm = (void *)wb.crm.address;
+        uint32_t *perf = (void *)wb.crm_c.address;
+        uint32_t *gcc = (void *)wb.gcc.address;
+        uint32_t *sm = (void *)wb.pcie_sm.address;
+        uint32_t *parf = (void *)wb.parf.address;
+        uint32_t *perst = (void *)(wb.tlmm.address + 94u * 0x1000u);
+        wb.quiet->request = 1;
+        wb_test_barrier();
+        assert(wb_irq_acquire());
+        wb.quiet->reset_request = 1;
+        wb.quiet->reset_ack = LOADER_QUIET_RESET_ARMED;
+        wb.early_reset_armed = 1;
+        wb.bringup.cesta_reset_required = 1;
+        wb.stock_perf = wb.cold_reset = wb.pcs_first = wb.native_width = wb.cesta_early_start = 1;
+        wb.cesta_early_verified = wb.cesta_pipe_observe = wb.cesta_pipe_clock_only = 1;
+        wb.sm_diag = WB_SM_ENDPOINT;
+        wb.bringup.stage = wb.max_stage = GIULIA_BRINGUP_PHY_START;
+        wb.bringup.pipe_checked = 1;
+        wb.bringup.link.state = GIULIA_LINK_PARF_READY;
+        wb.bringup.link.parf_owned = 1;
+        wb.bringup.supply.gpio.state = GIULIA_WGPIO_ON;
+        wb.crm_dev.state = GIULIA_CRM_ACTIVE;
+        wb.crm_dev.target = 0;
+        crm[0x1000 / 4] = crm[0x1020 / 4] = 1;
+        crm[0x3f0 / 4] = GIULIA_PCIE_STOCK_STARTUP_PERF;
+        gcc[0x52000 / 4] = (1u << 12) | (1u << 19) | (1u << 22);
+        gcc[0x52008 / 4] = 0x6fu; /* No software PIPE bit. */
+        sm[GIULIA_CESTA_START_OFFSET / 4] = 1;
+        sm[GIULIA_CESTA_BRANCH_OFFSET / 4] = 4;
+        wb.cesta_profile[4 * GIULIA_CESTA_SEQUENCE_WORDS + 3] = 4;
+        perf[0xc / 4] = phase == 1 ? GIULIA_PCIE_BOOT_PERF : GIULIA_PCIE_STOCK_STARTUP_PERF;
+        perf[0x4 / 4] = phase == 2 ? GIULIA_PCIE_BOOT_PERF : GIULIA_PCIE_STOCK_STARTUP_PERF;
+        if (phase == 3) wb.quiet->reset_ack = LOADER_QUIET_RESET_FAILED;
+        const uint32_t ltssm = phase == 4 ? 1u << 8 : 0;
+        parf[0x1b0 / 4] = ltssm;
+        parf[0] = 0x361c;
+        perst[0] = 1u << 9;
+        /* The test barrier poisons the endpoint-only 0x365e write if seen. */
+        drop_pre_phy_clock = 1;
+        const int rc = wb_cesta_pre_dbi();
+        const char *receipt = strstr(messages,
+            "CESTA PIPE-only complete cbcr=0x10c00 mux=0 perst=held ltssm=off dbi=0\n");
+        assert(rc == (phase ? GIULIA_LINK_PREREQUISITE : GIULIA_LINK_OK));
+        assert((receipt != NULL) == (phase == 0));
+        assert(wb.guard_failed == (phase >= 3) &&
+            wb.endpoint_reset_unconfirmed == (phase >= 3));
+        assert(!root_id_reads && !endpoint_releases && !endpoint_identifies &&
+            !endpoint_reasserts && !wb.bringup.link.root_id && !wb.bringup.link.endpoint_id);
+        assert(!wb.dbi.address && !wb.atu.address && !wb.cfg.address && !wb.endpoint_io_window);
+        assert(!strstr(messages, "DBI+0 access") && !strstr(messages, "DBI clock guard") &&
+            !strstr(messages, "reset release") && !strstr(messages, "endpoint identify"));
+        assert(parf[0] == 0x361c && parf[0x1b0 / 4] == ltssm && !perst[1] &&
+            drop_pre_phy_clock);
+    }
+    puts("Wi-Fi XNU PIPE-only: checked clock report without DBI, PARF writes, or PERST release");
+}
+
 static void noc_after_phy(void)
 {
     setup();
@@ -1148,7 +1219,7 @@ int main(void)
     uint64_t bytes=0;
     assert(wb_private_fw_lookup("kiwifw","amss20.bin",&bytes)==fw_fixture);
     assert(bytes==sizeof(fw_fixture) && private_file_calls==1);
-    admission();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();early_cesta_adapter();noc_after_phy();setup();
+    admission();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();early_cesta_adapter();cesta_pipe_clock_only();noc_after_phy();setup();
     assert(private_file_calls==1); /* No private file read during an earlier diagnostic. */
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");

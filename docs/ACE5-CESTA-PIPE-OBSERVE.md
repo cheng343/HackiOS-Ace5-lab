@@ -34,8 +34,16 @@ measurement.
    rescued by a software vote or the old `0x6b040` sample. Stop before DBI if
    prerequisites fail. After START, retain state for the already armed reset;
    do not attempt a new PIPE disable or resume ordinary rollback.
-5. Only the fully verified early route can proceed to the existing endpoint
-   check. The PIPE observation is not a PCIe link or WCN7850 identity result;
+5. For the first comparison, add `--wifi-cesta-pipe-clock-only` explicitly.
+   After the existing full-table, PERF4, lease, held PERST and disabled LTSSM
+   checks, this branch returns before any DBI transaction, later PARF change,
+   reset release or endpoint training. It emits a distinct completion record,
+   and leaves the existing retained/cold-reset path in charge. No change to
+   early writes needed to establish supplies, clocks, CESTA or PARF is implied.
+   The loader may still maintain its dedicated diagnostic log.
+6. Without clock-only, the existing explicit J endpoint mode is unchanged:
+   only the fully verified early route can proceed to the endpoint check.
+   The PIPE observation is not a PCIe link or WCN7850 identity result;
    keep the exact endpoint identity and reset checks. No MHI, DMA or firmware
    loading is added.
 
@@ -43,3 +51,13 @@ This candidate does not establish that `0x6b048` has been measured on the phone,
 that CESTA supplies endpoint REFCLK, or that the Wi-Fi chip has been enumerated.
 Compare only with an independently validated E control. F's isolated
 stock-lane experiment, git revision and private build package are not changed.
+
+
+## First-run interpretation
+
+A successful clock-only log reports the branch register value, PHY-selected mux,
+held reset and disabled LTSSM. A missing receipt, an intervening DBI/endpoint
+event, or lost lease is not a pass. Successful Android recovery requires separate
+evidence of a new stock boot; completion of the diagnostic alone is insufficient.
+Use this mode before risking the explicit endpoint test. There is still no
+verified compiled or real-device J result.

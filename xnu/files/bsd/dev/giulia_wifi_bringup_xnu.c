@@ -77,6 +77,7 @@ static struct {
     uint32_t pcs_first, early_reset_armed, native_width, stock_perf, stock_train;
     uint32_t noc_step, pre_phy_clks, x1_id, keep_sls, endpoint_io_window;
     uint32_t cesta_early_start, cesta_early_verified, cesta_pipe_observe;
+    uint32_t cesta_pipe_clock_only;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
 
@@ -1129,13 +1130,22 @@ static int wb_cesta_pre_dbi(void)
     if (wb.sm_diag == WB_SM_PERF)
         return GIULIA_LINK_OK;
     uint32_t requested = wb.stock_perf ? GIULIA_PCIE_STOCK_STARTUP_PERF : GIULIA_PCIE_BOOT_PERF;
-    if (current != requested || (wb.stock_perf && aggregate != requested) || !wb.dbi.address ||
-        (sys & ~keep_clk) != (0x365eu & ~keep_clk)) {
+    if (current != requested || (wb.stock_perf && aggregate != requested) ||
+        (!wb.cesta_pipe_clock_only && !wb.dbi.address) || (sys & ~keep_clk) != (0x365eu & ~keep_clk)) {
         wb_log("ace5-wifi-bringup: DBI admission refused; PERF or PARF_SYS differs\n");
         return GIULIA_LINK_PREREQUISITE;
     }
     if (wb_stage4_reset_lease() || wb.quiet->reset_ack != LOADER_QUIET_RESET_ARMED)
         return GIULIA_LINK_PREREQUISITE;
+    if (wb.cesta_pipe_clock_only) {
+        /* The verified early path has read PIPE + CESTA + CRM with PERST#
+         * still low and LTSSM off. Leave before further PARF writes, DBI
+         * admission, reset release, or training. The outer retained path
+         * uses the same cold reset; this is NOT an endpoint success. */
+        wb_log("ace5-wifi-bringup: CESTA PIPE-only complete cbcr=%#x mux=0 perst=held ltssm=off dbi=0\n",
+            pipe);
+        return GIULIA_LINK_OK;
+    }
     /* Match the vendor PARF_SYS_CTRL=0x365e clock-removal bits, and preserve
      * every unrelated bit. CESTA already requires a reset for teardown. */
     if ((sys & keep_clk) != keep_clk) {
@@ -1609,6 +1619,12 @@ void giulia_wifi_bringup_init(void)
         sizeof(wb.cesta_pipe_observe)) &&
         (wb.cesta_pipe_observe != 1 || wb.cesta_early_start != 1)) {
         wb_log("ace5-wifi-bringup: CESTA PIPE observation requires verified early CESTA profile\n");
+        return;
+    }
+    if (PE_parse_boot_argn("ace5_wifi_cesta_pipe_clock_only", &wb.cesta_pipe_clock_only,
+        sizeof(wb.cesta_pipe_clock_only)) &&
+        (wb.cesta_pipe_clock_only != 1 || wb.cesta_pipe_observe != 1 || wb.cesta_early_start != 1)) {
+        wb_log("ace5-wifi-bringup: CESTA PIPE-only check requires the guarded PIPE observation profile\n");
         return;
     }
     if (wb.pre_phy_clks && (wb.pre_phy_clks != 1 || !wb.pcs_first ||

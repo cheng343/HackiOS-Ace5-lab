@@ -25,6 +25,7 @@ FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect
              'ace5_rpmh_read_arguments', 'check_rpmh_read_log', 'check_rpmh_read_profile',
              'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf', 'check_stock_train_cmdline',
              'check_early_cesta_kernel', 'check_cesta_pipe_observe_kernel', 'check_cesta_pipe_observe_profile',
+             'check_cesta_pipe_clock_only_kernel',
              'finish_log_reboot_launch'}
 
 
@@ -497,6 +498,13 @@ class PhoneTests(unittest.TestCase):
             e = fn(**args)
             j = fn(**args, cesta_pipe_observe=True)
             self.assertEqual(j, e + ' ace5_wifi_cesta_pipe_observe=1')
+            clock_only = fn(**args, cesta_pipe_observe=True, cesta_pipe_clock_only=True)
+            self.assertEqual(clock_only, j + ' ace5_wifi_cesta_pipe_clock_only=1')
+            self.namespace['check_stock_train_cmdline'](clock_only)
+            with self.assertRaisesRegex(RuntimeError, 'requires --wifi-cesta-pipe-observe'):
+                fn(**args, cesta_pipe_clock_only=True)
+            with self.assertRaisesRegex(RuntimeError, 'isolated guarded Stage 4'):
+                fn(**args, cesta_pipe_observe=True, cesta_pipe_clock_only=True, log_reboot_nonce='0123456789abcde0')
             fake_share.fdt_properties.assert_called_with(dtb.read_bytes())
             self.namespace['check_stock_train_cmdline'](j)
             for bad in (dict(early_cesta_start=False), dict(enabled=False), dict(stage=3), dict(sm_diag=5),
@@ -514,6 +522,8 @@ class PhoneTests(unittest.TestCase):
                     self.assertEqual(fn(**args), e)  # Existing E validation is not narrowed.
                     with self.assertRaisesRegex(RuntimeError, 'clock-names'):
                         fn(**args, cesta_pipe_observe=True)
+                    with self.assertRaisesRegex(RuntimeError, 'clock-names'):
+                        fn(**args, cesta_pipe_observe=True, cesta_pipe_clock_only=True)
             pcie['clock-names'] = canonical
             fake_share.fdt_properties.return_value = {'/soc/qcom,pcie@1c08000': pcie}
             with self.assertRaisesRegex(RuntimeError, 'three-row'):
@@ -526,6 +536,71 @@ class PhoneTests(unittest.TestCase):
                       b'ace5_wifi_cesta_pipe_observed\0'):
             with self.subTest(stale=stale), self.assertRaisesRegex(RuntimeError, 'no payload staged'):
                 check(stale)
+
+    def test_cesta_pipe_clock_only_rejects_stale_kernel(self):
+        check = self.namespace['check_cesta_pipe_clock_only_kernel']
+        check(b'MachO\x00ace5_wifi_cesta_pipe_clock_only\0')
+        for stale in (b'', b'ace5_wifi_cesta_early_start\0ace5_wifi_cesta_pipe_observe\0',
+                      b'ace5_wifi_cesta_pipe_clock_only', b'ace5_wifi_cesta_pipe_clock_only_legacy\0'):
+            with self.subTest(stale=stale), self.assertRaisesRegex(RuntimeError, 'no payload staged'):
+                check(stale)
+
+    def test_cesta_pipe_clock_only_requires_retained_no_endpoint_result(self):
+        check = self.namespace['check_wifi_bringup_log']
+        prefix = 'ace5-wifi-bringup: '
+        beginning = '\n'.join(prefix + txt for txt in (
+            'loader cold reset armed',
+            'stock D0 reset armed before PERF vote',
+            'cesta START write returned',
+            'early CESTA START verified before BCR',
+            'PCS-before-PIPE reset armed before PHY access',
+            'CESTA PIPE observed without direct clock control',
+            'post-phy cesta start=0x1 branch0=0x4 override=0 clkreq=0',
+            'start rc=0 stage=4 max=4 failed=0 err=0 sub=0 cleanup=0',
+            'cesta execution sample=0 start=0x1',
+            'cesta execution sample=1 start=0x1',
+            'cesta START result=1 observe=0; retained until reset',
+            'early CESTA full profile survived BCR/PHY',
+            'CESTA perf current=0x4 aggregate=0x4')) + '\n'
+        complete = prefix + 'CESTA PIPE-only complete cbcr=0x11 mux=0 perst=held ltssm=off dbi=0\n'
+        retained = prefix + 'early CESTA state retained until cold reset\n'
+        followup = prefix + 'CESTA follow-up rc=0\n'
+        end = followup + retained
+        full = beginning + complete + end
+        opts = dict(sm_diag=7, cold_reset=True, pcs_first=True, native_width=True, stock_perf=True,
+                    early_cesta_start=True, cesta_pipe_observe=True, cesta_pipe_clock_only=True)
+        check(True, 4, full, 'yes', self.log, **opts)
+        check(True, 4, full * 2, 'yes', self.log, **opts)
+        check(True, 4, full.replace('cbcr=0x11', 'cbcr=0'), 'yes', self.log, **opts)
+        check(True, 4, full.replace('cbcr=0x11', 'cbcr=0xa0000000'), 'yes', self.log, **opts)
+        with self.assertRaisesRegex(RuntimeError, 'PCIe0 root identity'):
+            check(True, 4, full, 'yes', self.log, **(opts | dict(cesta_pipe_clock_only=False)))
+        with self.assertRaisesRegex(RuntimeError, 'requires guarded PIPE observation'):
+            check(True, 4, full, 'yes', self.log, **(opts | dict(cesta_pipe_observe=False)))
+        with self.assertRaisesRegex(RuntimeError, 'Guarded CESTA START'):
+            check(True, 4, full, 'no', self.log, **opts)
+        with self.assertRaisesRegex(RuntimeError, 'startup PERF 4'):
+            check(True, 4, full.replace('aggregate=0x4', 'aggregate=0x2'), 'yes', self.log, **opts)
+        for bad in (beginning + end, complete + beginning + end, full.replace(retained, ''),
+                    full.replace('cbcr=0x11', 'cbcr=0xffffffff'), full + complete.replace('0x11', '0x12'),
+                    full.replace('cbcr=0x11', 'cbcr=0x80000000'),
+                    full.replace('cbcr=0x11', 'cbcr=0x90000000'),
+                    beginning + followup + complete + retained,
+                    beginning.replace(prefix + 'CESTA perf current=0x4 aggregate=0x4\n', '') +
+                    complete + prefix + 'CESTA perf current=0x4 aggregate=0x4\n' + end,
+                    full.replace('mux=0', 'mux=1'), full.replace('dbi=0', 'dbi=1'),
+                    full.replace('ltssm=off', 'ltssm=on'), full.replace('perst=held', 'perst=released')):
+            with self.subTest(bad=bad[-140:]), self.assertRaisesRegex(RuntimeError, 'PIPE-only completion'):
+                check(True, 4, bad, 'yes', self.log, **opts)
+        for conflict in ('DBI+0 access begin', 'DBI+0 access returned 0x11317cb', 'DBI root id rc=0',
+                         'PCIe endpoint reset release rc=0', 'PCIe endpoint identify rc=-7',
+                         'PCIe training samples=0', 'train evidence parf=0', 'endpoint pins released en=0',
+                         'early CESTA follow-up stopped rc=-6', 'cleanup FAILED'):
+            with self.subTest(conflict=conflict), self.assertRaisesRegex(RuntimeError, 'PIPE-only completion'):
+                check(True, 4, full + prefix + conflict + '\n', 'yes', self.log, **opts)
+        for conflict in ('PERST# unconfirmed', 'endpoint lease lost'):
+            with self.subTest(conflict=conflict), self.assertRaisesRegex(RuntimeError, conflict):
+                check(True, 4, full + prefix + conflict + '\n', 'yes', self.log, **opts)
 
     def test_early_cesta_rejects_baseline_kernel_and_incomplete_results(self):
         image_check = self.namespace['check_early_cesta_kernel']
