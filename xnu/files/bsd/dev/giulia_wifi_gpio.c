@@ -12,9 +12,145 @@
 #define CFG_MASK 0x3ffu
 #define OE (1u << 9)
 #define OUT 2u
+/* This path has no eGPIO owner: refuse either presence or ownership bit. */
+#define PDC_WAKE_GPIO_MASK ((15u << 2) | OE | (1u << 11) | (1u << 12))
+#define PDC_WAKE_LOCAL_IRQ 1u
+#define PDC_WAKE_PERMISSION (1u << 6)
+#define PDC_WAKE_ROUTE (1u << 7)
+#define PDC_WAKE_INTR_CFG 8u
+static const unsigned pdc_wake_pins[2] = {18, 19};
 static const unsigned pins[5] = {16, 94, 95, 96, 17};
 static uint32_t read_pin(const struct giulia_wifi_gpio *g, unsigned pin, unsigned reg)
 { return g->io.read32(g->io.cookie, pin * 0x1000u + reg); }
+
+static int lease_ok(const struct giulia_wifi_gpio *g)
+{
+    return !g->pdc_wake_lease || !g->pdc_wake_lease(g->pdc_wake_cookie);
+}
+
+/* One fresh read per access, guarded before touching the GPIO bank. */
+static int pdc_wake_read(const struct giulia_wifi_gpio *g, unsigned pin, unsigned reg,
+    uint32_t *out)
+{
+    if (!lease_ok(g)) return GIULIA_WGPIO_PREREQUISITE;
+    *out = read_pin(g, pin, reg);
+    return *out == UINT32_MAX ? GIULIA_WGPIO_READBACK : GIULIA_WGPIO_OK;
+}
+
+static int pdc_wake_read_route(const struct giulia_wifi_gpio *g, unsigned pin, uint32_t *irq)
+{
+    uint32_t cfg;
+    int rc = pdc_wake_read(g, pin, 0, &cfg);
+    if (rc) return rc;
+    if (cfg & PDC_WAKE_GPIO_MASK) return GIULIA_WGPIO_BUSY;
+    rc = pdc_wake_read(g, pin, PDC_WAKE_INTR_CFG, irq);
+    if (rc) return rc;
+    if ((*irq & (PDC_WAKE_LOCAL_IRQ | PDC_WAKE_PERMISSION)) != PDC_WAKE_PERMISSION)
+        return GIULIA_WGPIO_BUSY;
+    return GIULIA_WGPIO_OK;
+}
+
+static int pdc_wake_check_routes(const struct giulia_wifi_gpio *g)
+{
+    for (unsigned i = 0; i < 2; i++) {
+        uint32_t irq;
+        int rc = pdc_wake_read_route(g, pdc_wake_pins[i], &irq);
+        if (rc) return rc;
+        if (!(irq & PDC_WAKE_ROUTE)) return GIULIA_WGPIO_READBACK;
+    }
+    return lease_ok(g) ? GIULIA_WGPIO_OK : GIULIA_WGPIO_PREREQUISITE;
+}
+
+/* Ace 5 PKG110, confirmed on GPIO18/19 (same-device route, not a generic
+ * interrupt enable). See tycykp/UniXNU-OnePlus-Ace5 @ aaa100d19f6f,
+ * hardware/sm8650-wifi-pdc-routing.json; the two pins leave local IRQ off. */
+int giulia_wifi_gpio_pdc_wake_enable(struct giulia_wifi_gpio *g, void *cookie,
+    int (*lease)(void *))
+{
+    uint32_t before[2];
+    int rc;
+    if (!g || !lease) return GIULIA_WGPIO_ARGUMENT;
+    if (g->state != GIULIA_WGPIO_HELD || !g->bt_owned || g->pdc_wake_lease)
+        return GIULIA_WGPIO_STATE;
+    g->pdc_wake_cookie = cookie;
+    g->pdc_wake_lease = lease;
+    /* Reject either unsuitable pin without writing the first one. */
+    for (unsigned i = 0; i < 2; i++) {
+        rc = pdc_wake_read_route(g, pdc_wake_pins[i], &before[i]);
+        if (rc) goto incomplete;
+    }
+    for (unsigned i = 0; i < 2; i++) {
+        unsigned pin = pdc_wake_pins[i];
+        uint32_t irq;
+        rc = pdc_wake_read_route(g, pin, &irq);
+        if (rc) goto incomplete;
+        if ((irq ^ before[i]) & PDC_WAKE_ROUTE) {
+            rc = GIULIA_WGPIO_BUSY;
+            goto incomplete;
+        }
+        if (irq & PDC_WAKE_ROUTE) continue;
+        if (!lease_ok(g)) {
+            rc = GIULIA_WGPIO_PREREQUISITE;
+            goto incomplete;
+        }
+        g->pdc_wake_dirty |= 1u << i; /* Before the first potentially posted store. */
+        g->io.write32(g->io.cookie, pin * 0x1000u + PDC_WAKE_INTR_CFG, irq | PDC_WAKE_ROUTE);
+        g->io.barrier(g->io.cookie);
+        rc = pdc_wake_read_route(g, pin, &irq);
+        if (rc) goto incomplete;
+        if (!(irq & PDC_WAKE_ROUTE)) {
+            rc = GIULIA_WGPIO_READBACK;
+            goto incomplete;
+        }
+    }
+    rc = pdc_wake_check_routes(g);
+    if (rc) goto incomplete;
+    g->pdc_wake_active = 1;
+    return GIULIA_WGPIO_OK;
+
+incomplete:
+    /* Do not attempt another store on a losing transaction. Dirty bits
+     * retain its ownership and let an explicit guarded stop restore it. */
+    if (!g->pdc_wake_dirty && rc != GIULIA_WGPIO_PREREQUISITE && lease_ok(g)) {
+        g->pdc_wake_lease = 0;
+        g->pdc_wake_cookie = 0;
+    }
+    return rc;
+}
+
+int giulia_wifi_gpio_pdc_wake_check(const struct giulia_wifi_gpio *g)
+{
+    if (!g) return GIULIA_WGPIO_ARGUMENT;
+    if (!g->pdc_wake_active || !g->pdc_wake_lease || !g->bt_owned ||
+        (g->state != GIULIA_WGPIO_HELD && g->state != GIULIA_WGPIO_ON))
+        return GIULIA_WGPIO_STATE;
+    return pdc_wake_check_routes(g);
+}
+
+/* Both endpoint reset and WLAN-off have already been verified by the
+ * existing lower GPIO owner. Only undo a bit that this object attempted. */
+static int pdc_wake_restore(struct giulia_wifi_gpio *g)
+{
+    if (!g->pdc_wake_lease) return GIULIA_WGPIO_OK;
+    g->pdc_wake_active = 0;
+    for (unsigned i = 0; i < 2; i++) {
+        unsigned pin = pdc_wake_pins[i];
+        uint32_t irq;
+        if (!(g->pdc_wake_dirty & (1u << i))) continue;
+        int rc = pdc_wake_read_route(g, pin, &irq);
+        if (rc) return rc;
+        if (irq & PDC_WAKE_ROUTE) {
+            if (!lease_ok(g)) return GIULIA_WGPIO_PREREQUISITE;
+            g->io.write32(g->io.cookie, pin * 0x1000u + PDC_WAKE_INTR_CFG, irq & ~PDC_WAKE_ROUTE);
+            g->io.barrier(g->io.cookie);
+            rc = pdc_wake_read_route(g, pin, &irq);
+            if (rc) return rc;
+            if (irq & PDC_WAKE_ROUTE) return GIULIA_WGPIO_READBACK;
+        }
+        g->pdc_wake_dirty &= ~(1u << i);
+    }
+    return lease_ok(g) ? GIULIA_WGPIO_OK : GIULIA_WGPIO_PREREQUISITE;
+}
 
 int giulia_wifi_gpio_snapshot(const struct giulia_wifi_gpio *g,
     struct giulia_wifi_gpio_signals *signals)
@@ -39,12 +175,16 @@ int giulia_wifi_gpio_snapshot(const struct giulia_wifi_gpio *g,
 static int change(struct giulia_wifi_gpio *g, unsigned i, unsigned reg,
     uint32_t mask, uint32_t value)
 {
-    uint32_t old = read_pin(g, pins[i], reg), got;
+    uint32_t old, got;
+    if (!lease_ok(g)) return GIULIA_WGPIO_PREREQUISITE;
+    old = read_pin(g, pins[i], reg);
     if (old == UINT32_MAX) return GIULIA_WGPIO_READBACK;
+    if (!lease_ok(g)) return GIULIA_WGPIO_PREREQUISITE;
     g->dirty |= 1u << i;
     g->io.write32(g->io.cookie, pins[i] * 0x1000u + reg,
         (old & ~mask) | (value & mask));
     g->io.barrier(g->io.cookie);
+    if (!lease_ok(g)) return GIULIA_WGPIO_PREREQUISITE;
     got = read_pin(g, pins[i], reg);
     return got != UINT32_MAX && (got & mask) == (value & mask) ? 0 : GIULIA_WGPIO_READBACK;
 }
@@ -72,6 +212,9 @@ static int begin(struct giulia_wifi_gpio *g, uint32_t flags,
     if (!conditions(flags, GIULIA_WGPIO_BEGIN_REQUIRED)) return GIULIA_WGPIO_PREREQUISITE;
     if (take_bt && !(flags & GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE)) return GIULIA_WGPIO_PREREQUISITE;
     g->io = *io;
+    g->pdc_wake_active = g->pdc_wake_dirty = 0;
+    g->pdc_wake_cookie = 0;
+    g->pdc_wake_lease = 0;
     /* Do not cold-reset an active radio or a shared live Bluetooth PMU. */
     uint32_t bt = read_pin(g, 17, 4);
     if (bt == UINT32_MAX) return GIULIA_WGPIO_READBACK;
@@ -113,6 +256,10 @@ int giulia_wifi_gpio_wlan_on(struct giulia_wifi_gpio *g, uint32_t flags)
     if (g->state != GIULIA_WGPIO_HELD) return GIULIA_WGPIO_STATE;
     if (!conditions(flags, GIULIA_WGPIO_ON_REQUIRED |
         (g->bt_owned ? GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE : 0))) return GIULIA_WGPIO_PREREQUISITE;
+    if (g->pdc_wake_lease) {
+        int rc = giulia_wifi_gpio_pdc_wake_check(g);
+        if (rc) return rc;
+    }
     /* Board active state: GPIO, 16 mA, pull-up, output high. */
     if (change(g, 0, 0, CFG_MASK, OE | (7u << 6) | 3u) || change(g, 0, 4, OUT, OUT))
         return failed(g);
@@ -183,8 +330,11 @@ int giulia_wifi_gpio_stop(struct giulia_wifi_gpio *g, uint32_t flags)
 {
     if (!g) return GIULIA_WGPIO_ARGUMENT;
     if (g->state == GIULIA_WGPIO_IDLE || g->state == GIULIA_WGPIO_STOPPED) return 0;
+    if (!lease_ok(g)) return GIULIA_WGPIO_PREREQUISITE;
     int rc = giulia_wifi_gpio_wlan_off_hold(g, flags);
     if (rc) return rc;
+    rc = pdc_wake_restore(g);
+    if (rc) return g->error = rc;
     for (unsigned n = g->bt_owned ? 5 : 4; n > 0; --n) {
         unsigned i = n - 1;
         if (!(g->dirty & (1u << i))) continue;
@@ -193,5 +343,7 @@ int giulia_wifi_gpio_stop(struct giulia_wifi_gpio *g, uint32_t flags)
             change(g, i, 0, CFG_MASK, g->saved_cfg[i])) return failed(g);
     }
     g->dirty = 0; g->bt_owned = 0; g->state = GIULIA_WGPIO_STOPPED;
+    g->pdc_wake_cookie = 0;
+    g->pdc_wake_lease = 0;
     return 0;
 }

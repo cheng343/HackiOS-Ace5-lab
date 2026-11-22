@@ -39,6 +39,9 @@ struct giulia_wifi_gpio {
     struct giulia_wifi_gpio_io io;
     uint32_t state, saved_cfg[5], saved_io[5], dirty, bt_owned;
     uint32_t sw_ctrl, wlan_sw_ctrl;
+    uint32_t pdc_wake_dirty, pdc_wake_active;
+    void *pdc_wake_cookie;
+    int (*pdc_wake_lease)(void *);
     int error;
 };
 /* Raw TLMM IN_OUT words. Bit 0 samples the input and bit 1 stores the output
@@ -64,6 +67,15 @@ int giulia_wifi_gpio_begin(struct giulia_wifi_gpio *, uint32_t conditions,
  * low alongside WLAN_EN for 5 ms. Other BT/SW_CTRL pins are never changed. */
 int giulia_wifi_gpio_begin_with_bt_reset(struct giulia_wifi_gpio *, uint32_t conditions,
     const struct giulia_wifi_gpio_io *);
+/* Optional Ace 5 PDC wake path: in HELD with BT control exclusively owned,
+ * validate both GPIO18/19 inputs and route permission before setting bit 7.
+ * A zero lease result permits the next I/O; cookie/lease must remain valid
+ * through guarded stop. Failed writes may retain dirty ownership for stop.
+ * An inherited route is checked but not restored. The check never writes
+ * and is valid in HELD or ON only after a successful enable. */
+int giulia_wifi_gpio_pdc_wake_enable(struct giulia_wifi_gpio *g, void *cookie,
+    int (*lease)(void *));
+int giulia_wifi_gpio_pdc_wake_check(const struct giulia_wifi_gpio *g);
 /* Requires actual rail/AOP completion, not just a plan or requested votes. */
 int giulia_wifi_gpio_wlan_on(struct giulia_wifi_gpio *, uint32_t conditions);
 /* Enforces >=100 ms PERST# hold and >=1 ms after release before returning. */

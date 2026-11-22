@@ -48,6 +48,7 @@ static unsigned watchdog_reads, watchdog_writes, watchdog_cannot_cancel;
 static unsigned wdt_call_count, wdt_fail_at, wdt_disables, wdt_competing;
 #define WDT_RAW_HIGH UINT64_C(0xa5a5beef00000000)
 static unsigned cold_reset, mock_reset_response, loader_returns;
+static unsigned route_fixture, route_begin, route_enable, route_verified;
 static unsigned root_id_reads, pcs_first_arg, pre_phy_clks_arg, drop_pre_phy_clock;
 static unsigned keep_sls_arg, suppress_sls_latch, drop_early_start;
 static unsigned endpoint_identifies, endpoint_releases, endpoint_reasserts, x1_id_arg, native_width_arg;
@@ -173,6 +174,7 @@ vm_offset_t ml_io_map_unmappable(vm_offset_t pa,vm_size_t size,unsigned flags)
     if(pa==0x90000000) {
         struct loader_firmware_quiet *q=(void *)((uint8_t *)base+0x100);
         q->magic=LOADER_QUIET_MAGIC;q->version=LOADER_QUIET_VERSION;q->size=sizeof(*q);
+        if (route_fixture == 1u || route_fixture == 3u) q->reset_capability = 1;
     }
     if(pa==0x17100000) {
         uint32_t *g=base;g[0xffe8/4]=0x3b;g[0x104/4]=gic_enabled;
@@ -216,6 +218,46 @@ int giulia_pcie_link_prepare(struct giulia_pcie_link *s, uint32_t flags)
     s->state = GIULIA_LINK_PREPARED;
     return 0;
 }
+int giulia_wifi_gpio_begin_with_bt_reset(struct giulia_wifi_gpio *g, uint32_t f,
+    const struct giulia_wifi_gpio_io *io)
+{
+    assert(route_fixture && g == &wb.bringup.supply.gpio &&
+        f == (GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
+    assert(wb_early_reset_confirmed() && wb_guard() && !wb.parf.address && !wb.dbi.address);
+    route_begin++;
+    g->io = *io;
+    g->io.write32(0, 94u * 0x1000u, 1u << 9);
+    g->state = GIULIA_WGPIO_HELD;
+    g->bt_owned = 1;
+    return 0;
+}
+
+int giulia_wifi_gpio_check_held(struct giulia_wifi_gpio *g, uint32_t f)
+{
+    assert(route_fixture && g->state == GIULIA_WGPIO_HELD && g->bt_owned &&
+        f == (GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE));
+    return wb_perst_gpio_low() ? 0 : GIULIA_WGPIO_PREREQUISITE;
+}
+
+int giulia_wifi_gpio_pdc_wake_enable(struct giulia_wifi_gpio *g, void *cookie, int (*lease)(void *))
+{
+    assert(route_fixture && g->state == GIULIA_WGPIO_HELD && !lease(cookie));
+    route_enable++;
+    return 0;
+}
+
+int giulia_wifi_gpio_pdc_wake_check(const struct giulia_wifi_gpio *g)
+{
+    assert(route_fixture && g->state == GIULIA_WGPIO_HELD && wb_early_reset_confirmed());
+    if (route_fixture == 3u) {
+        mock_reset_response = 0;
+        wb.quiet->reset_ack = LOADER_QUIET_RESET_FAILED;
+        return GIULIA_WGPIO_PREREQUISITE;
+    }
+    route_verified++;
+    return 0;
+}
+
 int giulia_wifi_gpio_snapshot(const struct giulia_wifi_gpio *g, struct giulia_wifi_gpio_signals *pins)
 {
     assert(wb_guard() && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED);
@@ -463,6 +505,7 @@ static void setup(void)
     watchdog=watchdog_reads=watchdog_writes=watchdog_cannot_cancel=0;watchdog_ctl=0;
     wdt_call_count=wdt_fail_at=wdt_disables=wdt_competing=0;
     cold_reset=mock_reset_response=loader_returns=0;
+    route_fixture=route_begin=route_enable=route_verified=0;
     ep_critical=identify_rc=lose_owner=release_rc=0;
     lease_event=LEASE_IDLE; first_lease_op=0;
     ep_loader_calls=ep_console_calls=0;
@@ -588,6 +631,30 @@ static void cesta_mapping_boundary(void)
     wb_link_w32(0, GIULIA_LINK_PARF, 0, 0x1234u);
     assert(wb_link_r32(0, GIULIA_LINK_PARF, 0) == 0x1234u && !wb.guard_failed);
     puts("Wi-Fi XNU CESTA PIPE-only: endpoint apertures unmapped and link callbacks fail closed");
+}
+
+static void pdc_wake_only_boundary(void)
+{
+    for (unsigned phase = 1; phase <= 3; phase++) {
+        setup();
+        route_fixture = phase;
+        wb.cold_reset = wb.pdc_wake_forward = wb.cesta_pipe_clock_only = 1;
+        mock_reset_response = LOADER_QUIET_RESET_ARMED;
+        wb_thread((void *)(uintptr_t)shared_pa, 0);
+        assert(maps == 3 && exits == 1);
+        const char *receipt = strstr(messages, "GPIO18/19 PDC wake forwarding verified;");
+        assert((receipt != 0) == (phase == 1u));
+        assert(route_begin == (phase != 2u) && route_enable == (phase != 2u));
+        assert(route_verified == (phase == 1u) && loader_returns == (phase == 1u));
+        assert(!wb.gcc.address && !wb.parf.address && !wb.phy.address && !wb.dbi.address &&
+            !wb.atu.address && !wb.cfg.address && !wb.bar0.address && !wb.crm.address &&
+            !wb.pcie_sm.address && !wb.rsc.address && !wb.msg.address &&
+            !endpoint_releases && !root_id_reads && !stop_calls);
+        if (phase == 2u) assert(maps == unmaps);
+        else assert(!unmaps); /* Independent cold reset owns disposal. */
+        if (phase != 1u) assert(strstr(messages, "wake-only phase refused"));
+    }
+    puts("Ace5 XNU GPIO wake-only: minimal mappings, reset capability and retained cold return");
 }
 
 static void cleanup(void)
@@ -1278,7 +1345,7 @@ int main(void)
     uint64_t bytes=0;
     assert(wb_private_fw_lookup("kiwifw","amss20.bin",&bytes)==fw_fixture);
     assert(bytes==sizeof(fw_fixture) && private_file_calls==1);
-    admission();cesta_mapping_boundary();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();early_cesta_adapter();cesta_pipe_clock_only();noc_after_phy();setup();
+    admission();cesta_mapping_boundary();pdc_wake_only_boundary();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();early_cesta_adapter();cesta_pipe_clock_only();noc_after_phy();setup();
     assert(private_file_calls==1); /* No private file read during an earlier diagnostic. */
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");

@@ -26,6 +26,8 @@ FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect
              'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf', 'check_stock_train_cmdline',
              'check_early_cesta_kernel', 'check_cesta_pipe_observe_kernel', 'check_cesta_pipe_observe_profile',
              'check_cesta_pipe_clock_only_kernel',
+             'check_pdc_wake_forward_profile', 'pdc_wake_forward_receipt',
+             'check_pdc_wake_forward_kernel', 'check_pdc_wake_forward_log',
              'finish_log_reboot_launch'}
 
 
@@ -544,6 +546,63 @@ class PhoneTests(unittest.TestCase):
                       b'ace5_wifi_cesta_pipe_clock_only', b'ace5_wifi_cesta_pipe_clock_only_legacy\0'):
             with self.subTest(stale=stale), self.assertRaisesRegex(RuntimeError, 'no payload staged'):
                 check(stale)
+
+    def test_pdc_wake_forward_requires_exact_current_profile(self):
+        check = self.namespace['check_pdc_wake_forward_profile']
+        path = '/soc/qcom,cnss-kiwi@b0000000'
+        prop = 'mpm_wake_set_gpios'
+        cnss = {'compatible': b'qcom,cnss-kiwi\0', prop: struct.pack('>2I', 18, 19)}
+        bt = {'compatible': b'qcom,bt_kiwi\0', prop: struct.pack('>I', 18)}
+        check({path: cnss, '/soc/bt_kiwi': bt})
+        for tree in (
+            {'/soc/cnss@b0000000': cnss}, {path: cnss | {'compatible': b'qcom,cnss-kiwi\0extra\0'}},
+            {path: cnss, '/soc/cnss@b1000000': cnss},
+            {path: cnss, '/soc': {'status': b'disabled\0'}},
+            {path: cnss | {'status': b'disabled\0'}},
+            *({path: cnss | {prop: value}} for value in
+              (b'', struct.pack('>2I', 19, 18), struct.pack('<2I', 18, 19), struct.pack('>3I', 18, 19, 20))),
+        ):
+            with self.subTest(tree=tree), self.assertRaises(RuntimeError):
+                check(tree)
+
+    def test_pdc_wake_forward_kernel_requires_exact_markers(self):
+        check = self.namespace['check_pdc_wake_forward_kernel']
+        token = b'ace5_wifi_pdc_wake_forward\0'
+        receipt = (self.namespace['pdc_wake_forward_receipt']() + '\n\0').encode('ascii')
+        check(b'MachO\0' + token + receipt)
+        for stale in (b'', token, receipt, token[:-1] + receipt, token + receipt[:-1],
+                      token + receipt.replace(b'PERST held', b'PERST released')):
+            with self.subTest(stale=stale), self.assertRaisesRegex(RuntimeError, 'no payload staged'):
+                check(stale)
+
+    def test_pdc_wake_forward_log_is_isolated(self):
+        check = self.namespace['check_wifi_bringup_log']
+        prefix = 'ace5-wifi-bringup: '
+        arm = prefix + 'loader cold reset armed\n'
+        receipt = self.namespace['pdc_wake_forward_receipt']() + '\n'
+        boundary = '--- kernel message buffer ---\n'
+        full = arm + prefix + 'GPIO PDC wake changed_mask=0x3 (bit0=GPIO18 bit1=GPIO19)\n' + receipt
+        opts = dict(sm_diag=7, cold_reset=True, pcs_first=True, native_width=True, stock_perf=True,
+                    early_cesta_start=True, cesta_pipe_observe=True, cesta_pipe_clock_only=True,
+                    pdc_wake_forward=True)
+        check(True, 4, full, 'yes', self.log, **opts)
+        check(True, 4, full + boundary + full, 'yes', self.log, **opts)
+        check(True, 4, receipt + boundary + full, 'yes', self.log, **opts)
+        with self.assertRaisesRegex(RuntimeError, 'unconfirmed'):
+            check(True, 4, full, 'no', self.log, **opts)
+        with self.assertRaisesRegex(RuntimeError, 'requires the guarded'):
+            check(True, 4, full, 'yes', self.log, **(opts | dict(cesta_pipe_clock_only=False)))
+        with self.assertRaises(RuntimeError):
+            check(True, 4, full, 'yes', self.log, **(opts | dict(pdc_wake_forward=False)))
+        for bad in (arm, receipt, receipt + arm, arm + boundary + receipt,
+                    full + prefix + 'GPIO PDC wake-only phase refused or incomplete\n',
+                    full + prefix + 'cesta START write returned\n',
+                    full + prefix + 'DBI+0 access begin\n',
+                    full + prefix + 'PCIe endpoint reset release rc=0\n',
+                    full + prefix + 'stock train lanes\n', full + 'ace5-aop: tx handshake\n',
+                    full + prefix + 'supply state=1\n'):
+            with self.subTest(bad=bad), self.assertRaisesRegex(RuntimeError, 'unconfirmed'):
+                check(True, 4, bad, 'yes', self.log, **opts)
 
     def test_cesta_pipe_clock_only_requires_retained_no_endpoint_result(self):
         check = self.namespace['check_wifi_bringup_log']

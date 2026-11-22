@@ -324,6 +324,32 @@ def check_cesta_pipe_observe_profile(nodes):
         raise RuntimeError('CESTA PIPE observation requires the exact RC0 DT clock-names list: gcc_cnoc_pcie_sf_axi_clk')
 
 
+def check_pdc_wake_forward_profile(nodes):
+    """Admit only the unique, enabled giulia CNSS wake pin binding."""
+    path = '/soc/qcom,cnss-kiwi@b0000000'
+    name = b'qcom,cnss-kiwi'
+    matches = [key for key, props in nodes.items() if name in props.get('compatible', b'').split(b'\0')]
+    cnss = nodes.get(path, {})
+    if (matches != [path] or cnss.get('compatible') != name + b'\0' or
+            cnss.get('mpm_wake_set_gpios') != b'\x00\x00\x00\x12\x00\x00\x00\x13' or
+            any(nodes.get(key, {}).get('status', b'okay\0') not in (b'okay\0', b'ok\0')
+                for key in ('/', '/soc', path))):
+        raise RuntimeError('GPIO PDC wake forwarding requires the unique, enabled giulia CNSS node '
+                           'with exact current-DT mpm_wake_set_gpios <18 19>')
+
+
+def pdc_wake_forward_receipt():
+    return ('ace5-wifi-bringup: GPIO18/19 PDC wake forwarding verified; '
+            'PERST held; no PCIe/AOP/rail action')
+
+
+def check_pdc_wake_forward_kernel(image):
+    # An old K image can accept the rest of this profile and ignore the new bit.
+    if (b'ace5_wifi_pdc_wake_forward\0' not in image or
+            (pdc_wake_forward_receipt() + '\n\0').encode('ascii') not in image):
+        raise RuntimeError('Kernel does not advertise isolated GPIO PDC wake forwarding; no payload staged')
+
+
 def check_cesta_pipe_observe_kernel(image):
     # An E build can admit early START while silently ignoring the new bit.
     if b'ace5_wifi_cesta_pipe_observe\0' not in image:
@@ -349,12 +375,12 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
                                watchdog=0, cold_reset=False, pcs_first=False, native_width=False, stock_perf_dtb=None,
                                log_reboot_nonce=None, stock_train_lanes=False, pre_phy_clocks=False, native_x1_id=False,
                                preserve_speed_cap=False, early_cesta_start=False, cesta_pipe_observe=False,
-                               cesta_pipe_clock_only=False):
+                               cesta_pipe_clock_only=False, pdc_wake_forward=False):
     if not enabled:
         if (stage or crm_all_states or sm_diag or sm_profile or watchdog or cold_reset or pcs_first or native_width or
                 stock_perf_dtb or log_reboot_nonce is not None or stock_train_lanes or pre_phy_clocks or
                 native_x1_id or preserve_speed_cap or early_cesta_start or cesta_pipe_observe or
-                cesta_pipe_clock_only):
+                cesta_pipe_clock_only or pdc_wake_forward):
             raise RuntimeError('Wi-Fi stage, CRM and CESTA options require --wifi-bringup-test')
         return ''
     if not table or not kernel or bootcpu != 1 or not 10 <= seconds <= 120 or other_hardware or live_log:
@@ -380,6 +406,8 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         raise RuntimeError('--wifi-pre-phy-clocks requires PCS-first and a guarded current-DT endpoint trial')
     if stock_train_lanes and (not native_width or sm_diag != 7 or not cold_reset or not sm_profile):
         raise RuntimeError('--wifi-stock-train-lanes requires native width and a guarded current-DT endpoint trial')
+    if pdc_wake_forward and (not cesta_pipe_clock_only or not stock_perf_dtb):
+        raise RuntimeError('--wifi-pdc-wake-forward requires --wifi-cesta-pipe-clock-only and the current stock PERF DT')
     if cesta_pipe_clock_only and not cesta_pipe_observe:
         raise RuntimeError('--wifi-cesta-pipe-clock-only requires --wifi-cesta-pipe-observe')
     if cesta_pipe_observe and not early_cesta_start:
@@ -403,6 +431,8 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
             check_cesta_pipe_observe_profile(nodes)
         else:
             check_stock_startup_perf(nodes)
+        if pdc_wake_forward:
+            check_pdc_wake_forward_profile(nodes)
     out = ' ace5_wifi_bringup=1'
     if stage:
         out += f' ace5_wifi_bringup_stage={stage}'
@@ -442,13 +472,68 @@ def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_
         out += ' ace5_wifi_cesta_pipe_observe=1'
     if cesta_pipe_clock_only:
         out += ' ace5_wifi_cesta_pipe_clock_only=1'
+    if pdc_wake_forward:
+        out += ' ace5_wifi_pdc_wake_forward=1'
     return out
+
+
+def check_pdc_wake_forward_log(text, reset_required, log):
+    """Require the route-only result, not the normal K CESTA/PIPE result."""
+    prefix = 'ace5-wifi-bringup: '
+    receipt = pdc_wake_forward_receipt().removeprefix(prefix)
+    reset = 'loader cold reset armed'
+    boundary = '--- kernel message buffer ---'
+    other_driver = re.compile(r'ace5-(?:aop|pdc|crm|rpmh(?:-read)?):')
+    forbidden = (
+        'gpio pdc wake-only phase refused', 'gpio pdc wake route trial requires',
+        'quiet/irq37 acquire failed', 'mmio mapping failed', 'cleanup failed', 'cleanup complete;',
+        'perst# unconfirmed', 'endpoint lease lost', 'loader cold reset arm unconfirmed',
+        'stock d0 reset armed before perf vote', 'noc ready', 'cesta ', 'dbi', 'post-phy',
+        'pcs-before-pipe reset armed', 'pipe-only endpoint', 'pcie endpoint', 'pcie training',
+        'endpoint pin gate', 'endpoint pins', 'train evidence', 'native endpoint width=',
+        'stock train lanes', 'start rc=', 'stop rc=', 'supply state=', 'requested stage complete',
+    )
+    lanes = [[], []]
+    lane = 0
+    bad = False
+    for line in text.splitlines():
+        if line.strip() == boundary:
+            bad |= lane != 0
+            lane = 1
+            continue
+        if other_driver.search(line):
+            bad = True
+        if prefix not in line:
+            continue
+        if line.count(prefix) != 1:
+            bad = True
+            continue
+        msg = line.split(prefix, 1)[1]
+        if msg == reset:
+            lanes[lane].append('reset')
+        elif msg == receipt:
+            lanes[lane].append('verified')
+        elif (msg.startswith((reset, 'GPIO18/19 PDC wake forwarding')) or
+              any(mark in msg.lower() for mark in forbidden)):
+            bad = True
+    # wb_log mirrors events into the loader log and the kernel ring. Do not
+    # stitch an arm from one partial stream to a receipt from the other.
+    if (bad or reset_required != 'yes' or ['reset', 'verified'] not in lanes or
+            any(seq not in ([], ['reset'], ['verified'], ['reset', 'verified']) for seq in lanes)):
+        raise RuntimeError(f'Isolated GPIO18/19 PDC wake forwarding unconfirmed; preserve {log} and cold reboot')
 
 
 def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=False,
                            watchdog=0, cold_reset=False, pcs_first=False, native_width=False, stock_perf=False,
                            stock_train_lanes=False, pre_phy_clocks=False, native_x1_id=False, preserve_speed_cap=False,
-                           early_cesta_start=False, cesta_pipe_observe=False, cesta_pipe_clock_only=False):
+                           early_cesta_start=False, cesta_pipe_observe=False, cesta_pipe_clock_only=False,
+                           pdc_wake_forward=False):
+    if pdc_wake_forward:
+        if (not enabled or stage != 4 or sm_diag != 7 or not cold_reset or not pcs_first or not native_width or
+                not stock_perf or not early_cesta_start or not cesta_pipe_observe or not cesta_pipe_clock_only or
+                watchdog or stock_train_lanes or pre_phy_clocks or native_x1_id or preserve_speed_cap):
+            raise RuntimeError(f'GPIO PDC wake forwarding requires the guarded PIPE-only board profile; preserve {log}')
+        return check_pdc_wake_forward_log(text, reset_required, log)
     if cesta_pipe_clock_only and not cesta_pipe_observe:
         raise RuntimeError(f'CESTA PIPE-only requires guarded PIPE observation; preserve {log}')
     if cesta_pipe_observe and (not enabled or not early_cesta_start or sm_diag != 7):
@@ -757,6 +842,9 @@ run.add_argument('--wifi-cesta-pipe-observe', action='store_true',
                  help='Observe CESTA-owned PIPE without direct clock control in the guarded early START RC0 trial')
 run.add_argument('--wifi-cesta-pipe-clock-only', action='store_true',
                  help='Stop after guarded CESTA PIPE observation with PERST held and no DBI or endpoint training')
+run.add_argument('--wifi-pdc-wake-forward', action='store_true',
+                 help='With the guarded PIPE-only profile and current DT, test only GPIO18/19 PDC wake forwarding '
+                      'with PERST held; stop before AOP, rail votes, CESTA or PCIe access')
 run.add_argument('--crm-channel-test', action='store_true',
                  help='Select empty CRM channel0 with zero tables under firmware quiet; requires CPU1, 10..120 seconds, no live-log; cold reboot required afterwards')
 run.add_argument('--crm-bandwidth-test', action='store_true',
@@ -937,7 +1025,8 @@ try:
                 args.wifi_native_width, args.wifi_stock_startup_perf, args.wifi_log_reboot, args.wifi_stock_train_lanes,
                 args.wifi_pre_phy_clocks, args.wifi_native_x1_id, args.wifi_preserve_speed_cap,
                 early_cesta_start=args.wifi_cesta_early_start, cesta_pipe_observe=args.wifi_cesta_pipe_observe,
-                cesta_pipe_clock_only=args.wifi_cesta_pipe_clock_only)
+                cesta_pipe_clock_only=args.wifi_cesta_pipe_clock_only,
+                pdc_wake_forward=args.wifi_pdc_wake_forward)
             if args.wifi_log_reboot is not None and getvar('wifi-log-reboot') != '1':
                 raise RuntimeError('Loader does not advertise wifi-log-reboot support; no payload staged')
         if args.command == 'run' and args.touch:
@@ -1006,6 +1095,8 @@ try:
             check_cesta_pipe_observe_kernel(kernel_image)
         if args.command == 'run' and args.wifi_cesta_pipe_clock_only:
             check_cesta_pipe_clock_only_kernel(kernel_image)
+        if args.command == 'run' and args.wifi_pdc_wake_forward:
+            check_pdc_wake_forward_kernel(kernel_image)
         print('Kernel SHA-256:', hashlib.sha256(kernel_image).hexdigest(), flush=True)
         del kernel_image
         command = [sys.executable, str(ROOT / 'xnuloader/mkpayload.py'), '-o', str(payload),
@@ -1048,8 +1139,11 @@ try:
                 sm_mode, args.wifi_watchdog, cold_reset, args.wifi_pcs_first, args.wifi_native_width,
                 bool(args.wifi_stock_startup_perf), args.wifi_stock_train_lanes, args.wifi_pre_phy_clocks,
                 args.wifi_native_x1_id, args.wifi_preserve_speed_cap, early_cesta_start=args.wifi_cesta_early_start,
-                cesta_pipe_observe=args.wifi_cesta_pipe_observe, cesta_pipe_clock_only=args.wifi_cesta_pipe_clock_only)
-            if args.wifi_cesta_pipe_clock_only:
+                cesta_pipe_observe=args.wifi_cesta_pipe_observe, cesta_pipe_clock_only=args.wifi_cesta_pipe_clock_only,
+                pdc_wake_forward=args.wifi_pdc_wake_forward)
+            if args.wifi_pdc_wake_forward:
+                print('GPIO18/19 PDC wake forwarding verified with PERST held; no PCIe/AOP/rail action tested.')
+            elif args.wifi_cesta_pipe_clock_only:
                 print('CESTA PIPE-only observation complete; no endpoint probe or Wi-Fi identity verification.')
             check_rpmh_read_log(args.rpmh_read_test,saved_log,
                 getvar('power-reset-required') if args.rpmh_read_test else None,log)

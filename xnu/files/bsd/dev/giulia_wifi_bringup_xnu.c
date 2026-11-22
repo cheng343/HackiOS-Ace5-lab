@@ -77,7 +77,7 @@ static struct {
     uint32_t pcs_first, early_reset_armed, native_width, stock_perf, stock_train;
     uint32_t noc_step, pre_phy_clks, x1_id, keep_sls, endpoint_io_window;
     uint32_t cesta_early_start, cesta_early_verified, cesta_pipe_observe;
-    uint32_t cesta_pipe_clock_only;
+    uint32_t cesta_pipe_clock_only, pdc_wake_forward;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
 
@@ -834,6 +834,21 @@ static int wb_early_reset_confirmed(void)
         wb.quiet->reset_request == 1 && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED;
 }
 
+/* The existing firmware-quiet and independent cold-reset guards also
+ * cover this opt-in diagnostic. IRQ37 alone is not a PDC-route lease.
+ * Board pin checks stay in the GPIO helper; no PDC-controller changes. */
+static int wb_gpio_pdc_wake_lease(__unused void *cookie)
+{
+    if (wb.pdc_wake_forward != 1 || wb.cesta_pipe_clock_only != 1 ||
+        !wb_guard() || !wb_map_covers(&wb.tlmm, 0x1300cu) ||
+        !wb_early_reset_confirmed() || !wb_perst_gpio_low() ||
+        !wb_guard() || !wb_early_reset_confirmed()) {
+        wb.guard_failed = 1;
+        return -1;
+    }
+    return 0;
+}
+
 /* Pre-BCR admission is distinct from the post-PHY lease. Only the mapped
  * state-manager and an already owned GPIO are available here; no PARF/DBI. */
 static int wb_early_cesta_lease(__unused void *cookie)
@@ -1355,6 +1370,54 @@ static int wb_watchdog_quiet_test(void)
     return -1; /* A successful expiry resets the device, so it cannot return here. */
 }
 
+static int wb_route_gpio_access(uint32_t off, int writing)
+{
+    unsigned pin = off / 0x1000u, reg = off % 0x1000u;
+    int held_pin = pin == 16u || pin == 17u || pin == 94u || pin == 95u || pin == 96u;
+    int wake_pin = pin == 18u || pin == 19u;
+    if ((!held_pin && !wake_pin) || (reg != 0u && reg != 4u && reg != 8u) ||
+        (writing && ((wake_pin && reg != 8u) || (held_pin && reg == 8u))) ||
+        !wb_map_covers(&wb.tlmm, off + 4u) || !wb_early_reset_confirmed() ||
+        !wb_guard() || !wb_early_reset_confirmed()) {
+        wb.guard_failed = 1;
+        return 0;
+    }
+    return 1;
+}
+
+static uint32_t wb_route_gpio_read(__unused void *cookie, uint32_t off)
+{ return wb_route_gpio_access(off,0) ? wb_mmio(&wb.tlmm,off) : UINT32_MAX; }
+
+static void wb_route_gpio_write(__unused void *cookie, uint32_t off, uint32_t value)
+{ if (wb_route_gpio_access(off,1)) wb_store(&wb.tlmm,off,value); }
+
+static int wb_gpio_pdc_wake_only(void)
+{
+    struct giulia_wifi_gpio *g = &wb.bringup.supply.gpio;
+    const struct giulia_wifi_gpio_io io = {0, wb_route_gpio_read, wb_route_gpio_write,
+        wb_barrier, wb_delay_u};
+    const uint32_t held = GIULIA_WGPIO_BEGIN_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE;
+    /* The existing reset watchdog is intentionally bounded. Do not start
+     * AOP, regulator votes, CESTA, or PCIe training inside this new substage. */
+    if (!wb.guard_failed && wb_guard() && wb_map_covers(&wb.tlmm, 0x6000cu) &&
+        !wb_arm_early_reset() && wb_early_reset_confirmed() && wb_guard()) {
+        if (!giulia_wifi_gpio_begin_with_bt_reset(g,held,&io) &&
+            !giulia_wifi_gpio_check_held(g,held) &&
+            !giulia_wifi_gpio_pdc_wake_enable(g,0,wb_gpio_pdc_wake_lease) &&
+            !giulia_wifi_gpio_pdc_wake_check(g) &&
+            !giulia_wifi_gpio_check_held(g,held) && !wb_gpio_pdc_wake_lease(0)) {
+            wb_log("ace5-wifi-bringup: GPIO PDC wake changed_mask=%#x (bit0=GPIO18 bit1=GPIO19)\n",
+                g->pdc_wake_dirty);
+            if (wb_gpio_pdc_wake_lease(0)) goto refused;
+            wb_log("ace5-wifi-bringup: GPIO18/19 PDC wake forwarding verified; PERST held; no PCIe/AOP/rail action\n");
+            return 0;
+        }
+    }
+refused:
+    wb_log("ace5-wifi-bringup: GPIO PDC wake-only phase refused or incomplete\n");
+    return -1;
+}
+
 static void wb_thread(void *arg, __unused wait_result_t wait)
 {
     uint64_t pa = (uint64_t)(uintptr_t)arg;
@@ -1372,6 +1435,20 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     if (wb.quiet->magic != LOADER_QUIET_MAGIC || wb.quiet->version != LOADER_QUIET_VERSION ||
         wb.quiet->size != sizeof(*wb.quiet) || wb.quiet->request || wb.quiet->ack || wb.quiet->active)
         goto done;
+
+    if (wb.pdc_wake_forward) {
+        /* The route-only branch does not even map GCC, PARF, PHY or DBI. */
+        wb_map(&wb.tlmm, GIULIA_WIFI_GPIO_PA, GIULIA_WIFI_GPIO_SIZE, VM_WIMG_IO);
+        wb_map(&wb.gic, 0x17100000u, 0x10000u, VM_WIMG_IO);
+        if (!wb.tlmm.address || !wb.gic.address) goto done;
+        quiet = 1;
+        if (!wb_quiet_req(1) || !wb_irq_acquire()) {
+            wb_log("ace5-wifi-bringup: quiet/IRQ37 acquire failed\n");
+            goto release;
+        }
+        (void)wb_gpio_pdc_wake_only();
+        goto release;
+    }
 
     wb_map(&wb.gcc, GIULIA_QOS_GCC_PHYS, GIULIA_QOS_GCC_SIZE, VM_WIMG_IO);
     wb_map(&wb.tcsr, GIULIA_POWER_TCSR_PHYS, 0x40000u, VM_WIMG_IO);
@@ -1548,7 +1625,7 @@ release:
     }
     if (wb.early_reset_armed) {
         wb.guard_failed = 1;
-        if (!wb.endpoint_reset_unconfirmed)
+        if (!wb.endpoint_reset_unconfirmed && (!wb.pdc_wake_forward || wb_early_reset_confirmed()))
             loader_return();
         goto retained;
     }
@@ -1644,6 +1721,11 @@ void giulia_wifi_bringup_init(void)
         sizeof(wb.cesta_pipe_clock_only)) &&
         (wb.cesta_pipe_clock_only != 1 || wb.cesta_pipe_observe != 1 || wb.cesta_early_start != 1)) {
         wb_log("ace5-wifi-bringup: CESTA PIPE-only check requires the guarded PIPE observation profile\n");
+        return;
+    }
+    if (PE_parse_boot_argn("ace5_wifi_pdc_wake_forward", &wb.pdc_wake_forward,
+        sizeof(wb.pdc_wake_forward)) && (wb.pdc_wake_forward != 1 || !wb.cesta_pipe_clock_only)) {
+        wb_log("ace5-wifi-bringup: GPIO PDC wake route trial requires PIPE-only isolation\n");
         return;
     }
     if (wb.pre_phy_clks && (wb.pre_phy_clks != 1 || !wb.pcs_first ||

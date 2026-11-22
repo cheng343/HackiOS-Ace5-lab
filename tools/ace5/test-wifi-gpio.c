@@ -7,6 +7,8 @@
 struct mock {
     uint32_t regs[97][3], original[97][3];
     unsigned reads, writes, delay_us, delay100ms, ignore_nth, bt_allowed;
+    unsigned wake_allowed, wake_writes, wake_lease_checks, wake_lease_fail_at;
+    unsigned wake_revoke_after_write, wake_lease_revoked;
     uint32_t ignore, bad_read;
 };
 static uint32_t rd(void *cookie, uint32_t off)
@@ -21,8 +23,18 @@ static void wr(void *cookie, uint32_t off, uint32_t val)
 {
     struct mock *m = cookie;
     unsigned pin = off / 0x1000u, reg = off % 0x1000u / 4;
-    assert((pin == 16 || pin == 94 || pin == 95 || pin == 96 || (pin == 17 && m->bt_allowed)) && reg < 2);
-    assert(((val ^ m->regs[pin][reg]) & ~(reg ? 2u : 0x3ffu)) == 0);
+    if (pin == 18 || pin == 19) {
+        assert(m->wake_allowed && !m->wake_lease_revoked && reg == 2);
+        assert(((val ^ m->regs[pin][reg]) & ~(1u << 7)) == 0);
+        assert(!(m->regs[16][1] & 2u) && !(m->regs[17][1] & 2u) && !(m->regs[94][1] & 2u));
+        ++m->wake_writes;
+        if (m->wake_writes == m->wake_revoke_after_write)
+            m->wake_lease_revoked = 1; /* A legitimate store can complete as the lease goes away. */
+    } else {
+        assert((pin == 16 || pin == 94 || pin == 95 || pin == 96 || (pin == 17 && m->bt_allowed)) && reg < 2);
+        assert(((val ^ m->regs[pin][reg]) & ~(reg ? 2u : 0x3ffu)) == 0);
+        assert(!m->wake_lease_revoked);
+    }
     ++m->writes;
     if (off == m->ignore || m->writes == m->ignore_nth) return;
     if (pin == 94 && reg == 1 && (val & 2u) && (m->regs[94][0] & (1u << 9))) {
@@ -140,6 +152,122 @@ static void off_hold(void)
     puts("Ace5 Wi-Fi GPIO: WLAN off retains reset snapshots; live controls checked without writes");
 }
 
+static int wake_lease(void *cookie)
+{
+    struct mock *m = cookie;
+    if (++m->wake_lease_checks == m->wake_lease_fail_at)
+        m->wake_lease_revoked = 1;
+    return m->wake_lease_revoked ? -1 : 0;
+}
+
+static void pdc_wake_setup(struct mock *m, struct giulia_wifi_gpio *g, uint32_t route18, uint32_t route19)
+{
+    struct giulia_wifi_gpio_io io = {m, rd, wr, fence, delay};
+    setup(m, g);
+    m->bt_allowed = m->wake_allowed = 1;
+    m->regs[18][2] = m->original[18][2] = route18;
+    m->regs[19][2] = m->original[19][2] = route19;
+    assert(!giulia_wifi_gpio_begin_with_bt_reset(g, GIULIA_WGPIO_BEGIN_REQUIRED |
+        GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE, &io));
+}
+
+static void pdc_wake(void)
+{
+    const uint32_t allow = 0x742u, bit = 1u << 7;
+    const uint32_t on_flags = GIULIA_WGPIO_ON_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE;
+    const uint32_t stop_flags = GIULIA_WGPIO_STOP_REQUIRED | GIULIA_WGPIO_BT_CONTROL_EXCLUSIVE;
+    struct mock m;
+    struct giulia_wifi_gpio g;
+    setup(&m, &g);
+    begin(&m, &g);
+    assert(giulia_wifi_gpio_pdc_wake_enable(&g, &m, wake_lease) == GIULIA_WGPIO_STATE);
+    assert(!m.wake_writes && !m.wake_lease_checks);
+    stop(&m, &g);
+
+    /* Fail the second pin on input mode, eGPIO/IRQ ownership, permission,
+     * inaccessible read or lease loss: the first pin must remain untouched. */
+    static const unsigned pin_conflict_bits[] = {2, 9, 11, 12};
+    for (unsigned kind = 0; kind < 8; ++kind) {
+        pdc_wake_setup(&m, &g, allow, allow);
+        if (kind < 4) m.regs[19][0] |= 1u << pin_conflict_bits[kind];
+        if (kind == 4) m.regs[19][2] |= 1u;
+        if (kind == 5) m.regs[19][2] &= ~(1u << 6);
+        if (kind == 6) m.bad_read = PIN(19, 8);
+        if (kind == 7) m.wake_lease_fail_at = 4;
+        const unsigned before = m.writes;
+        assert(giulia_wifi_gpio_pdc_wake_enable(&g, &m, wake_lease) ==
+            (kind < 6 ? GIULIA_WGPIO_BUSY : kind == 6 ? GIULIA_WGPIO_READBACK : GIULIA_WGPIO_PREREQUISITE));
+        assert(!m.wake_writes && m.writes == before && m.regs[18][2] == allow &&
+            !g.pdc_wake_active && !g.pdc_wake_dirty);
+        if (kind == 7) {
+            assert(g.pdc_wake_lease);
+            assert(giulia_wifi_gpio_stop(&g, stop_flags) == GIULIA_WGPIO_PREREQUISITE && m.writes == before);
+        } else {
+            assert(!g.pdc_wake_lease);
+        }
+    }
+
+    /* Inherit GPIO18's route; only GPIO19 is ours to restore. Remain valid
+     * on assertion and while WLAN is ON, without any additional route store. */
+    pdc_wake_setup(&m, &g, allow | bit, allow);
+    assert(giulia_wifi_gpio_pdc_wake_check(&g) == GIULIA_WGPIO_STATE);
+    assert(!giulia_wifi_gpio_pdc_wake_enable(&g, &m, wake_lease));
+    assert(m.wake_writes == 1 && g.pdc_wake_active && g.pdc_wake_dirty == 2u);
+    assert(!giulia_wifi_gpio_pdc_wake_check(&g) && m.wake_writes == 1);
+    assert(giulia_wifi_gpio_pdc_wake_enable(&g, &m, wake_lease) == GIULIA_WGPIO_STATE);
+    m.regs[19][2] &= ~bit;
+    unsigned writes = m.writes;
+    assert(giulia_wifi_gpio_pdc_wake_check(&g) == GIULIA_WGPIO_READBACK && m.writes == writes);
+    assert(giulia_wifi_gpio_wlan_on(&g, on_flags) == GIULIA_WGPIO_READBACK && m.writes == writes);
+    m.regs[19][2] |= bit;
+    assert(!giulia_wifi_gpio_wlan_on(&g, on_flags));
+    assert(!giulia_wifi_gpio_pdc_wake_check(&g) && m.wake_writes == 1);
+    m.regs[19][2] |= 1u << 20;
+    m.original[19][2] |= 1u << 20;
+    assert(!giulia_wifi_gpio_stop(&g, stop_flags));
+    assert(m.wake_writes == 2 && !g.pdc_wake_active && !g.pdc_wake_dirty && !g.pdc_wake_lease);
+    assert(!memcmp(m.regs, m.original, sizeof(m.regs)));
+
+    /* A posted write may fail to land. No immediate rollback; stop skips
+     * the attempt that is still clear and only undoes the established one. */
+    pdc_wake_setup(&m, &g, allow, allow);
+    m.ignore = PIN(19, 8);
+    assert(giulia_wifi_gpio_pdc_wake_enable(&g, &m, wake_lease) == GIULIA_WGPIO_READBACK);
+    assert(!g.pdc_wake_active && g.pdc_wake_dirty == 3u && m.wake_writes == 2);
+    assert(m.regs[18][2] == (allow | bit) && m.regs[19][2] == allow);
+    writes = m.writes;
+    assert(giulia_wifi_gpio_wlan_on(&g, on_flags) == GIULIA_WGPIO_STATE && m.writes == writes);
+    m.ignore = UINT32_MAX;
+    assert(!giulia_wifi_gpio_stop(&g, stop_flags));
+    assert(m.wake_writes == 3 && !memcmp(m.regs, m.original, sizeof(m.regs)));
+
+    /* Stop fails closed when lease was revoked after the first store. Once
+     * the fixture's owner revalidates, clear only the owned route. */
+    pdc_wake_setup(&m, &g, allow, allow);
+    m.wake_revoke_after_write = 1;
+    assert(giulia_wifi_gpio_pdc_wake_enable(&g, &m, wake_lease) == GIULIA_WGPIO_PREREQUISITE);
+    assert(!g.pdc_wake_active && g.pdc_wake_dirty == 1u && m.wake_writes == 1);
+    writes = m.writes;
+    unsigned reads = m.reads;
+    assert(giulia_wifi_gpio_stop(&g, stop_flags) == GIULIA_WGPIO_PREREQUISITE);
+    assert(m.writes == writes && m.reads == reads && g.pdc_wake_dirty == 1u);
+    m.wake_lease_revoked = m.wake_revoke_after_write = 0;
+    assert(!giulia_wifi_gpio_stop(&g, stop_flags));
+    assert(m.wake_writes == 2 && !memcmp(m.regs, m.original, sizeof(m.regs)));
+
+    /* The first successful teardown is not repeated if the second misses. */
+    pdc_wake_setup(&m, &g, allow, allow);
+    assert(!giulia_wifi_gpio_pdc_wake_enable(&g, &m, wake_lease));
+    m.ignore = PIN(19, 8);
+    assert(giulia_wifi_gpio_stop(&g, stop_flags) == GIULIA_WGPIO_READBACK &&
+        !g.pdc_wake_active && g.pdc_wake_dirty == 2u && m.wake_writes == 4);
+    m.ignore = UINT32_MAX;
+    assert(!giulia_wifi_gpio_stop(&g, stop_flags));
+    assert(m.wake_writes == 5 && !memcmp(m.regs, m.original, sizeof(m.regs)));
+
+    puts("Ace5 Wi-Fi GPIO PDC wake: admitted both inputs, preserved unrelated fields and retained partial ownership");
+}
+
 static void snapshot(void)
 {
     struct mock m;
@@ -198,6 +326,7 @@ int main(void)
     struct giulia_wifi_gpio_io io = {&m, rd, wr, fence, delay};
     bluetooth_reset();
     off_hold();
+    pdc_wake();
     snapshot();
     setup(&m, &g);
     assert(giulia_wifi_gpio_begin(&g, 0, &io) == GIULIA_WGPIO_PREREQUISITE);
