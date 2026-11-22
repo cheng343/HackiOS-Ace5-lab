@@ -63,7 +63,7 @@ static enum lease_event lease_event;
 static unsigned first_lease_op;
 static unsigned ep_loader_calls, ep_console_calls;
 static char messages[16384];
-static struct { uintptr_t va; vm_size_t size; } allocation[24];
+static struct { uintptr_t va, pa; vm_size_t size; } allocation[24];
 static void wb_test_barrier(void);
 static void delay(unsigned us) { time_us+=us; assert(time_us<=30000000); }
 static uint64_t wb_test_watchdog_call(uint64_t id, uint64_t a1, uint64_t a2,
@@ -169,7 +169,7 @@ vm_offset_t ml_io_map_unmappable(vm_offset_t pa,vm_size_t size,unsigned flags)
     assert(maps<24 && size && (flags==VM_WIMG_IO || flags==VM_WIMG_WCOMB));
     if(fail_map && maps+1==fail_map)return 0;
     void *base=calloc(1,size);assert(base);
-    allocation[maps].va=(uintptr_t)base;allocation[maps].size=size;maps++;
+    allocation[maps].va=(uintptr_t)base;allocation[maps].pa=pa;allocation[maps].size=size;maps++;
     if(pa==0x90000000) {
         struct loader_firmware_quiet *q=(void *)((uint8_t *)base+0x100);
         q->magic=LOADER_QUIET_MAGIC;q->version=LOADER_QUIET_VERSION;q->size=sizeof(*q);
@@ -531,6 +531,65 @@ static void admission(void)
     setup();no_ack=1;giulia_wifi_bringup_init();assert(maps==unmaps && !stop_calls);
     setup();fail_map=1;giulia_wifi_bringup_init();assert(!maps && exits==1);
 }
+static void cesta_mapping_boundary(void)
+{
+    static const struct {
+        unsigned mode, clock_only, dbi_atu, cfg, bar0;
+    } cases[] = {
+        { 0, 0, 2, 1, 1 }, { WB_SM_DBI_ID, 0, 1, 0, 0 },
+        { WB_SM_ENDPOINT, 0, 2, 1, 0 }, { WB_SM_ENDPOINT, 1, 0, 0, 0 }
+    };
+    /* DBI and iATU have distinct apertures on the same 16 KiB page;
+     * the mapper receives the page address for two separate requests. */
+    const uintptr_t dbi_page = trunc_page(GIULIA_PCIE_LINK_DBI_PA);
+    assert(trunc_page(GIULIA_PCIE_LINK_ATU_PA) == dbi_page);
+    for (unsigned n = 0; n < sizeof(cases)/sizeof(cases[0]); n++) {
+        setup();
+        wb.sm_diag = cases[n].mode;
+        wb.cold_reset = (wb.sm_diag != 0);
+        wb.max_stage = GIULIA_BRINGUP_PHY_START;
+        wb.cesta_pipe_clock_only = cases[n].clock_only;
+        /* Exercise production map/admission/unmap and stop before power
+         * or link actions: the RAM-backed loader peer will not ACK. */
+        no_ack = 1;
+        wb_thread((void *)(uintptr_t)shared_pa, 0);
+        assert(maps && maps == unmaps && exits == 1);
+        assert(strstr(messages, "quiet/IRQ37 acquire failed"));
+        assert(!strstr(messages, "MMIO mapping failed") && !stop_calls);
+        unsigned dbi_atu = 0, cfg = 0, bar0 = 0;
+        for (unsigned i = 0; i < maps; i++) {
+            dbi_atu += allocation[i].pa == dbi_page;
+            cfg += allocation[i].pa == trunc_page(GIULIA_PCIE_LINK_CFG_PA);
+            bar0 += allocation[i].pa == trunc_page(GIULIA_PCIE_LINK_BAR0_PA);
+        }
+        assert(dbi_atu == cases[n].dbi_atu && cfg == cases[n].cfg && bar0 == cases[n].bar0);
+        assert((strstr(messages, "PIPE-only endpoint windows unmapped dbi=0 atu=0 cfg=0 bar0=0") != 0)
+            == (cases[n].clock_only != 0));
+    }
+    const unsigned regions[] = { GIULIA_LINK_DBI, GIULIA_LINK_ATU, GIULIA_LINK_CFG };
+    for (unsigned i = 0; i < sizeof(regions)/sizeof(regions[0]); i++) {
+        const unsigned r = regions[i];
+        setup();
+        wb.cesta_pipe_clock_only = 1;
+        assert(wb_link_r32(0, r, 0) == UINT32_MAX && wb.guard_failed);
+        wb.guard_failed = 0;
+        assert(wb_link_r16(0, r, 2) == UINT16_MAX && wb.guard_failed);
+        wb.guard_failed = 0;
+        wb_link_w32(0, r, 0, 1);
+        assert(wb.guard_failed);
+        wb.guard_failed = 0;
+        wb_link_w16(0, r, 2, 1);
+        assert(wb.guard_failed && !maps && !messages[0]);
+    }
+    setup();
+    uint32_t parf = 0;
+    wb.parf.address = (uintptr_t)&parf;
+    wb.cesta_pipe_clock_only = 1;
+    wb_link_w32(0, GIULIA_LINK_PARF, 0, 0x1234u);
+    assert(wb_link_r32(0, GIULIA_LINK_PARF, 0) == 0x1234u && !wb.guard_failed);
+    puts("Wi-Fi XNU CESTA PIPE-only: endpoint apertures unmapped and link callbacks fail closed");
+}
+
 static void cleanup(void)
 {
     setup();giulia_wifi_bringup_init();
@@ -1219,7 +1278,7 @@ int main(void)
     uint64_t bytes=0;
     assert(wb_private_fw_lookup("kiwifw","amss20.bin",&bytes)==fw_fixture);
     assert(bytes==sizeof(fw_fixture) && private_file_calls==1);
-    admission();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();early_cesta_adapter();cesta_pipe_clock_only();noc_after_phy();setup();
+    admission();cesta_mapping_boundary();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();early_cesta_adapter();cesta_pipe_clock_only();noc_after_phy();setup();
     assert(private_file_calls==1); /* No private file read during an earlier diagnostic. */
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");

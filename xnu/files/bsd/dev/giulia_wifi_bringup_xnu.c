@@ -289,6 +289,16 @@ static struct wb_map *link_reg(unsigned reg)
     if (reg == GIULIA_LINK_ATU) return &wb.atu;
     return &wb.cfg;
 }
+/* A programming error in a clock-only trial must not dereference an
+ * unmapped aperture or be mistaken for a successful clock observation. */
+static int wb_link_window_allowed(unsigned reg)
+{
+    if (!wb.cesta_pipe_clock_only || reg == GIULIA_LINK_PARF)
+        return 1;
+    wb.guard_failed = 1;
+    return 0;
+}
+
 static uint32_t wb_dbg_r32[3], wb_dbg_r16[3];
 static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
 {
@@ -297,7 +307,7 @@ static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
     /* Only the core's requested access is allowed here. No diagnostic reads
      * of iATU/CFG/SM before admission, even when DBI returns all ones. A CPU
      * load can stall the bus, so record the checkpoint BEFORE issuing it. */
-    if (!wb_endpoint_io_ok()) return UINT32_MAX;
+    if (!wb_link_window_allowed(r) || !wb_endpoint_io_ok()) return UINT32_MAX;
     if (r == GIULIA_LINK_DBI && off == 0) {
         wb_log("ace5-wifi-bringup: DBI+0 access begin\n");
         /* Logging can block: revalidate before this one dangerous load. */
@@ -309,11 +319,15 @@ static uint32_t wb_link_r32(void *c, unsigned r, uint32_t off)
         wb_log("ace5-wifi-bringup: DBI+0 access returned %#x\n", v);
     return v;
 }
-static void wb_link_w32(void *c, unsigned r, uint32_t off, uint32_t v) { (void)c; if (wb_endpoint_io_ok()) wb_store(link_reg(r), off, v); }
+static void wb_link_w32(void *c, unsigned r, uint32_t off, uint32_t v)
+{
+    (void)c;
+    if (wb_link_window_allowed(r) && wb_endpoint_io_ok()) wb_store(link_reg(r), off, v);
+}
 static uint16_t wb_link_r16(void *c, unsigned r, uint32_t off)
 {
     (void)c;
-    if (!wb_endpoint_io_ok()) return UINT16_MAX;
+    if (!wb_link_window_allowed(r) || !wb_endpoint_io_ok()) return UINT16_MAX;
     uint16_t v = *(volatile uint16_t *)(link_reg(r)->address + off);
     wb_barrier(0);
     wb_dbg_r16[0] = r; wb_dbg_r16[1] = off; wb_dbg_r16[2] = v;
@@ -322,7 +336,7 @@ static uint16_t wb_link_r16(void *c, unsigned r, uint32_t off)
 static void wb_link_w16(void *c, unsigned r, uint32_t off, uint16_t v)
 {
     (void)c;
-    if (!wb_endpoint_io_ok()) return;
+    if (!wb_link_window_allowed(r) || !wb_endpoint_io_ok()) return;
     *(volatile uint16_t *)(link_reg(r)->address + off) = v;
     wb_barrier(0);
 }
@@ -1347,7 +1361,10 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     struct giulia_wifi_bringup_config cfg = {0};
     struct giulia_wlan_rail_baseline unk_rails[7] = {0};
     int rc = -1, stop_rc = -1, quiet = 0;
-    int link_access = wb.sm_diag < WB_SM_TABLES && !wb.watchdog_trial && !wb.cold_reset;
+    int link_access = !wb.cesta_pipe_clock_only && wb.sm_diag < WB_SM_TABLES &&
+        !wb.watchdog_trial && !wb.cold_reset;
+    int map_dbi = !wb.cesta_pipe_clock_only && (link_access || wb.sm_diag >= WB_SM_DBI_ID);
+    int map_cfg = !wb.cesta_pipe_clock_only && (link_access || wb.sm_diag == WB_SM_ENDPOINT);
 
     wb_map(&wb.shared, pa, sizeof(struct loader_firmware_quiet), VM_WIMG_WCOMB);
     if (!wb.shared.address) goto done;
@@ -1366,18 +1383,14 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     wb_map(&wb.ipcc, 0x00406000u, 0x1000u, VM_WIMG_IO);
     wb_map(&wb.parf, 0x01c00000u, 0x3000u, VM_WIMG_IO);
     wb_map(&wb.phy, 0x01c06000u, 0x2000u, VM_WIMG_IO);
-    if (link_access) {
+    if (map_dbi)
         wb_map(&wb.dbi, GIULIA_PCIE_LINK_DBI_PA, 0x1000u, VM_WIMG_IO);
+    if (map_cfg) {
         wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
         wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
-        wb_map(&wb.bar0, GIULIA_PCIE_LINK_BAR0_PA, GIULIA_PCIE_LINK_BAR0_SIZE, VM_WIMG_IO);
-    } else if (wb.sm_diag >= WB_SM_DBI_ID) {
-        wb_map(&wb.dbi, GIULIA_PCIE_LINK_DBI_PA, 0x1000u, VM_WIMG_IO);
-        if (wb.sm_diag == WB_SM_ENDPOINT) {
-            wb_map(&wb.atu, GIULIA_PCIE_LINK_ATU_PA, 0x1000u, VM_WIMG_IO);
-            wb_map(&wb.cfg, GIULIA_PCIE_LINK_CFG_PA, GIULIA_PCIE_LINK_CFG_SIZE, VM_WIMG_IO);
-        }
     }
+    if (link_access)
+        wb_map(&wb.bar0, GIULIA_PCIE_LINK_BAR0_PA, GIULIA_PCIE_LINK_BAR0_SIZE, VM_WIMG_IO);
     wb_map(&wb.crm, GIULIA_NOC_CRM_PHYS, GIULIA_NOC_CRM_SIZE, VM_WIMG_IO);
     if (wb.sm_diag >= WB_SM_PERF)
         wb_map(&wb.crm_c, WB_CRM_C_PHYS, WB_CRM_C_SIZE, VM_WIMG_IO);
@@ -1388,15 +1401,21 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
     if (!wb.gcc.address || !wb.tcsr.address || !wb.tlmm.address || !wb.rsc.address ||
         !wb.db.address || !wb.gic.address || !wb.msg.address || !wb.ipcc.address ||
         !wb.parf.address || !wb.phy.address || !wb.crm.address ||
-        (link_access && (!wb.dbi.address || !wb.atu.address ||
-        !wb.cfg.address || !wb.bar0.address)) ||
-        (wb.sm_diag >= WB_SM_DBI_ID && !wb.dbi.address) ||
-        (wb.sm_diag == WB_SM_ENDPOINT && (!wb.atu.address || !wb.cfg.address)) ||
+        (link_access && !wb.bar0.address) || (map_dbi && !wb.dbi.address) ||
+        (map_cfg && (!wb.atu.address || !wb.cfg.address)) ||
         (wb.sm_diag >= WB_SM_PERF && !wb.crm_c.address) ||
         !wb.qos_pcie.address || !wb.qos_gem.address ||
         (wb.sm_diag && !wb.pcie_sm.address)) {
         wb_log("ace5-wifi-bringup: MMIO mapping failed\n");
         goto done;
+    }
+
+    if (wb.cesta_pipe_clock_only) {
+        if (wb.dbi.allocation || wb.atu.allocation || wb.cfg.allocation || wb.bar0.allocation) {
+            wb_log("ace5-wifi-bringup: PIPE-only endpoint mapping refused\n");
+            goto done;
+        }
+        wb_log("ace5-wifi-bringup: PIPE-only endpoint windows unmapped dbi=0 atu=0 cfg=0 bar0=0\n");
     }
 
     wb.db_version = *(volatile uint32_t *)wb.db.address;
