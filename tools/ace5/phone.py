@@ -320,8 +320,9 @@ def check_stock_startup_perf(nodes):
 def check_early_cesta_kernel(image):
     # Prevent the old baseline image from silently ignoring the opt-in token.
     # The pinned cloud artifact/manifest still supplies image integrity.
-    if b'ace5_wifi_cesta_early_start\0' not in image:
-        raise RuntimeError('Kernel does not advertise early CESTA START; no payload staged')
+    if (b'ace5_wifi_cesta_early_start\0' not in image or
+            b'ace5-wifi-bringup: early CESTA full profile survived BCR/PHY\n\0' not in image):
+        raise RuntimeError('Kernel does not advertise early CESTA START with full profile verification; no payload staged')
 
 
 def ace5_wifi_bringup_arguments(enabled, table, bootcpu, kernel, seconds, other_hardware, live_log,
@@ -429,12 +430,17 @@ def check_wifi_bringup_log(enabled, stage, text, reset_required, log, sm_diag=Fa
         reports = [line.split(prefix, 1)[1] for line in text.splitlines() if prefix in line]
         after_phy = re.findall(r'ace5-wifi-bringup: post-phy cesta start=(0x[0-9a-f]+|0)\b', text)
         phy_access = text.find('ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access')
+        first_snapshot = text.find('ace5-wifi-bringup: post-phy cesta start=')
+        profile_ok = text.find('ace5-wifi-bringup: early CESTA full profile survived BCR/PHY')
+        profile_failed = 'ace5-wifi-bringup: early CESTA full profile verification failed' in text
+        first_dbi = text.find('ace5-wifi-bringup: DBI+0 access returned')
         if (stage != 4 or sm_diag != 7 or not cold_reset or not pcs_first or not native_width or not stock_perf or
                 watchdog or stock_train_lanes or pre_phy_clocks or native_x1_id or preserve_speed_cap or
                 not reports or any(row != marker for row in reports) or
                 phy_access < 0 or text.find(prefix + marker) >= phy_access or
-                not after_phy or any(value != '0x1' for value in after_phy)):
-            raise RuntimeError(f'Early CESTA START order or post-PHY state unconfirmed; preserve {log} and cold reboot')
+                not after_phy or any(value != '0x1' for value in after_phy) or
+                profile_failed or profile_ok <= first_snapshot or (0 <= first_dbi <= profile_ok)):
+            raise RuntimeError(f'Early CESTA START order or full post-PHY profile unconfirmed; preserve {log} and cold reboot')
     def mode7_timeout_detail():
         # Also used in isolation (AST-loaded from the persisted-log collector).
         # These are failure diagnostics, never a replacement for endpoint admission.

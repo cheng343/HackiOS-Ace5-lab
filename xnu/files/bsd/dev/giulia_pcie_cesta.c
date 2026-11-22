@@ -24,16 +24,22 @@ read_word(const struct giulia_cesta_io *io, uint32_t offset, uint32_t *value)
 }
 
 static int
-idle(const struct giulia_cesta_io *io)
+controls(const struct giulia_cesta_io *io, uint32_t start)
 {
     const uint32_t offsets[] = {GIULIA_CESTA_START_OFFSET, 0x1040u, 0x1048u};
     for (unsigned index = 0; index < sizeof(offsets) / sizeof(offsets[0]); index++) {
         uint32_t value;
         int rc = read_word(io, offsets[index], &value);
         if (rc) return rc;
-        if (value != 0) return GIULIA_CESTA_BUSY;
+        if (value != (index == 0 ? start : 0u)) return GIULIA_CESTA_BUSY;
     }
     return GIULIA_CESTA_OK;
+}
+
+static int
+idle(const struct giulia_cesta_io *io)
+{
+    return controls(io, 0u);
 }
 
 static int
@@ -116,6 +122,23 @@ giulia_cesta_verify_staged(const struct giulia_cesta *sm)
         if (value != sm->image[index]) return GIULIA_CESTA_DRIFT;
     }
     return idle(&sm->io);
+}
+
+int
+giulia_cesta_verify_active(const struct giulia_cesta *sm, const struct giulia_cesta_io *io)
+{
+    if (!sm || !io || !io->read || !io->validate_lease) return GIULIA_CESTA_ARGUMENT;
+    if (sm->state != GIULIA_CESTA_RESET_REQUIRED) return GIULIA_CESTA_STATE;
+    int rc = controls(io, 1u);
+    if (rc) return rc == GIULIA_CESTA_BUSY ? GIULIA_CESTA_DRIFT : rc;
+    for (unsigned index = 0; index < GIULIA_CESTA_WORDS; index++) {
+        uint32_t value;
+        rc = read_word(io, word_offset(index), &value);
+        if (rc) return rc;
+        if (value != sm->image[index]) return GIULIA_CESTA_DRIFT;
+    }
+    rc = controls(io, 1u);
+    return rc == GIULIA_CESTA_BUSY ? GIULIA_CESTA_DRIFT : rc;
 }
 
 int

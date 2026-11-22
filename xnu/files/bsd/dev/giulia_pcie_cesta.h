@@ -41,6 +41,11 @@ struct giulia_cesta {
 /* Read-only admission for the cold register image. */
 int giulia_cesta_check_cold(const struct giulia_cesta_io *);
 int giulia_cesta_verify_staged(const struct giulia_cesta *);
+/* A read-only comparison with the exact staged image. The caller supplies
+ * a fresh post-reset lease and independently proves that START was accepted;
+ * RESET_REQUIRED by itself does not prove success. This does not prove that
+ * the state manager ran the instructions or that PCIe is ready. */
+int giulia_cesta_verify_active(const struct giulia_cesta *, const struct giulia_cesta_io *);
 
 /* Offsets are relative to the verified giulia PCIe0 SM resource. A zero
  * lease result requires exclusive SM ownership, ordered accessible MMIO,

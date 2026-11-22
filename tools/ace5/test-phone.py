@@ -478,8 +478,10 @@ class PhoneTests(unittest.TestCase):
 
     def test_early_cesta_rejects_baseline_kernel_and_incomplete_results(self):
         image_check = self.namespace['check_early_cesta_kernel']
-        image_check(b'MachO\x00ace5_wifi_cesta_early_start\x00')
-        for baseline in (b'', b'ace5_wifi_stock_perf\0', b'ace5_wifi_cesta_early_starting\0'):
+        image_check(b'MachO\x00ace5_wifi_cesta_early_start\x00'
+                    b'ace5-wifi-bringup: early CESTA full profile survived BCR/PHY\n\0')
+        for baseline in (b'', b'ace5_wifi_stock_perf\0', b'ace5_wifi_cesta_early_starting\0',
+                         b'ace5_wifi_cesta_early_start\0'):
             with self.subTest(baseline=baseline), self.assertRaisesRegex(RuntimeError, 'no payload staged'):
                 image_check(baseline)
 
@@ -503,12 +505,16 @@ class PhoneTests(unittest.TestCase):
             'ace5-wifi-bringup: PCIe endpoint reset reassert rc=0',
             ''))
         opts = dict(sm_diag=7, cold_reset=True, pcs_first=True, native_width=True, stock_perf=True, early_cesta_start=True)
-        full = mark + phy + snapshot + report
+        verified = 'ace5-wifi-bringup: early CESTA full profile survived BCR/PHY\n'
+        full = mark + phy + snapshot + verified + report
         check(True, 4, full, 'yes', self.log, **opts)
         check(True, 4, full * 2, 'yes', self.log, **opts)
         check(True, 4, phy + snapshot.replace('start=0x1', 'start=0') + report, 'yes', self.log,
               **(opts | dict(early_cesta_start=False)))
-        for bad in (phy + snapshot + report, phy + mark + snapshot + report, mark + phy + report,
+        for bad in (phy + snapshot + verified + report, phy + mark + snapshot + verified + report,
+                    mark + phy + verified + report, full.replace(verified, ''),
+                    full.replace(verified, '') + verified, full.replace(snapshot + verified, verified + snapshot),
+                    full + 'ace5-wifi-bringup: early CESTA full profile verification failed rc=-6\n',
                     full.replace(snapshot, snapshot.replace('start=0x1', 'start=0')),
                     full + mark.replace('verified', 'refused'), full + snapshot.replace('start=0x1', 'start=0')):
             with self.subTest(bad=bad[:140]), self.assertRaisesRegex(RuntimeError, 'Early CESTA START'):

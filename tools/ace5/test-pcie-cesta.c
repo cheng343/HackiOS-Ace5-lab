@@ -104,6 +104,36 @@ int main(void)
         assert(giulia_cesta_discard(&sm) == GIULIA_CESTA_RETAINED);
         assert(fake.writes == 21 && fake.regs[0] == 0x01020304u);
     }
+    /* Read-only after BCR/PHY: a surviving START does not excuse a lost
+     * instruction, branch or foreign override. Test every word independently. */
+    memset(&fake, 0, sizeof(fake));
+    memset(&sm, 0, sizeof(sm));
+    assert(stage(&sm, &fake, 52) == 0);
+    struct giulia_cesta_io post = {.cookie=&fake, .read=read_reg, .validate_lease=lease};
+    assert(giulia_cesta_verify_active(&sm, &post) == GIULIA_CESTA_STATE);
+    fake.reset_ready = 1;
+    assert(giulia_cesta_start(&sm) == GIULIA_CESTA_RETAINED);
+    assert(giulia_cesta_verify_active(&sm, &post) == GIULIA_CESTA_OK);
+    for (unsigned i = 0; i < GIULIA_CESTA_WORDS; i++) {
+        unsigned off = i < GIULIA_CESTA_SEQUENCE_WORDS ? 4u * i :
+            GIULIA_CESTA_BRANCH_OFFSET + 4u * (i - GIULIA_CESTA_SEQUENCE_WORDS);
+        uint32_t saved = fake.regs[off / 4];
+        fake.regs[off / 4] = 0;
+        assert(giulia_cesta_verify_active(&sm, &post) == GIULIA_CESTA_DRIFT);
+        fake.regs[off / 4] = saved;
+    }
+    fake.regs[0x1048 / 4] = 1;
+    assert(giulia_cesta_verify_active(&sm, &post) == GIULIA_CESTA_DRIFT);
+    fake.regs[0x1048 / 4] = 0;
+    fake.regs[GIULIA_CESTA_START_OFFSET / 4] = 0;
+    assert(giulia_cesta_verify_active(&sm, &post) == GIULIA_CESTA_DRIFT);
+    fake.regs[GIULIA_CESTA_START_OFFSET / 4] = UINT32_MAX;
+    assert(giulia_cesta_verify_active(&sm, &post) == GIULIA_CESTA_IO);
+    fake.lease_lost = 1;
+    unsigned reads = fake.reads;
+    assert(giulia_cesta_verify_active(&sm, &post) == GIULIA_CESTA_LEASE && fake.reads == reads);
+    assert(fake.writes == 21 && fake.starts == 1);
+    puts("Ace5 CESTA: full active image checked after reset without a write");
     puts("Ace5 CESTA: DT layout, cold staging, partial rollback, reset-gated START and retained ownership passed");
     return 0;
 }

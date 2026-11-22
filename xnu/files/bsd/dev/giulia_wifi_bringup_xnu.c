@@ -71,6 +71,7 @@ static struct {
     struct giulia_pcie_qos qos;
     uint8_t pdc_table[508];
     uint8_t cesta_profile[WB_SM_PROFILE_BYTES];
+    struct giulia_cesta cesta_early_image;
     uint32_t irq_dirty, irq_prior, guard_failed, endpoint_reset_unconfirmed, db_version, max_stage;
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
     uint32_t pcs_first, early_reset_armed, native_width, stock_perf, stock_train;
@@ -891,6 +892,7 @@ static int wb_start_cesta_before_bcr(void)
         if (rc != GIULIA_CESTA_RETAINED) return rc;
         if (wb_early_cesta_read(0, GIULIA_CESTA_START_OFFSET, &start_status) ||
             start_status != 1u || wb_early_cesta_lease(0)) return GIULIA_CESTA_IO;
+        wb.cesta_early_image = sm;
         wb.cesta_early_verified = 1;
         wb_log("ace5-wifi-bringup: early CESTA START verified before BCR\n");
         return GIULIA_CESTA_OK;
@@ -1137,8 +1139,20 @@ static int wb_cesta_pre_dbi(void)
     return rc;
 }
 
+static int wb_cesta_profile_read(__unused void *cookie, uint32_t off, uint32_t *value)
+{
+    if (!value || (off & 3u) || off >= GIULIA_NOC_SM_SIZE ||
+        !wb.bringup.cesta_reset_required || !wb_endpoint_io_ok())
+        return -1;
+    *value = wb_mmio(&wb.pcie_sm, off);
+    return 0;
+}
+
 static int wb_cesta_finish_early(void)
 {
+    static const struct giulia_cesta_io verify_io = {
+        .read = wb_cesta_profile_read, .validate_lease = wb_cesta_table_lease
+    };
     uint32_t start;
     if (!wb.cesta_early_verified || !wb.bringup.cesta_reset_required ||
         !wb_early_reset_confirmed() || wb_stage4_reset_lease() ||
@@ -1148,11 +1162,15 @@ static int wb_cesta_finish_early(void)
     int observed = wb_cesta_observe();
     wb_log("ace5-wifi-bringup: cesta START result=%d observe=%d; retained until reset\n",
         GIULIA_CESTA_RETAINED, observed);
-    if (observed != GIULIA_CESTA_OK || !wb_early_reset_confirmed() ||
-        wb_stage4_reset_lease() || wb_cesta_table_read(0, GIULIA_CESTA_START_OFFSET, &start) ||
-        start != 1u)
+    if (observed != GIULIA_CESTA_OK || !wb_early_reset_confirmed())
         return GIULIA_CESTA_STATE;
-    int rc = wb_cesta_pre_dbi();
+    int rc = giulia_cesta_verify_active(&wb.cesta_early_image, &verify_io);
+    if (rc != GIULIA_CESTA_OK) {
+        wb_log("ace5-wifi-bringup: early CESTA full profile verification failed rc=%d\n", rc);
+        return rc;
+    }
+    wb_log("ace5-wifi-bringup: early CESTA full profile survived BCR/PHY\n");
+    rc = wb_cesta_pre_dbi();
     wb_log("ace5-wifi-bringup: CESTA follow-up rc=%d\n", rc);
     return rc;
 }
