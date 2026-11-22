@@ -36,6 +36,7 @@ int giulia_pcie_phy_stop(struct giulia_pcie_phy *p, uint32_t prerequisites)
     if (!p) return GIULIA_PHY_ARGUMENT;
     if (p->state == GIULIA_PHY_IDLE || p->state == GIULIA_PHY_STOPPED)
         return GIULIA_PHY_OK;
+    if (p->state == GIULIA_PHY_RESET_REQUIRED) return GIULIA_PHY_STATE;
     if ((prerequisites & GIULIA_PHY_STOP_REQUIRED) != GIULIA_PHY_STOP_REQUIRED)
         return GIULIA_PHY_PREREQUISITE;
     /* Same order as QMP power_off: PIPE first, CFG clock stays alive. */
@@ -71,9 +72,15 @@ fault:
     return GIULIA_PHY_READBACK;
 }
 
-static int phy_failed(struct giulia_pcie_phy *p, int error)
+static int phy_failed(struct giulia_pcie_phy *p, int error, int retain)
 {
     p->failure = error;
+    if (retain) {
+        /* CESTA is already live: returning to the PHY snapshot would
+         * change clocks behind it. The cold-reset owner has recovery. */
+        p->state = GIULIA_PHY_RESET_REQUIRED;
+        return error;
+    }
     /* Start has not released PERST# or enabled any controller/DMA user. */
     (void)giulia_pcie_phy_stop(p, GIULIA_PHY_STOP_REQUIRED);
     return error;
@@ -91,6 +98,9 @@ int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t prerequisites,
         return GIULIA_PHY_STATE;
     if ((prerequisites & GIULIA_PHY_START_REQUIRED) != GIULIA_PHY_START_REQUIRED)
         return GIULIA_PHY_PREREQUISITE;
+    const int pcs_first = (prerequisites & GIULIA_PHY_PCS_BEFORE_PIPE) != 0;
+    const int retain = (prerequisites & GIULIA_PHY_RETAIN_ON_START_FAILURE) != 0;
+    if (retain && !pcs_first) return GIULIA_PHY_PREREQUISITE;
     reset = io->read32(io->cookie, PHY_RESET);
     start = io->read32(io->cookie, PHY_START);
     power = io->read32(io->cookie, PHY_POWER);
@@ -105,38 +115,37 @@ int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t prerequisites,
     p->failure = 0;
     p->state = GIULIA_PHY_OWNED;
     if (phy_update(p, PHY_RESET, 1u, 1u) || phy_update(p, PHY_POWER, 3u, 3u))
-        return phy_failed(p, GIULIA_PHY_READBACK);
+        return phy_failed(p, GIULIA_PHY_READBACK, retain);
     for (i = 0; i < GIULIA_PCIE_PHY_SETTINGS; ++i) {
         uint32_t off = giulia_pcie_phy_settings[i].offset;
         uint32_t readback;
         p->saved[i] = io->read32(io->cookie, off);
-        if (p->saved[i] == UINT32_MAX) return phy_failed(p, GIULIA_PHY_READBACK);
+        if (p->saved[i] == UINT32_MAX) return phy_failed(p, GIULIA_PHY_READBACK, retain);
         p->saved_count = i + 1;
         io->write32(io->cookie, off, giulia_pcie_phy_settings[i].value);
         io->barrier(io->cookie);
         readback = io->read32(io->cookie, off);
         if (readback == UINT32_MAX || (readback & 0xffu) != giulia_pcie_phy_settings[i].value)
-            return phy_failed(p, GIULIA_PHY_READBACK);
+            return phy_failed(p, GIULIA_PHY_READBACK, retain);
     }
     io->barrier(io->cookie);
-    const int pcs_first = (prerequisites & GIULIA_PHY_PCS_BEFORE_PIPE) != 0;
     if (pcs_first) {
         if (phy_update(p, PHY_RESET, 1u, 0) || phy_update(p, PHY_START, 3u, 3u))
-            return phy_failed(p, GIULIA_PHY_READBACK);
+            return phy_failed(p, GIULIA_PHY_READBACK, retain);
         io->delay_us(io->cookie, 1000);
     }
     /* Mark before callback: a failed enable may have partially voted PIPE. */
     p->pipe_owned = 1;
-    if (io->pipe_enable(io->cookie)) return phy_failed(p, GIULIA_PHY_PIPE);
+    if (io->pipe_enable(io->cookie)) return phy_failed(p, GIULIA_PHY_PIPE, retain);
     if (!pcs_first) {
         if (phy_update(p, PHY_RESET, 1u, 0) || phy_update(p, PHY_START, 3u, 3u))
-            return phy_failed(p, GIULIA_PHY_READBACK);
+            return phy_failed(p, GIULIA_PHY_READBACK, retain);
         io->delay_us(io->cookie, 1000);
     }
     for (i = 0; i <= 50; ++i) {
         p->last_status = io->read32(io->cookie, PHY_STATUS);
         p->polls = i + 1;
-        if (p->last_status == UINT32_MAX) return phy_failed(p, GIULIA_PHY_READBACK);
+        if (p->last_status == UINT32_MAX) return phy_failed(p, GIULIA_PHY_READBACK, retain);
         if (!(p->last_status & PHY_BUSY_BIT)) {
             /* The giulia downstream PCS-first sequence re-reads PHYSTATUS
              * after the first ready sample and before admitting the host.
@@ -145,7 +154,7 @@ int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t prerequisites,
             if (pcs_first) {
                 p->last_status = io->read32(io->cookie, PHY_STATUS);
                 if (p->last_status == UINT32_MAX)
-                    return phy_failed(p, GIULIA_PHY_READBACK);
+                    return phy_failed(p, GIULIA_PHY_READBACK, retain);
             }
             if (!(p->last_status & PHY_BUSY_BIT)) {
                 p->state = GIULIA_PHY_READY;
@@ -157,5 +166,5 @@ int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t prerequisites,
         }
         if (i < 50) io->delay_us(io->cookie, 200);
     }
-    return phy_failed(p, GIULIA_PHY_TIMEOUT);
+    return phy_failed(p, GIULIA_PHY_TIMEOUT, retain);
 }

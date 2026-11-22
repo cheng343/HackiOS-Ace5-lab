@@ -75,6 +75,7 @@ static struct {
     uint32_t crm_all_states, sm_diag, watchdog_trial, cold_reset, cx_sel_voted, cx_level_voted;
     uint32_t pcs_first, early_reset_armed, native_width, stock_perf, stock_train;
     uint32_t noc_step, pre_phy_clks, x1_id, keep_sls, endpoint_io_window;
+    uint32_t cesta_early_start, cesta_early_verified;
     int noc_rc, crm_rc, arc_rc, gem_rc, qos_rc;
 } wb;
 
@@ -178,10 +179,15 @@ static int wb_irq_acquire(void)
 /* Unlike cfg_ok(), which validates negotiated PCIe link conditions,
  * this guard checks board ownership. Shared memory can invalidate a lease
  * without any PCIe access. Check it FIRST, before touching even the GIC. */
+static int wb_reset_lease_required(void)
+{
+    return wb.endpoint_io_window || wb.bringup.cesta_reset_required;
+}
+
 static int wb_guard_shared(void)
 {
     return !wb.guard_failed && wb.irq_dirty && wb.quiet && wb_quiet_ok() &&
-        (!wb.endpoint_io_window || (wb.quiet->reset_request == 1 &&
+        (!wb_reset_lease_required() || (wb.quiet->reset_request == 1 &&
          wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED));
 }
 
@@ -190,13 +196,13 @@ static int wb_guard(void)
     if (wb_guard_shared()) {
         uint32_t enabled = wb_mmio(&wb.gic, 0x104);
         if (enabled != UINT32_MAX && !(enabled & WB_IRQ) &&
-            (!wb.endpoint_io_window || wb_guard_shared())) {
+            (!wb_reset_lease_required() || wb_guard_shared())) {
             uint32_t active = wb_mmio(&wb.gic, 0x304);
             if (active != UINT32_MAX && !(active & WB_IRQ) &&
-                (!wb.endpoint_io_window || wb_guard_shared())) return 1;
+                (!wb_reset_lease_required() || wb_guard_shared())) return 1;
         }
     }
-    if (wb.endpoint_io_window) {
+    if (wb_reset_lease_required()) {
         wb.guard_failed = 1;
         wb.endpoint_reset_unconfirmed = 1; /* no further cleanup MMIO */
     }
@@ -209,8 +215,16 @@ static int wb_guard(void)
  * A lease check cannot cancel an already issued MMIO transaction. */
 static int wb_endpoint_io_ok(void)
 {
-    if (wb.endpoint_io_window) return wb_guard();
+    if (wb_reset_lease_required()) return wb_guard();
     return !(wb.sm_diag == WB_SM_ENDPOINT && wb.guard_failed);
+}
+
+/* After early START, also guard raw read-only register groups one word at a
+ * time. Legacy timing is unchanged; do not recurse through the GIC guard. */
+static uint32_t wb_retained_read(struct wb_map *map, uint32_t off)
+{
+    if (wb.bringup.cesta_reset_required && !wb_endpoint_io_ok()) return UINT32_MAX;
+    return wb_mmio(map, off);
 }
 
 static int wb_irq_release(void)
@@ -249,9 +263,16 @@ static void wb_rpmh_w(void *c, uint32_t off, uint32_t v)
 static struct wb_map *pwr_blk(unsigned blk)
 { return blk == GIULIA_POWER_GCC ? &wb.gcc : &wb.tcsr; }
 static uint32_t wb_pwr_r(void *c, unsigned blk, uint32_t off)
-{ (void)c; return wb_mmio(pwr_blk(blk), off); }
+{
+    (void)c;
+    if (wb.bringup.cesta_reset_required && !wb_endpoint_io_ok()) return UINT32_MAX;
+    return wb_mmio(pwr_blk(blk), off);
+}
 static void wb_pwr_w(void *c, unsigned blk, uint32_t off, uint32_t v)
-{ (void)c; wb_store(pwr_blk(blk), off, v); }
+{
+    (void)c;
+    if (!wb.bringup.cesta_reset_required || wb_endpoint_io_ok()) wb_store(pwr_blk(blk), off, v);
+}
 
 static struct wb_map *link_reg(unsigned reg)
 {
@@ -298,8 +319,17 @@ static void wb_link_w16(void *c, unsigned r, uint32_t off, uint16_t v)
     wb_barrier(0);
 }
 
-static uint32_t wb_phy_r(void *c, uint32_t off) { (void)c; return wb_mmio(&wb.phy, off); }
-static void wb_phy_w(void *c, uint32_t off, uint32_t v) { (void)c; wb_store(&wb.phy, off, v); }
+static uint32_t wb_phy_r(void *c, uint32_t off)
+{
+    (void)c;
+    if (wb.bringup.cesta_reset_required && !wb_endpoint_io_ok()) return UINT32_MAX;
+    return wb_mmio(&wb.phy, off);
+}
+static void wb_phy_w(void *c, uint32_t off, uint32_t v)
+{
+    (void)c;
+    if (!wb.bringup.cesta_reset_required || wb_endpoint_io_ok()) wb_store(&wb.phy, off, v);
+}
 /* wb_map.size covers the whole page-aligned allocation, not the usable tail
  * starting at address. Never let an absent or short mapping reach wb_mmio. */
 static int wb_map_covers(const struct wb_map *m, vm_size_t bytes)
@@ -415,6 +445,7 @@ static int wb_release_noc(__unused void *cookie)
 }
 
 static int wb_arm_early_reset(void);
+static int wb_start_cesta_before_bcr(void);
 
 /* Check the GPIO input and output latch without touching the controller.
  * The NoC stage uses this before PARF is available. */
@@ -508,6 +539,15 @@ static int wb_prepare_noc(__unused void *cookie, struct giulia_wifi_supply *supp
         wb_log("ace5-wifi-bringup: noc ready policy=%u patches=%u cx_sel=%u(lvl=%u) crm_pwr_idx=%#x cnoc_sf=%#x\n",
             crm_policy, patch_count, wb.cx_sel_voted, wb.cx_level_voted, pwr_idx, cnoc_sf);
     }
+    if (wb.cesta_early_start) {
+        /* Keep the proven PERF/GEM/QoS setup outside the irreversible START.
+         * Their own failure paths can roll back clocks and resource votes. */
+        rc = wb_start_cesta_before_bcr();
+        if (rc != GIULIA_CESTA_OK) {
+            wb.noc_rc = rc;
+            return rc;
+        }
+    }
     wb.noc_step = 0; wb.noc_rc = 0;
     return 0;
 }
@@ -528,11 +568,11 @@ static int wb_verify_noc(__unused void *cookie)
     if (wb_crm_r(0, 0x1000u, &before_busy) || wb_crm_r(0, 0x1020u, &before_update) ||
         wb_crm_r(0, 0x3f0u, &pwr_idx))
         return GIULIA_CRM_IO;
-    votes0 = wb_mmio(&wb.gcc, 0x52000u);
-    votes1 = wb_mmio(&wb.gcc, 0x52008u);
-    cnoc = wb_mmio(&wb.gcc, 0x10058u);
-    aggregate = wb_mmio(&wb.gcc, 0x10064u);
-    ddr = wb_mmio(&wb.gcc, 0x10074u);
+    votes0 = wb_retained_read(&wb.gcc, 0x52000u);
+    votes1 = wb_retained_read(&wb.gcc, 0x52008u);
+    cnoc = wb_retained_read(&wb.gcc, 0x10058u);
+    aggregate = wb_retained_read(&wb.gcc, 0x10064u);
+    ddr = wb_retained_read(&wb.gcc, 0x10074u);
     if (wb_crm_r(0, 0x1000u, &after_busy) || wb_crm_r(0, 0x1020u, &after_update))
         return GIULIA_CRM_IO;
     if (!wb_guard()) {
@@ -554,13 +594,13 @@ static int wb_verify_noc(__unused void *cookie)
     if ((votes0 & required0) != required0 || (votes1 & required1) != required1)
         return GIULIA_POWER_READBACK;
     if (wb.sm_diag) {
-        uint32_t start = wb_mmio(&wb.pcie_sm, 0x1090u);
+        uint32_t start = wb_retained_read(&wb.pcie_sm, 0x1090u);
         if (start == UINT32_MAX) return GIULIA_CRM_IO;
-        uint32_t branch = wb_mmio(&wb.pcie_sm, 0x1000u);
+        uint32_t branch = wb_retained_read(&wb.pcie_sm, 0x1000u);
         if (branch == UINT32_MAX) return GIULIA_CRM_IO;
-        uint32_t override = wb_mmio(&wb.pcie_sm, 0x1040u);
+        uint32_t override = wb_retained_read(&wb.pcie_sm, 0x1040u);
         if (override == UINT32_MAX) return GIULIA_CRM_IO;
-        uint32_t clkreq = wb_mmio(&wb.pcie_sm, 0x109cu);
+        uint32_t clkreq = wb_retained_read(&wb.pcie_sm, 0x109cu);
         if (clkreq == UINT32_MAX) return GIULIA_CRM_IO;
         if (!wb_guard()) {
             wb.guard_failed = 1;
@@ -568,6 +608,16 @@ static int wb_verify_noc(__unused void *cookie)
         }
         wb_log("ace5-wifi-bringup: post-phy cesta start=%#x branch0=%#x override=%#x clkreq=%#x\n",
             start, branch, override, clkreq);
+        if (wb.cesta_early_start) {
+            const uint8_t *word = wb.cesta_profile + 4u * GIULIA_CESTA_SEQUENCE_WORDS;
+            uint32_t expected = (uint32_t)word[0] << 24 | (uint32_t)word[1] << 16 |
+                (uint32_t)word[2] << 8 | word[3];
+            if (!wb.cesta_early_verified || !wb.bringup.cesta_reset_required ||
+                start != 1u || branch != expected || override != 0u) {
+                wb_log("ace5-wifi-bringup: early CESTA state changed across BCR/PHY; no retry\n");
+                return GIULIA_CRM_DRIFT;
+            }
+        }
     }
     return GIULIA_BRINGUP_OK;
 }
@@ -577,6 +627,7 @@ static int wb_perst_held(void)
     if (!wb_perst_gpio_low() || !wb_endpoint_io_ok() ||
         (wb_mmio(&wb.parf, 0x1b0u) & (1u << 8))) {
         wb.guard_failed = 1;
+        if (wb.bringup.cesta_reset_required) wb.endpoint_reset_unconfirmed = 1;
         return -1;
     }
     return 0;
@@ -606,6 +657,7 @@ static int wb_cesta_table_lease(__unused void *cookie)
 static int wb_cesta_table_read(__unused void *cookie, uint32_t off, uint32_t *value)
 {
     if ((off & 3u) || off >= GIULIA_NOC_SM_SIZE) return -1;
+    if (wb.bringup.cesta_reset_required && !wb_endpoint_io_ok()) return -1;
     if (wb.sm_diag == WB_SM_TABLES)
         wb_log("ace5-wifi-bringup: cesta read begin off=%#x\n", off);
     *value = wb_mmio(&wb.pcie_sm, off);
@@ -750,6 +802,104 @@ static const struct giulia_cesta_io wb_cesta_table_io = {
     .barrier = wb_barrier, .validate_lease = wb_cesta_table_lease,
     .validate_reset = wb_arm_cold_reset
 };
+
+static int wb_early_reset_confirmed(void)
+{
+    return wb.early_reset_armed && wb.quiet &&
+        wb.quiet->reset_request == 1 && wb.quiet->reset_ack == LOADER_QUIET_RESET_ARMED;
+}
+
+/* Pre-BCR admission is distinct from the post-PHY lease. Only the mapped
+ * state-manager and an already owned GPIO are available here; no PARF/DBI. */
+static int wb_early_cesta_lease(__unused void *cookie)
+{
+    struct giulia_wifi_bringup *b = &wb.bringup;
+    if (wb.cesta_early_start != 1 || wb.sm_diag != WB_SM_ENDPOINT ||
+        wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.stock_perf != 1 ||
+        wb.pcs_first != 1 || wb.native_width != 1 || wb.cold_reset != 1 ||
+        wb.crm_all_states || wb.watchdog_trial || wb.pre_phy_clks || wb.stock_train ||
+        wb.x1_id || wb.keep_sls || !wb.pcie_sm.address || wb.pcie_sm.size < GIULIA_NOC_SM_SIZE ||
+        wb.cesta_early_verified ||
+        b->stage != GIULIA_BRINGUP_NOC_STAGE || b->supply.state != GIULIA_SUPPLY_HOST_PREPARED ||
+        b->supply.power.state != GIULIA_POWER_HOST_PREPARED || b->supply.power.reset_attempted ||
+        b->supply.gpio.state != GIULIA_WGPIO_ON || b->link.state != GIULIA_LINK_IDLE ||
+        b->link.parf_owned || b->link.core_owned || b->phy.state != GIULIA_PHY_IDLE || b->pipe_checked ||
+        !wb_early_reset_confirmed() || !wb_guard() || !wb_early_reset_confirmed())
+        return -1;
+    if (!wb_perst_gpio_low()) {
+        if (b->cesta_reset_required) {
+            wb.guard_failed = 1;
+            wb.endpoint_reset_unconfirmed = 1;
+        }
+        return -1;
+    }
+    return wb_guard_shared() && wb_early_reset_confirmed() ? 0 : -1;
+}
+
+static int wb_early_cesta_read(void *cookie, uint32_t off, uint32_t *value)
+{
+    const uint32_t branch = GIULIA_CESTA_BRANCH_OFFSET;
+    if (!value || (off & 3u) ||
+        (off >= 4u * GIULIA_CESTA_SEQUENCE_WORDS &&
+         (off < branch || off >= branch + 4u * GIULIA_CESTA_BRANCH_WORDS) &&
+         off != GIULIA_CESTA_START_OFFSET && off != 0x1040u && off != 0x1048u) ||
+        wb_early_cesta_lease(cookie))
+        return -1;
+    *value = wb_mmio(&wb.pcie_sm, off);
+    return 0;
+}
+
+static int wb_early_cesta_write(void *cookie, uint32_t off, uint32_t value)
+{
+    const uint32_t branch = GIULIA_CESTA_BRANCH_OFFSET;
+    if (wb.bringup.cesta_reset_required || wb_early_cesta_lease(cookie)) return -1;
+    if (off == GIULIA_CESTA_START_OFFSET) {
+        if (value != 1) return -1;
+        /* The attempted write may take effect even if verification fails.
+         * Never issue a second START or withdraw supplies from this path. */
+        wb.bringup.cesta_reset_required = 1;
+        wb_log("ace5-wifi-bringup: cesta START write begin\n");
+        if (wb_early_cesta_lease(cookie)) return -1;
+        wb_store(&wb.pcie_sm, off, value);
+        wb_log("ace5-wifi-bringup: cesta START write returned\n");
+        return 0;
+    }
+    if ((off & 3u) || (off >= 4u * GIULIA_CESTA_SEQUENCE_WORDS &&
+        (off < branch || off >= branch + 4u * GIULIA_CESTA_BRANCH_WORDS)))
+        return -1;
+    wb_store(&wb.pcie_sm, off, value);
+    return 0;
+}
+
+static int wb_start_cesta_before_bcr(void)
+{
+    static const struct giulia_cesta_io io = {
+        .read = wb_early_cesta_read, .write = wb_early_cesta_write,
+        .barrier = wb_barrier, .validate_lease = wb_early_cesta_lease,
+        .validate_reset = wb_early_cesta_lease
+    };
+    struct giulia_cesta sm = {0};
+    const uint32_t len = 4u * GIULIA_CESTA_SEQUENCE_WORDS;
+    uint32_t start_status;
+    if (wb.bringup.cesta_reset_required || wb_early_cesta_lease(0)) return GIULIA_CESTA_LEASE;
+    int rc = giulia_cesta_stage(&sm, &io, wb.cesta_profile, len,
+        wb.cesta_profile + len, WB_SM_PROFILE_BYTES - len,
+        GIULIA_CESTA_BRANCH_OFFSET, GIULIA_CESTA_START_OFFSET);
+    if (rc == GIULIA_CESTA_OK) rc = giulia_cesta_start(&sm);
+    if (sm.state == GIULIA_CESTA_RESET_REQUIRED) {
+        wb.bringup.cesta_reset_required = 1;
+        if (rc != GIULIA_CESTA_RETAINED) return rc;
+        if (wb_early_cesta_read(0, GIULIA_CESTA_START_OFFSET, &start_status) ||
+            start_status != 1u || wb_early_cesta_lease(0)) return GIULIA_CESTA_IO;
+        wb.cesta_early_verified = 1;
+        wb_log("ace5-wifi-bringup: early CESTA START verified before BCR\n");
+        return GIULIA_CESTA_OK;
+    }
+    /* Keep the first failure. Only an idle, still-owned table may unwind. */
+    if (sm.dirty && giulia_cesta_discard(&sm) != GIULIA_CESTA_OK)
+        wb.bringup.cesta_reset_required = 1;
+    return rc;
+}
 
 static int wb_cesta_read_cold(void)
 {
@@ -950,11 +1100,11 @@ static int wb_cesta_pre_dbi(void)
 
     /* crm.c's PCIe VCD0 crm_c window, distinct from the CRM HW DRV's PWR_IDX_STATUS. */
     wb_log("ace5-wifi-bringup: CESTA perf read begin\n");
-    uint32_t current = wb_mmio(&wb.crm_c, 0xcu);
-    uint32_t aggregate = wb_mmio(&wb.crm_c, 0x4u);
-    uint32_t sequence = wb_mmio(&wb.crm_c, 0x1a0u);
+    uint32_t current = wb_retained_read(&wb.crm_c, 0xcu);
+    uint32_t aggregate = wb_retained_read(&wb.crm_c, 0x4u);
+    uint32_t sequence = wb_retained_read(&wb.crm_c, 0x1a0u);
     const uint32_t keep_clk = (1u << 6) | (1u << 1);
-    uint32_t sys = wb_mmio(&wb.parf, 0);
+    uint32_t sys = wb_retained_read(&wb.parf, 0);
     if (current == UINT32_MAX || aggregate == UINT32_MAX ||
         sequence == UINT32_MAX || sys == UINT32_MAX)
         return GIULIA_LINK_READBACK;
@@ -973,8 +1123,10 @@ static int wb_cesta_pre_dbi(void)
     /* Match the vendor PARF_SYS_CTRL=0x365e clock-removal bits, and preserve
      * every unrelated bit. CESTA already requires a reset for teardown. */
     if ((sys & keep_clk) != keep_clk) {
+        if (wb.bringup.cesta_reset_required && !wb_endpoint_io_ok()) return GIULIA_LINK_PREREQUISITE;
         wb_store(&wb.parf, 0, sys | keep_clk);
-        if (wb_mmio(&wb.parf, 0) != (sys | keep_clk))
+        if (wb.bringup.cesta_reset_required && !wb_endpoint_io_ok()) return GIULIA_LINK_PREREQUISITE;
+        if (wb_retained_read(&wb.parf, 0) != (sys | keep_clk))
             return GIULIA_LINK_READBACK;
     }
     wb_log("ace5-wifi-bringup: DBI clock guard sys=%#x\n", sys | keep_clk);
@@ -982,6 +1134,26 @@ static int wb_cesta_pre_dbi(void)
         return wb_pcie_identify_endpoint();
     int rc = giulia_pcie_link_read_root_id(&wb.bringup.link, GIULIA_LINK_PREPARE_REQUIRED);
     wb_log("ace5-wifi-bringup: DBI root id rc=%d id=%#x\n", rc, wb.bringup.link.root_id);
+    return rc;
+}
+
+static int wb_cesta_finish_early(void)
+{
+    uint32_t start;
+    if (!wb.cesta_early_verified || !wb.bringup.cesta_reset_required ||
+        !wb_early_reset_confirmed() || wb_stage4_reset_lease() ||
+        !wb_early_reset_confirmed() || wb_cesta_table_read(0, GIULIA_CESTA_START_OFFSET, &start) ||
+        start != 1u)
+        return GIULIA_CESTA_STATE;
+    int observed = wb_cesta_observe();
+    wb_log("ace5-wifi-bringup: cesta START result=%d observe=%d; retained until reset\n",
+        GIULIA_CESTA_RETAINED, observed);
+    if (observed != GIULIA_CESTA_OK || !wb_early_reset_confirmed() ||
+        wb_stage4_reset_lease() || wb_cesta_table_read(0, GIULIA_CESTA_START_OFFSET, &start) ||
+        start != 1u)
+        return GIULIA_CESTA_STATE;
+    int rc = wb_cesta_pre_dbi();
+    wb_log("ace5-wifi-bringup: CESTA follow-up rc=%d\n", rc);
     return rc;
 }
 
@@ -1266,6 +1438,13 @@ static void wb_thread(void *arg, __unused wait_result_t wait)
             if (wb.guard_failed) goto release;
             if (wdt_rc) goto stop;
         }
+        if (wb.cesta_early_start) {
+            int sm_rc = wb_cesta_finish_early();
+            if (sm_rc)
+                wb_log("ace5-wifi-bringup: early CESTA follow-up stopped rc=%d; no START replay\n", sm_rc);
+            if (sm_rc && !wb.bringup.cesta_reset_required) goto stop;
+            goto release;
+        }
         if (wb.sm_diag >= WB_SM_TABLES) {
             int sm_rc = wb.sm_diag >= WB_SM_STAGE ? wb_cesta_stage_and_discard() : wb_cesta_read_cold();
             if (wb.guard_failed) goto release;
@@ -1296,6 +1475,13 @@ release:
          * bus access here; leave an already armed independent reset alone. */
         wb.guard_failed = 1;
         wb_log("ace5-wifi-bringup: PERST# unconfirmed; link cleanup withheld, IRQ37 and firmware quiet retained until cold reset\n");
+        goto retained;
+    }
+    if (wb.bringup.cesta_reset_required) {
+        wb.guard_failed = 1;
+        wb_log("ace5-wifi-bringup: early CESTA state retained until cold reset\n");
+        if (!wb.endpoint_reset_unconfirmed && wb_early_reset_confirmed())
+            loader_return();
         goto retained;
     }
     if (wb.early_reset_armed) {
@@ -1372,6 +1558,19 @@ void giulia_wifi_bringup_init(void)
         wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.sm_diag != WB_SM_ENDPOINT)) {
         wb_log("ace5-wifi-bringup: native x1 ID requires stage 4 mode 7 native width and cold reset\n");
         return;
+    }
+    if (PE_parse_boot_argn("ace5_wifi_cesta_early_start", &wb.cesta_early_start,
+        sizeof(wb.cesta_early_start))) {
+        uint32_t log_reboot = 0;
+        if (wb.cesta_early_start != 1 || wb.stock_perf != 1 ||
+            wb.native_width != 1 || wb.pcs_first != 1 || wb.cold_reset != 1 ||
+            wb.sm_diag != WB_SM_ENDPOINT || wb.max_stage != GIULIA_BRINGUP_PHY_START ||
+            seconds < 60 || wb.watchdog_trial || wb.crm_all_states || wb.stock_train ||
+            wb.pre_phy_clks || wb.x1_id || wb.keep_sls ||
+            PE_parse_boot_argn("ace5_wifi_log_reboot", &log_reboot, sizeof(log_reboot))) {
+            wb_log("ace5-wifi-bringup: early CESTA requires the isolated stock PERF stage 4 endpoint profile\n");
+            return;
+        }
     }
     if (wb.pre_phy_clks && (wb.pre_phy_clks != 1 || !wb.pcs_first ||
         !wb.cold_reset || wb.max_stage != GIULIA_BRINGUP_PHY_START || wb.sm_diag != WB_SM_ENDPOINT)) {

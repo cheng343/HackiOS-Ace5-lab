@@ -53,7 +53,9 @@ struct giulia_wifi_bringup_config {
     struct giulia_mhi_snapshot_io mhi;
     void *noc_cookie;
     /* Optional hook invoked after HOST_PREPARED (e.g. CESTA/CRM/QoS setup)
-     * before finishing PCIe BCR reset. Zero means NoC/QoS is ready. */
+     * before finishing PCIe BCR reset. Zero means NoC/QoS is ready. The
+     * guarded Stage 4 adapter owns the independent reset and marks its outer
+     * coordinator's cesta_reset_required before exposing any unsafe unwind. */
     int (*prepare_noc)(void *cookie, struct giulia_wifi_supply *supply);
     /* Runs while host clocks/domains are still owned, after link/PHY stop.
      * Restore QoS before its clocks. Return OK only after managed resources
@@ -82,6 +84,9 @@ struct giulia_wifi_bringup {
     /* Sticky until a separate cold session: an endpoint reset edge could not
      * be confirmed. No cleanup is allowed to infer isolation from GPIO_FAULT. */
     uint32_t perst_unconfirmed;
+    /* A pre-BCR CESTA START may have taken effect, or its table cannot
+     * safely be restored. Preserve all owned dependencies until cold reset. */
+    uint32_t cesta_reset_required;
     uint32_t pipe_checked, pipe_cbcr;
     int error, sub_error, cleanup_error;
 };

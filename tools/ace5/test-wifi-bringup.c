@@ -57,11 +57,32 @@ int giulia_pcie_power_pipe_disable(struct giulia_pcie_power *p) { p->state = GIU
 int giulia_pcie_power_stop(struct giulia_pcie_power *p, uint32_t f)
 { assert(f & GIULIA_POWER_STOP_CESTA_RESOURCES_QUIET); assert(host_on && !noc_owned); int rc=ev('p',GIULIA_POWER_TIMEOUT); p->state=rc?GIULIA_POWER_FAULT:GIULIA_POWER_STOPPED; if(!rc)host_on=0; return rc; }
 int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *l, uint32_t f, const struct giulia_pcie_link_io *io)
-{ assert(f == (GIULIA_LINK_PARF_REQUIRED | GIULIA_LINK_COLD_RESET_MASK)); l->io = *io; int rc = ev('A', GIULIA_LINK_BUSY); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_PARF_READY; return rc; }
+{
+    uint32_t required = GIULIA_LINK_PARF_REQUIRED | GIULIA_LINK_COLD_RESET_MASK;
+    if (strchr(trace, 'J')) required |= GIULIA_LINK_RETAIN_PARF_ON_FAILURE;
+    assert(f == required);
+    l->io = *io;
+    int rc = ev('A', GIULIA_LINK_BUSY);
+    l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_PARF_READY;
+    return rc;
+}
 int giulia_pcie_link_prepare(struct giulia_pcie_link *l, uint32_t f)
 { assert(f == GIULIA_LINK_PREPARE_REQUIRED && l->state == GIULIA_LINK_PARF_READY); int rc = ev('L', GIULIA_LINK_BUSY); l->state = rc ? GIULIA_LINK_FAULT : GIULIA_LINK_PREPARED; return rc; }
 int giulia_pcie_phy_start(struct giulia_pcie_phy *p, uint32_t f, const struct giulia_pcie_phy_io *io)
-{ assert(!!(f & GIULIA_PHY_PCS_BEFORE_PIPE) == !!strchr(trace, 'K')); p->io = *io; int rc = ev('Y', GIULIA_PHY_TIMEOUT); if (!rc) { assert(!io->pipe_enable(io->cookie)); p->state = GIULIA_PHY_READY; } else p->state = GIULIA_PHY_FAULT; return rc; }
+{
+    assert(!!(f & GIULIA_PHY_PCS_BEFORE_PIPE) == !!strchr(trace, 'K'));
+    assert(!!(f & GIULIA_PHY_RETAIN_ON_START_FAILURE) == !!strchr(trace, 'J'));
+    p->io = *io;
+    int rc = ev('Y', GIULIA_PHY_TIMEOUT);
+    if (!rc) {
+        assert(!io->pipe_enable(io->cookie));
+        p->state = GIULIA_PHY_READY;
+    } else {
+        p->state = (f & GIULIA_PHY_RETAIN_ON_START_FAILURE) ?
+            GIULIA_PHY_RESET_REQUIRED : GIULIA_PHY_FAULT;
+    }
+    return rc;
+}
 int giulia_pcie_phy_stop(struct giulia_pcie_phy *p, uint32_t f)
 { (void)f; int rc=ev('y',GIULIA_PHY_TIMEOUT); if(rc){p->state=GIULIA_PHY_FAULT;return rc;} assert(!p->io.pipe_disable(p->io.cookie)); p->state = GIULIA_PHY_STOPPED; return 0; }
 int giulia_wifi_gpio_perst_release(struct giulia_wifi_gpio *g, uint32_t f)
@@ -121,6 +142,18 @@ int giulia_mhi_snapshot(const struct giulia_mhi_snapshot_io *io, uint32_t f, str
   return rc; }
 
 static int noc_prep(void *cookie, struct giulia_wifi_supply *s) { (void)cookie; (void)s; assert(host_on); noc_owned=1; return ev('N', -1); }
+static int noc_prep_early(void *cookie, struct giulia_wifi_supply *s)
+{
+    struct giulia_wifi_bringup *b = cookie;
+    assert(b->stage == GIULIA_BRINGUP_NOC_STAGE && s == &b->supply);
+    assert(b->noc_started && s->power.state == GIULIA_POWER_HOST_PREPARED &&
+        !s->power.reset_attempted && s->gpio.state == GIULIA_WGPIO_ON &&
+        b->link.state == GIULIA_LINK_IDLE && b->phy.state == GIULIA_PHY_IDLE &&
+        !b->cesta_reset_required);
+    assert(!noc_prep(cookie, s));
+    b->cesta_reset_required = 1; /* Model attempted START, even if outcome is unknown. */
+    return ev('J', -42);
+}
 static int noc_rel(void *cookie) { (void)cookie; assert(host_on && noc_owned); int rc=ev('n',-1); if(!rc)rc=noc_release_rc; if(!rc)noc_owned=0; return rc; }
 static int noc_verify(void *cookie) { (void)cookie; assert(host_on && noc_owned); return ev('V', -1); }
 static int arm_pcs_first(void) { assert(host_on && noc_owned); return ev('K', -1); }
@@ -342,6 +375,44 @@ int main(void)
     stop_fail = 0;
     assert(!giulia_wifi_bringup_start(&b, &cfg) && !strcmp(trace, "SNPAKYEC"));
     assert(giulia_wifi_bringup_stop(&b)==GIULIA_BRINGUP_RETAINED);
+
+    /* Real coordinator: an irreversible pre-BCR callback can continue only
+     * in Stage 4 and must retain everything on any subsequent failure. */
+    cfg.prepare_noc = noc_prep_early;
+    cfg.noc_cookie = &b;
+    cfg.verify_noc = noc_verify;
+    const struct {
+        int fault, rc, sub_error;
+        unsigned stage;
+        const char *trace;
+    } cesta_cases[] = {
+        {3, GIULIA_BRINGUP_PREREQUISITE, -42, GIULIA_BRINGUP_NOC_STAGE, "SNJ"},
+        {-1, GIULIA_BRINGUP_PREREQUISITE, 0, GIULIA_BRINGUP_NOC_STAGE, "SNJ"},
+        {4, GIULIA_BRINGUP_POWER, GIULIA_POWER_TIMEOUT, GIULIA_BRINGUP_POWER_RESET, "SNJP"},
+        {5, GIULIA_BRINGUP_LINK, GIULIA_LINK_BUSY, GIULIA_BRINGUP_PHY_START, "SNJPA"},
+        {7, GIULIA_BRINGUP_PHY, GIULIA_PHY_TIMEOUT, GIULIA_BRINGUP_PHY_START, "SNJPAKY"},
+        {-1, GIULIA_BRINGUP_OK, 0, GIULIA_BRINGUP_PHY_START, "SNJPAKYECV"}
+    };
+    for (unsigned i = 0; i < sizeof(cesta_cases) / sizeof(cesta_cases[0]); ++i) {
+        host_on = noc_owned = 0; /* fresh cold fixture, not an in-place retry */
+        memset(&b, 0, sizeof(b)); memset(trace, 0, sizeof(trace)); tlen = 0;
+        cfg.arm_pcs_first = i == 1 ? NULL : arm_pcs_first;
+        fail_at = cesta_cases[i].fault;
+        int rc = giulia_wifi_bringup_start(&b, &cfg);
+        assert(rc == cesta_cases[i].rc && b.cesta_reset_required && !b.perst_unconfirmed);
+        assert(b.stage == (rc ? GIULIA_BRINGUP_HELD : GIULIA_BRINGUP_PHY_START));
+        assert(b.error == rc && b.sub_error == cesta_cases[i].sub_error && !b.cleanup_error);
+        assert(b.failed_stage == (rc ? cesta_cases[i].stage : 0u));
+        assert(!strcmp(trace, cesta_cases[i].trace) && host_on && noc_owned);
+        before = tlen;
+        assert(giulia_wifi_bringup_stop(&b) == GIULIA_BRINGUP_RETAINED);
+        assert(b.stage == GIULIA_BRINGUP_HELD && b.noc_started);
+        assert(giulia_wifi_bringup_stop(&b) == GIULIA_BRINGUP_RETAINED);
+        assert(giulia_wifi_bringup_start(&b, &cfg) == GIULIA_BRINGUP_STATE);
+        assert(tlen == before && b.error == rc && b.sub_error == cesta_cases[i].sub_error &&
+            !b.cleanup_error && host_on && noc_owned);
+    }
+    puts("PASS: early CESTA keeps NoC, PARF, PHY and PIPE owners until cold reset");
 
     puts("Wi-Fi end-to-end bringup coordinator tests passed");
     puts("Wi-Fi teardown: NoC before power, retained CRM dependencies, all startup stages and stop-failure retries passed");

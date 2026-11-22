@@ -423,7 +423,14 @@ int giulia_pcie_link_prepare_parf(struct giulia_pcie_link *s, uint32_t flags,
     if (!snapshot_parf(s)) return reject(s, GIULIA_LINK_READBACK);
     s->parf_owned = 1;
     s->stage = GIULIA_LINK_STAGE_PARF;
-    if (!configure_parf(s)) return reject_after_parf(s, GIULIA_LINK_READBACK);
+    if (!configure_parf(s)) {
+        /* Restoring the provisional PARF image can gate resources still
+         * needed by a live state manager. The board owner already holds
+         * its reset lease in the opt-in path. Do not issue rollback MMIO. */
+        if (flags & GIULIA_LINK_RETAIN_PARF_ON_FAILURE)
+            return record_failure(s, GIULIA_LINK_READBACK);
+        return reject_after_parf(s, GIULIA_LINK_READBACK);
+    }
     s->state = GIULIA_LINK_PARF_READY;
     return GIULIA_LINK_OK;
 }

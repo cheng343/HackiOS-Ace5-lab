@@ -779,6 +779,48 @@ static void test_split_prepare(void)
     puts("Ace5 PCIe PARF-before-PHY / DBI-after-PIPE and PARF-only shutdown passed");
 }
 
+static void test_parf_retention_with_running_state_manager(void)
+{
+    struct fake f;
+    struct giulia_pcie_link s;
+    const uint32_t base = GIULIA_LINK_PARF_REQUIRED | GIULIA_LINK_COLD_RESET_MASK;
+    for (unsigned retain = 0; retain <= 1; retain++) {
+        init(&f, &s);
+        struct giulia_pcie_link_io io = io_for(&f);
+        f.core_dark = 1;
+        f.regs[GIULIA_LINK_PARF][0x22c / 4] = 0xfe000000u;
+        f.original[GIULIA_LINK_PARF][0x22c / 4] = 0xfe000000u;
+        /* Drop DBI base programming after IRQ mask, type and PHY control
+         * were changed. A restore would immediately gate PHY and unmask IRQ. */
+        f.drop_on = 1;
+        f.drop_region = GIULIA_LINK_PARF;
+        f.drop_offset = 0x350;
+        f.drop_mask = UINT32_MAX;
+        uint32_t flags = base | (retain ? GIULIA_LINK_RETAIN_PARF_ON_FAILURE : 0);
+        assert(giulia_pcie_link_prepare_parf(&s, flags, &io) == GIULIA_LINK_READBACK);
+        assert(s.error == GIULIA_LINK_READBACK && s.failure_stage == GIULIA_LINK_STAGE_PARF);
+        assert(!s.core_owned && !f.core_reads && !f.core_writes);
+        if (retain) {
+            assert(s.state == GIULIA_LINK_FAULT && s.parf_owned && s.parf_count);
+            assert(f.writes == 4); /* No restore, including the mask and PHY. */
+            assert(f.regs[GIULIA_LINK_PARF][0x22c / 4] == 0);
+            assert(!(f.regs[GIULIA_LINK_PARF][0x40 / 4] & 1));
+        } else {
+            assert(s.state == GIULIA_LINK_STOPPED && !s.parf_owned);
+            assert(f.writes > 4);
+            assert(!memcmp(f.regs[GIULIA_LINK_PARF], f.original[GIULIA_LINK_PARF],
+                sizeof(f.regs[GIULIA_LINK_PARF])));
+        }
+    }
+    init(&f, &s);
+    struct giulia_pcie_link_io io = io_for(&f);
+    f.regs[GIULIA_LINK_PARF][0x1b0 / 4] = BIT(8);
+    assert(giulia_pcie_link_prepare_parf(&s, base | GIULIA_LINK_RETAIN_PARF_ON_FAILURE,
+        &io) == GIULIA_LINK_BUSY);
+    assert(!s.parf_owned && !f.writes && !f.core_reads);
+    puts("PASS: running CESTA retains partial PARF setup until cold reset; default rollback intact");
+}
+
 static void test_vendor_training(void)
 {
     struct fake f;
@@ -1273,6 +1315,7 @@ int main(void)
     test_memory_readback_and_retry();
     test_deferred_parf_restore();
     test_split_prepare();
+    test_parf_retention_with_running_state_manager();
     test_vendor_training();
     test_training_samples();
     test_retained_training_evidence();

@@ -78,7 +78,11 @@ enum giulia_pcie_link_prerequisite {
     /* Native x2 root, ID-only: pin the actually negotiated Gen1 width. */
     GIULIA_LINK_NATIVE_X1_ID = 1u << 13,
     /* Identity-only: preserve native Gen3 x2 capability, target and require Gen1. */
-    GIULIA_LINK_PRESERVE_SPEED_CAP = 1u << 14
+    GIULIA_LINK_PRESERVE_SPEED_CAP = 1u << 14,
+    /* A shared state manager is already running. If PARF setup partially
+     * fails, keep its snapshot and clocks as-is; the board owner must
+     * retain its resources until the independently armed cold reset. */
+    GIULIA_LINK_RETAIN_PARF_ON_FAILURE = 1u << 15
 };
 #define GIULIA_LINK_PARF_REQUIRED (GIULIA_LINK_EXCLUSIVE | \
     GIULIA_LINK_RAILS_NOC_READY | GIULIA_LINK_CLOCKS_RC_RESET_READY | \

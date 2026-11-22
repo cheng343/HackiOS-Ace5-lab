@@ -8,11 +8,13 @@ import ast
 import hashlib
 from pathlib import Path
 import re
+import struct
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 SOURCE = Path(__file__).with_name('phone.py')
@@ -21,7 +23,8 @@ FUNCTIONS = {'loader_result', 'check_loader_result', 'wait_for_result', 'collect
              'ace5_driver_arguments', 'ace5_wifi_probe_arguments', 'check_wifi_probe_log', 'ace5_aop_test_arguments',
              'ace5_crm_test_arguments', 'ace5_pdc_test_arguments', 'ace5_cx_vote_arguments',
              'ace5_rpmh_read_arguments', 'check_rpmh_read_log', 'check_rpmh_read_profile',
-             'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf', 'check_stock_train_cmdline', 'finish_log_reboot_launch'}
+             'ace5_wifi_bringup_arguments', 'check_wifi_bringup_log', 'check_stock_startup_perf', 'check_stock_train_cmdline',
+             'check_early_cesta_kernel', 'finish_log_reboot_launch'}
 
 
 class Clock:
@@ -433,6 +436,88 @@ class PhoneTests(unittest.TestCase):
                     {path: {**rc, 'reg-names': b'dm_core\0'}}, {path: {**rc, 'qcom,bw-scale': profile[:-12]}}):
             with self.assertRaisesRegex(RuntimeError, 'three-row'):
                 check(bad)
+
+    def test_early_cesta_is_single_variable_and_rejects_ineligible_cli(self):
+        fn = self.namespace['ace5_wifi_bringup_arguments']
+        table, profile, dtb = (self.directory / n for n in ('pdc', 'sm', 'current.dtb'))
+        table.write_bytes(bytes(508))
+        profile.write_bytes(bytes(80))
+        dtb.write_bytes(b'test-only DTB contents')
+        args = dict(enabled=True, table=table, bootcpu=1, kernel='kernel', seconds=60,
+                    other_hardware=False, live_log=False, stage=4, sm_diag=7, sm_profile=profile, cold_reset=True,
+                    pcs_first=True, native_width=True, stock_perf_dtb=dtb)
+        pcie = {'compatible': b'qcom,pci-msm\0', 'reg-names': b'dm_core\0pcie_sm\0',
+                'qcom,bw-scale': struct.pack('>9I', 64, 64, 19200000, 64, 64, 19200000, 256, 256, 100000000)}
+        fake_share = SimpleNamespace(fdt_properties=Mock(return_value={'/soc/qcom,pcie@1c00000': pcie}))
+        with patch.dict(sys.modules, {'share': fake_share}):
+            with self.assertRaisesRegex(RuntimeError, 'CESTA profile'):
+                fn(**args, early_cesta_start=True)
+            digest = Mock()
+            digest.sha256.return_value.hexdigest.return_value = 'b3ed154a6cabba921d99cf703d70255e2239977683153992c4a8f1cc5211d90e'
+            self.namespace['hashlib'] = digest
+            for seconds in (60, 120):
+                opts = args | {'seconds': seconds}
+                baseline = fn(**opts)
+                early = fn(**opts, early_cesta_start=True)
+                self.assertIn(' ace5_wifi_stock_perf=1', baseline)
+                self.assertNotIn('ace5_wifi_cesta_early_start', baseline)
+                self.assertEqual(early, baseline + ' ace5_wifi_cesta_early_start=1')
+                fake_share.fdt_properties.assert_called_with(dtb.read_bytes())
+                self.namespace['check_stock_train_cmdline'](early)
+            for bad in (dict(enabled=False), dict(stage=3), dict(sm_diag=5), dict(cold_reset=False),
+                        dict(sm_profile=None), dict(native_width=False), dict(pcs_first=False), dict(stock_perf_dtb=None),
+                        dict(seconds=59), dict(seconds=121), dict(log_reboot_nonce='0123456789abcde0'),
+                        dict(stock_train_lanes=True), dict(pre_phy_clocks=True), dict(native_x1_id=True),
+                        dict(preserve_speed_cap=True), dict(other_hardware=True), dict(live_log=True),
+                        dict(bootcpu=0), dict(watchdog=1), dict(crm_all_states=True), dict(kernel=None)):
+                with self.subTest(bad=bad), self.assertRaises(RuntimeError):
+                    fn(**(args | bad), early_cesta_start=True)
+            fake_share.fdt_properties.return_value = {'/soc/qcom,pcie@1c08000': pcie}
+            with self.assertRaisesRegex(RuntimeError, 'three-row'):
+                fn(**args, early_cesta_start=True)
+
+    def test_early_cesta_rejects_baseline_kernel_and_incomplete_results(self):
+        image_check = self.namespace['check_early_cesta_kernel']
+        image_check(b'MachO\x00ace5_wifi_cesta_early_start\x00')
+        for baseline in (b'', b'ace5_wifi_stock_perf\0', b'ace5_wifi_cesta_early_starting\0'):
+            with self.subTest(baseline=baseline), self.assertRaisesRegex(RuntimeError, 'no payload staged'):
+                image_check(baseline)
+
+        check = self.namespace['check_wifi_bringup_log']
+        mark = 'ace5-wifi-bringup: early CESTA START verified before BCR\n'
+        phy = 'ace5-wifi-bringup: PCS-before-PIPE reset armed before PHY access\n'
+        snapshot = 'ace5-wifi-bringup: post-phy cesta start=0x1 branch0=0x4 override=0 clkreq=0\n'
+        report = '\n'.join((
+            'ace5-wifi-bringup: stock D0 reset armed before PERF vote',
+            'ace5-wifi-bringup: start rc=0 stage=4 max=4 failed=0 err=0 sub=0 cleanup=0',
+            'ace5-wifi-bringup: loader cold reset armed',
+            'ace5-wifi-bringup: cesta START write returned',
+            'ace5-wifi-bringup: cesta execution sample=0 start=0x1',
+            'ace5-wifi-bringup: cesta execution sample=1 start=0x1',
+            'ace5-wifi-bringup: cesta START result=1 observe=0; retained until reset',
+            'ace5-wifi-bringup: CESTA perf current=0x4 aggregate=0x4',
+            'ace5-wifi-bringup: CESTA follow-up rc=0',
+            'ace5-wifi-bringup: DBI+0 access returned 0x11317cb',
+            'ace5-wifi-bringup: DBI root id rc=0 id=0x11317cb',
+            'ace5-wifi-bringup: PCIe endpoint identify rc=0 id=0x110717cb lnk=0x2021',
+            'ace5-wifi-bringup: PCIe endpoint reset reassert rc=0',
+            ''))
+        opts = dict(sm_diag=7, cold_reset=True, pcs_first=True, native_width=True, stock_perf=True, early_cesta_start=True)
+        full = mark + phy + snapshot + report
+        check(True, 4, full, 'yes', self.log, **opts)
+        check(True, 4, full * 2, 'yes', self.log, **opts)
+        check(True, 4, phy + snapshot.replace('start=0x1', 'start=0') + report, 'yes', self.log,
+              **(opts | dict(early_cesta_start=False)))
+        for bad in (phy + snapshot + report, phy + mark + snapshot + report, mark + phy + report,
+                    full.replace(snapshot, snapshot.replace('start=0x1', 'start=0')),
+                    full + mark.replace('verified', 'refused'), full + snapshot.replace('start=0x1', 'start=0')):
+            with self.subTest(bad=bad[:140]), self.assertRaisesRegex(RuntimeError, 'Early CESTA START'):
+                check(True, 4, bad, 'yes', self.log, **opts)
+        for failed, reason in ((full.replace('aggregate=0x4', 'aggregate=0x2'), 'startup PERF 4'),
+                               (full.replace('0x110717cb', '0x011317cb'), 'WCN7850 identity'),
+                               (full.replace('write returned', 'write missing'), 'Guarded CESTA START')):
+            with self.subTest(reason=reason), self.assertRaisesRegex(RuntimeError, reason):
+                check(True, 4, failed, 'yes', self.log, **opts)
 
     def test_rpmh_read_profile_uses_current_dt(self):
         fn=self.namespace['check_rpmh_read_profile']

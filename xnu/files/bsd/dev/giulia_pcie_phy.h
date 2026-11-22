@@ -15,7 +15,7 @@ enum giulia_pcie_phy_result {
 };
 enum giulia_pcie_phy_state {
     GIULIA_PHY_IDLE, GIULIA_PHY_OWNED, GIULIA_PHY_READY,
-    GIULIA_PHY_FAULT, GIULIA_PHY_STOPPED
+    GIULIA_PHY_FAULT, GIULIA_PHY_STOPPED, GIULIA_PHY_RESET_REQUIRED
 };
 enum giulia_pcie_phy_prerequisite {
     GIULIA_PHY_EXCLUSIVE = 1u << 0,
@@ -24,7 +24,9 @@ enum giulia_pcie_phy_prerequisite {
     GIULIA_PHY_LINK_QUIET = 1u << 3,
     GIULIA_PHY_PARF_PREPARED = 1u << 4,
     /* Ace 5 downstream trial with PERST# held and independent reset armed. */
-    GIULIA_PHY_PCS_BEFORE_PIPE = 1u << 5
+    GIULIA_PHY_PCS_BEFORE_PIPE = 1u << 5,
+    /* A guarded early CESTA START owns the clocks until cold reset. */
+    GIULIA_PHY_RETAIN_ON_START_FAILURE = 1u << 6
 };
 #define GIULIA_PHY_STOP_REQUIRED (GIULIA_PHY_EXCLUSIVE | \
     GIULIA_PHY_POWER_CLOCKS_READY | GIULIA_PHY_PERST_ASSERTED | GIULIA_PHY_LINK_QUIET)
@@ -55,11 +57,15 @@ struct giulia_pcie_phy {
  * public Ace 5 tuning table, then PIPE, SW_RESET, START. The opt-in trial
  * releases SW_RESET and writes START 1ms before PIPE, as in pci-msm.
  * Polls PHYSTATUS bit6 for <=10ms. No firmware or DMA is involved. On failure,
- * cleanup is attempted before return; FAULT means retain resources/retry. */
+ * cleanup is normally attempted before return; FAULT means retain/retry.
+ * RETAIN_ON_START_FAILURE is valid only with PCS-before-PIPE. After an
+ * attempted PHY write it forces RESET_REQUIRED instead of touching PIPE or
+ * the snapshot again. Only a separate cold session can restart that PHY. */
 int giulia_pcie_phy_start(struct giulia_pcie_phy *, uint32_t prerequisites,
     const struct giulia_pcie_phy_io *);
 /* After upper users stop, assert PERST# and stop the controller first. Stop
  * PIPE, hold PHY reset, clear START, restore saved tuning and controls.
- * A failed stop retains the snapshot; it never reports resources released. */
+ * A failed stop retains the snapshot; it never reports resources released.
+ * RESET_REQUIRED refuses this ordinary stop without touching hardware. */
 int giulia_pcie_phy_stop(struct giulia_pcie_phy *, uint32_t prerequisites);
 #endif

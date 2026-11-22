@@ -178,6 +178,40 @@ static void test_stock_ready_confirmation(void)
     assert(!giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED)); restored(&f, &p);
     puts("PASS: PCS-first PHYSTATUS recovery after relapse stays within original deadline");
 }
+static void test_cesta_start_failure_retention(void)
+{
+    struct fixture f;
+    struct giulia_pcie_phy p;
+    struct giulia_pcie_phy_io bus = io(&f);
+    const uint32_t base = GIULIA_PHY_START_REQUIRED | GIULIA_PHY_RETAIN_ON_START_FAILURE;
+    const uint32_t retained = base | GIULIA_PHY_PCS_BEFORE_PIPE;
+    setup(&f, &p);
+    assert(giulia_pcie_phy_start(&p, base, &bus) == GIULIA_PHY_PREREQUISITE);
+    assert(!f.reads && !f.writes && !f.pipe_on);
+
+    const int errors[] = { GIULIA_PHY_READBACK, GIULIA_PHY_PIPE, GIULIA_PHY_READBACK,
+        GIULIA_PHY_TIMEOUT };
+    for (unsigned n = 0; n < sizeof(errors) / sizeof(errors[0]); ++n) {
+        setup(&f, &p); f.pcs_first = 1;
+        if (n == 0) f.ignore_write = START;
+        if (n == 1) f.pipe_on_fail = 1;
+        if (n == 2) { f.status_override_at = 2; f.status_override = UINT32_MAX; f.ready_after = 0; }
+        if (n == 3) f.ready_after = 1000;
+        assert(giulia_pcie_phy_start(&p, retained, &bus) == errors[n]);
+        assert(p.state == GIULIA_PHY_RESET_REQUIRED && p.failure == errors[n]);
+        assert(p.saved_count == 112 && p.pipe_owned == (n != 0) && f.pipe_live == (n != 0));
+        assert((f.regs[POWER / 4] & 3u) == 3u && f.regs[0x1640 / 4] == 9);
+        assert(f.pipe_on == (n != 0) && !f.pipe_off && !f.reset_writes_after_poll);
+        if (n == 2) assert(p.last_status == UINT32_MAX && f.status_reads == 2);
+        if (n == 3) assert(p.polls == 51 && f.elapsed_us == 11000);
+        const unsigned before = f.reads + f.writes;
+        assert(giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED) == GIULIA_PHY_STATE);
+        assert(giulia_pcie_phy_start(&p, retained, &bus) == GIULIA_PHY_STATE);
+        assert(f.reads + f.writes == before && !f.pipe_off && p.failure == errors[n]);
+    }
+    puts("PASS: early CESTA PHY failures preserve snapshot and PIPE until cold reset");
+}
+
 int main(void)
 {
     struct fixture f;
@@ -259,6 +293,7 @@ int main(void)
     f.ignore_write = UINT32_MAX;
     assert(!giulia_pcie_phy_stop(&p, GIULIA_PHY_STOP_REQUIRED)); restored(&f, &p);
     test_stock_ready_confirmation();
+    test_cesta_start_failure_retention();
     puts("SM8650 QMP PHY: tuning, PIPE ordering, timeout and restore tests passed");
     return 0;
 }

@@ -68,6 +68,11 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
         b->noc_started = 1; /* A failed callback may have published requests. */
         rc = b->cfg.prepare_noc(b->cfg.noc_cookie, &b->supply);
         if (rc) return fail_stop(b, GIULIA_BRINGUP_NOC_STAGE, GIULIA_BRINGUP_PREREQUISITE, rc);
+        /* An irreversible callback is only valid for the independently
+         * guarded PCS-first Stage 4 experiment, never ordinary bring-up. */
+        if (b->cesta_reset_required &&
+            (b->cfg.max_stage != GIULIA_BRINGUP_PHY_START || !b->cfg.arm_pcs_first))
+            return fail_stop(b, GIULIA_BRINGUP_NOC_STAGE, GIULIA_BRINGUP_PREREQUISITE, 0);
         if (b->cfg.max_stage && b->stage >= b->cfg.max_stage) return GIULIA_BRINGUP_OK;
     }
 
@@ -78,9 +83,9 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
 
     b->stage = GIULIA_BRINGUP_PHY_START;
     /* SM8650 resets PARF_INT_MASK (0x22c) non-zero after GCC_PCIE_0_BCR. */
-    rc = giulia_pcie_link_prepare_parf(&b->link,
-        link_base | GIULIA_LINK_PERST_ASSERTED | GIULIA_LINK_COLD_RESET_MASK,
-        &b->cfg.link);
+    uint32_t parf_flags = link_base | GIULIA_LINK_PERST_ASSERTED | GIULIA_LINK_COLD_RESET_MASK;
+    if (b->cesta_reset_required) parf_flags |= GIULIA_LINK_RETAIN_PARF_ON_FAILURE;
+    rc = giulia_pcie_link_prepare_parf(&b->link, parf_flags, &b->cfg.link);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_LINK, rc);
     phy_io = b->cfg.phy;
     phy_io.cookie = b;
@@ -91,6 +96,7 @@ int giulia_wifi_bringup_start(struct giulia_wifi_bringup *b,
         if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_PREREQUISITE, rc);
         phy_req |= GIULIA_PHY_PCS_BEFORE_PIPE;
     }
+    if (b->cesta_reset_required) phy_req |= GIULIA_PHY_RETAIN_ON_START_FAILURE;
     rc = giulia_pcie_phy_start(&b->phy, phy_req, &phy_io);
     if (rc) return fail_stop(b, GIULIA_BRINGUP_PHY_START, GIULIA_BRINGUP_PHY, rc);
     b->pipe_checked = 1;
@@ -157,10 +163,10 @@ int giulia_wifi_bringup_stop(struct giulia_wifi_bringup *b)
         GIULIA_LINK_CLOCKS_RC_RESET_READY;
     if (!b) return GIULIA_BRINGUP_ARGUMENT;
     b->fw_image=(struct giulia_kiwi_image){0}; /* retire the borrowed view even on retained stop */
-    /* Do not call even the GPIO driver to establish ownership of a pin in an
-     * unknown state. Keep all resources until independent recovery. This
-     * precedes MEM disable and every callback, including on a repeated stop. */
-    if (b->perst_unconfirmed) {
+    /* An uncertain PERST# edge or early CESTA commit makes normal cleanup
+     * unsafe. Do not call even GPIO, PIPE, or NoC callbacks; keep the first
+     * failure and all resources for independent recovery on repeated stops. */
+    if (b->perst_unconfirmed || b->cesta_reset_required) {
         b->stage = GIULIA_BRINGUP_HELD;
         return GIULIA_BRINGUP_RETAINED;
     }

@@ -49,7 +49,7 @@ static unsigned wdt_call_count, wdt_fail_at, wdt_disables, wdt_competing;
 #define WDT_RAW_HIGH UINT64_C(0xa5a5beef00000000)
 static unsigned cold_reset, mock_reset_response, loader_returns;
 static unsigned root_id_reads, pcs_first_arg, pre_phy_clks_arg, drop_pre_phy_clock;
-static unsigned keep_sls_arg, suppress_sls_latch;
+static unsigned keep_sls_arg, suppress_sls_latch, drop_early_start;
 static unsigned endpoint_identifies, endpoint_releases, endpoint_reasserts, x1_id_arg, native_width_arg;
 enum pin_fault { PIN_OK, HELD_READ_FAIL, HELD_EN_LOW, HELD_PERST_HIGH,
     RELEASE_READ_FAIL, RELEASE_PERST_LOW, RELEASE_EN_LOW, REASSERT_STUCK_HIGH };
@@ -138,6 +138,13 @@ static int quiet_printf(const char *format,...)
 
 static void wb_test_barrier(void)
 {
+    if (drop_early_start && wb.pcie_sm.address) {
+        uint32_t *sm = (void *)wb.pcie_sm.address;
+        if (sm[GIULIA_CESTA_START_OFFSET / 4] == 1u) {
+            sm[GIULIA_CESTA_START_OFFSET / 4] = 0;
+            drop_early_start = 0;
+        }
+    }
     if (drop_pre_phy_clock && wb.parf.address) {
         uint32_t *sys = (uint32_t *)wb.parf.address;
         if (*sys == 0x365e) { *sys &= ~(1u << 6); drop_pre_phy_clock = 0; }
@@ -459,7 +466,7 @@ static void setup(void)
     ep_critical=identify_rc=lose_owner=release_rc=0;
     lease_event=LEASE_IDLE; first_lease_op=0;
     ep_loader_calls=ep_console_calls=0;
-    keep_sls_arg=suppress_sls_latch=0;
+    keep_sls_arg=suppress_sls_latch=drop_early_start=0;
     root_id_reads=pcs_first_arg=pre_phy_clks_arg=drop_pre_phy_clock=x1_id_arg=native_width_arg=0;
     endpoint_identifies=endpoint_releases=endpoint_reasserts=0;injected_pin_fault=PIN_OK;
     stop_calls=qos_calls=gem_calls=crm_calls=0;start_rc=stop_rc=qos_rc=gem_rc=crm_rc=0;
@@ -701,6 +708,83 @@ static void stock_startup_perf(void)
     assert(wb_arm_early_reset() == 0);
     wb.quiet->reset_ack = LOADER_QUIET_RESET_FAILED;
     assert(wb_arm_early_reset() != 0);
+}
+
+static void early_cesta_adapter(void)
+{
+    for (unsigned phase = 0; phase < 4; phase++) {
+        setup();
+        wb_map(&wb.shared, shared_pa, sizeof(struct loader_firmware_quiet), VM_WIMG_WCOMB);
+        wb.quiet = (void *)wb.shared.address;
+        wb_map(&wb.gic, 0x17100000u, 0x10000u, VM_WIMG_IO);
+        wb_map(&wb.tlmm, GIULIA_WIFI_GPIO_PA, GIULIA_WIFI_GPIO_SIZE, VM_WIMG_IO);
+        wb_map(&wb.pcie_sm, GIULIA_NOC_SM_PHYS, GIULIA_NOC_SM_SIZE, VM_WIMG_IO);
+        wb_map(&wb.crm, GIULIA_NOC_CRM_PHYS, GIULIA_NOC_CRM_SIZE, VM_WIMG_IO);
+        wb_map(&wb.gcc, GIULIA_QOS_GCC_PHYS, GIULIA_QOS_GCC_SIZE, VM_WIMG_IO);
+        wb_map(&wb.phy, 0x01c06000u, 0x2000u, VM_WIMG_IO);
+        /* Deliberately do not map PARF, iATU or DBI during this test. */
+        uint32_t *perst = (void *)(wb.tlmm.address + 94u * 0x1000u);
+        uint32_t *sm = (void *)wb.pcie_sm.address;
+        uint32_t *gcc = (void *)wb.gcc.address;
+        uint32_t *phy = (void *)wb.phy.address;
+        wb.quiet->request = 1;
+        wb_test_barrier();
+        assert(wb_irq_acquire());
+        wb.stock_perf = wb.cold_reset = wb.pcs_first = wb.native_width = wb.cesta_early_start = 1;
+        wb.sm_diag = WB_SM_ENDPOINT;
+        wb.max_stage = GIULIA_BRINGUP_PHY_START;
+        wb.bringup.stage = GIULIA_BRINGUP_NOC_STAGE;
+        wb.bringup.supply.state = GIULIA_SUPPLY_HOST_PREPARED;
+        wb.bringup.supply.power.state = GIULIA_POWER_HOST_PREPARED;
+        wb.bringup.supply.gpio.state = GIULIA_WGPIO_ON;
+        wb.cesta_profile[3] = 1u;
+        wb.cesta_profile[4 * GIULIA_CESTA_SEQUENCE_WORDS + 3] = 4u;
+        perst[0] = 1u << 9;
+        wb.quiet->reset_capability = 1;
+        mock_reset_response = LOADER_QUIET_RESET_ARMED;
+        if (phase == 0u) {
+            perst[1] = 1;
+            assert(wb_arm_early_reset() == 0);
+            assert(wb_start_cesta_before_bcr() == GIULIA_CESTA_LEASE);
+            assert(!sm[0] && !sm[GIULIA_CESTA_START_OFFSET / 4] && !wb.bringup.cesta_reset_required);
+            continue;
+        }
+        if (phase == 1u) {
+            sm[0x1040 / 4] = 9u;
+            assert(wb_arm_early_reset() == 0);
+            assert(wb_start_cesta_before_bcr() == GIULIA_CESTA_BUSY);
+            assert(sm[0x1040 / 4] == 9u && !sm[0] && !wb.bringup.cesta_reset_required);
+            continue;
+        }
+        if (phase == 2u) {
+            drop_early_start = 1;
+            assert(wb_arm_early_reset() == 0);
+            assert(wb_start_cesta_before_bcr() == GIULIA_CESTA_IO);
+            assert(!drop_early_start && wb.bringup.cesta_reset_required && !wb.cesta_early_verified);
+            assert(sm[0] == 1u && !sm[GIULIA_CESTA_START_OFFSET / 4]);
+            assert(wb_start_cesta_before_bcr() == GIULIA_CESTA_LEASE);
+            assert(!sm[GIULIA_CESTA_START_OFFSET / 4]); /* No second START. */
+            continue;
+        }
+        /* Exercise the production adapter callback, not just the table helper. */
+        allow_prepare = 1;
+        assert(wb_prepare_noc(0, &wb.bringup.supply) == 0 && wb.cesta_early_verified);
+        const char *ready = strstr(messages, "noc ready policy=");
+        const char *start = strstr(messages, "early CESTA START verified before BCR");
+        assert(ready && start && ready < start);
+        assert(wb.bringup.cesta_reset_required && sm[GIULIA_CESTA_START_OFFSET / 4] == 1u);
+        /* A revoke after first START must prevent power / PHY traffic. */
+        mock_reset_response = 0;
+        wb.quiet->reset_ack = LOADER_QUIET_RESET_FAILED;
+        gcc[0] = 47u; phy[0] = 53u;
+        assert(wb_pwr_r(0, GIULIA_POWER_GCC, 0) == UINT32_MAX &&
+               wb_phy_r(0, 0) == UINT32_MAX && wb.guard_failed);
+        wb_pwr_w(0, GIULIA_POWER_GCC, 0, 1u);
+        wb_phy_w(0, 0, 1u);
+        assert(gcc[0] == 47u && phy[0] == 53u);
+        assert(wb_cesta_finish_early() == GIULIA_CESTA_STATE);
+    }
+    puts("Wi-Fi XNU early CESTA: ready-before-START, cold ownership, ambiguous START retention and lease revocation");
 }
 
 static void noc_after_phy(void)
@@ -1064,7 +1148,7 @@ int main(void)
     uint64_t bytes=0;
     assert(wb_private_fw_lookup("kiwifw","amss20.bin",&bytes)==fw_fixture);
     assert(bytes==sizeof(fw_fixture) && private_file_calls==1);
-    admission();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();noc_after_phy();setup();
+    admission();cleanup();single_access();bar_callbacks();noc_cleanup();noc_prepare();stock_startup_perf();early_cesta_adapter();noc_after_phy();setup();
     assert(private_file_calls==1); /* No private file read during an earlier diagnostic. */
     puts("Wi-Fi XNU adapter: one requested DBI read, stage markers, truthful cleanup, retained mappings/IRQ/quiet and ordered NoC stop passed");
     puts("Wi-Fi XNU adapter: CESTA cold check under PERST# with no DBI mapping or table writes passed");
